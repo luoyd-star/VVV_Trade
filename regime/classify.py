@@ -1,0 +1,282 @@
+"""状态分类：把三组特征合成为一个可读的市场状态。
+
+规则完全显式（无黑盒），所有阈值集中在 THRESHOLDS——这些是先验起点，
+之后应该用回测来校准，而不是拍脑袋微调。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+
+from .features.pathgeom import path_features
+from .features.structure import efficiency_ratio_series, structure_features
+from .features.utils import pct_rank
+from .features.volatility import volatility_features
+from .features.volume import volume_features
+
+BARS_PER_YEAR = {"1h": 24 * 365, "4h": 6 * 365, "1d": 365}
+
+# 特征计算窗口：walk-forward 入库与面板实时展示**必须用同一个值**，
+# 否则历史攒够后同一根 bar 会给出两个 atr_rank（分位与去季节化因子都对窗长敏感）。
+FEATURE_WINDOW = 400
+
+# 各算子的群延迟（≈窗口一半，单位=根）。原先只写一个硬编码的 15，
+# 而实际上 EMA50 斜率 25、vol_accel 慢腿 36、Donchian 50、EMA200 100、
+# 分位窗 250→125 全都大于 15——把最慢的一条明写出来，别给出没算过的数。
+_OPERATOR_LAG = {
+    "er30": 15, "atr14": 7, "bb20": 10, "ema50_slope": 25,
+    "downside48": 24, "vol_accel72": 36, "donchian100": 50,
+    "ema200": 100, "pct_rank250": 125, "pathgeom120": 60,
+}
+LAG_BARS = {
+    "slowest": max(_OPERATOR_LAG.values()),   # 125（pct_rank 250 的群延迟）
+    "by_operator": _OPERATOR_LAG,
+    "pathgeom": _OPERATOR_LAG["pathgeom120"],
+    "confirm_bars_needed": 3,                 # 恢复震荡需 3 根；额外滞后 = need-1
+}
+
+# 规则版本号：THRESHOLDS 或 classify 规则结构一旦改动必须递增——
+# 不同版本产生的 regime_history 行混在一起会悄悄污染回测统计。
+RULES_VERSION = "v1"
+
+THRESHOLDS = {
+    "er_rank_trend": 0.60,    # ER 分位高于此才算"有趋势效率"
+    "direction_trend": 0.30,  # 方向分绝对值高于此才认趋势
+    "tilt_confirm": 0.10,     # 多空量差站队阈值
+}
+
+STATES = {
+    "trend_up": "趋势上行",
+    "trend_down": "趋势下行",
+    "range": "震荡",
+    "squeeze": "低波动挤压（蓄势）",
+    "high_vol_chop": "高波动无序（转换期）",
+}
+
+# squeeze / high_vol 的判定字面量镜像自 features/volatility.py（那边是硬编码），
+# 两处必须同步改动。margin 计算需要引用这些边界。
+SQUEEZE_BBW = 0.15
+SQUEEZE_ATR = 0.30
+HIGHVOL_ATR = 0.85
+
+
+def _boundary_margin(state: str, d: float, er_rank: float, vol: dict) -> dict:
+    """到最近**能实际翻转输出**的决策边界的归一化距离（regime-spectrum #2 改造版）。
+
+    分层短路树（trend > squeeze > high_vol > range）下不能对所有边界裸取最小距离
+    ——处于 trend 态时 bbw_rank 逼近 0.15 根本改变不了输出。因此按当前态只枚举
+    "可达翻转"：AND 条件的进入距离取未满足项的最大缺口（须全部跨越），
+    OR 式破坏取最小盈余（任一失守即破）。各轴同为 0-1 量纲（分位轴天然 0-1，
+    |direction| 也在 0-1），距离直接可比。margin<0.15 视为"边界过渡中"。
+    仅作展示与审计（影子字段），不参与判定。
+    """
+    ad = abs(d)
+    er_t = THRESHOLDS["er_rank_trend"]
+    d_t = THRESHOLDS["direction_trend"]
+    bbw, atr = vol["bbw_rank"], vol["atr_rank"]
+    to_trend = max(max(0.0, er_t - er_rank), max(0.0, d_t - ad))
+    if state in ("trend_up", "trend_down"):
+        dists = {"exit_trend": min(er_rank - er_t, ad - d_t)}
+    elif state == "squeeze":
+        dists = {
+            "to_trend": to_trend,
+            "exit_squeeze": min(SQUEEZE_BBW - bbw, SQUEEZE_ATR - atr),
+        }
+    elif state == "high_vol_chop":
+        dists = {"to_trend": to_trend, "to_range": atr - HIGHVOL_ATR}
+    else:  # range
+        dists = {
+            "to_trend": to_trend,
+            "to_squeeze": max(max(0.0, bbw - SQUEEZE_BBW), max(0.0, atr - SQUEEZE_ATR)),
+            "to_chop": max(0.0, HIGHVOL_ATR - atr),
+        }
+    nearest, dist = min(dists.items(), key=lambda kv: kv[1])
+    return {"margin": round(max(0.0, float(dist)), 3), "nearest": nearest}
+
+
+@dataclass
+class Regime:
+    state: str
+    confidence: float  # 0..1，子信号的一致程度
+    features: dict = field(default_factory=dict)
+    rules: dict = field(default_factory=dict)  # {"triggered": [...], "unmet": [...]}
+
+    @property
+    def label(self) -> str:
+        return STATES[self.state]
+
+
+def _clip01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def classify(struct: dict, vol: dict, volu: dict, er_rank: float) -> Regime:
+    d = struct["direction"]
+    trending = (
+        er_rank >= THRESHOLDS["er_rank_trend"]
+        and abs(d) >= THRESHOLDS["direction_trend"]
+    )
+
+    # 逐条规则求值——命中与未满足清单随快照入库，是回测与审计的原料
+    checks = {
+        f"er_rank>={THRESHOLDS['er_rank_trend']}": er_rank >= THRESHOLDS["er_rank_trend"],
+        f"abs(dir)>={THRESHOLDS['direction_trend']}": abs(d) >= THRESHOLDS["direction_trend"],
+        "squeeze(bbw<0.15&atr<0.30)": bool(vol["squeeze"]),
+        "high_vol(atr>0.85)": bool(vol["high_vol"]),
+        f"tilt_confirm(|tilt|>{THRESHOLDS['tilt_confirm']})":
+            abs(volu["updown_tilt_20"]) > THRESHOLDS["tilt_confirm"],
+    }
+    rules = {
+        "triggered": [k for k, v in checks.items() if v],
+        "unmet": [k for k, v in checks.items() if not v],
+    }
+
+    if trending:
+        state = "trend_up" if d > 0 else "trend_down"
+        tilt = volu["updown_tilt_20"] * (1 if d > 0 else -1)  # 量能是否站在趋势一边
+        t = THRESHOLDS["tilt_confirm"]
+        vol_confirm = 1.0 if tilt > t else (0.5 if tilt > -t else 0.0)
+        conf = _clip01(0.45 * abs(d) + 0.35 * er_rank + 0.20 * vol_confirm)
+    elif vol["squeeze"]:
+        state = "squeeze"
+        conf = _clip01(1.0 - vol["bbw_rank"])
+    elif vol["high_vol"]:
+        state = "high_vol_chop"
+        conf = _clip01(vol["atr_rank"])
+    else:
+        state = "range"
+        conf = _clip01(0.5 * (1.0 - er_rank) + 0.5 * (1.0 - abs(d)))
+
+    features = {"structure": struct, "volatility": vol, "volume": volu}
+    try:
+        features["margin"] = _boundary_margin(state, d, er_rank, vol)
+    except Exception:  # noqa: BLE001  影子字段绝不允许拖垮主判定
+        features["margin"] = None
+    return Regime(state, round(conf, 2), features, rules=rules)
+
+
+def _confirm_need(state: str) -> int:
+    """非对称迟滞：冲击态立即；恢复震荡（≈NORMAL）要 3 根；其余 2 根。"""
+    if state == "high_vol_chop":
+        return 1
+    if state == "range":
+        return 3
+    return 2
+
+
+def confirm_states(raw_states):
+    """把逐根 raw 状态序列折叠成确认态序列（非对称迟滞）。
+
+    返回 (confirmed_list, candidate)：candidate 是序列末端酝酿中的切换
+    {"state", "count", "need"}，尚未达到确认根数时非 None。
+    """
+    confirmed = []
+    cur = None
+    pending, count = None, 0
+    for raw in raw_states:
+        if cur is None:
+            cur = raw
+        elif raw == cur:
+            pending, count = None, 0
+        else:
+            if raw == pending:
+                count += 1
+            else:
+                pending, count = raw, 1
+            if count >= _confirm_need(raw):
+                cur = raw
+                pending, count = None, 0
+        confirmed.append(cur)
+    candidate = None
+    if pending is not None:
+        candidate = {"state": pending, "count": count, "need": _confirm_need(pending)}
+    return confirmed, candidate
+
+
+def rolling_states_missing(
+    df,
+    timeframe: str,
+    existing_ts_ms,
+    min_bars: int = 90,
+    window: int = FEATURE_WINDOW,
+    session_aware: bool = False,
+):
+    """逐根 K 线做 walk-forward 状态分类，只计算 existing_ts_ms 里没有的时间戳。
+
+    每根 K 线的状态只使用该根及之前的数据（窗口截断到最近 window 根），
+    没有未来函数，与日后回测的口径一致。
+    返回 [(ts_ms, state, confidence, features_json, rules_json, version), ...]——
+    特征值与规则命中随行入库（审计化快照），回测无需重算特征、也不会混用规则版本。
+    """
+    if len(df) < min_bars:
+        return []
+    ts_ms = (df["ts"].astype("int64") // 10**6).tolist()
+    out = []
+    for i in range(min_bars, len(df) + 1):
+        t = ts_ms[i - 1]
+        if t in existing_ts_ms:
+            continue
+        sub = df.iloc[max(0, i - window): i]
+        r = analyze_timeframe(sub, timeframe, session_aware=session_aware)
+        f = r.features
+        audit = {
+            "dir": f["structure"]["direction"],
+            "pivot": f["structure"]["pivot_dir"],
+            "slope": f["structure"]["ema_slope"],
+            "dc": f["structure"]["donchian_pos"],
+            "er": f["er"],
+            "er_rank": f["er_rank"],
+            "atr_rank": f["volatility"]["atr_rank"],
+            "atr_ds": f["volatility"].get("atr_rank_ds"),
+            "bbw_rank": f["volatility"]["bbw_rank"],
+            "rv": f["volatility"]["rv30_annual_pct"],
+            "accel": f["volatility"]["vol_accel"],
+            "dshare": f["volatility"]["downside_share"],
+            "tilt": f["volume"]["updown_tilt_20"],
+            "volz": f["volume"]["vol_z20"],
+            "sq": f["volatility"]["squeeze"],
+            "hv": f["volatility"]["high_vol"],
+            # 影子字段（regime-spectrum 采纳批次一）：仅记录，不参与判定
+            "freq": (f.get("pathgeom") or {}).get("chop_freq"),
+            "domp": (f.get("pathgeom") or {}).get("dom_period"),
+            "tau": (f.get("pathgeom") or {}).get("kendall_tau"),
+            "margin": (f.get("margin") or {}).get("margin"),
+            "m_near": (f.get("margin") or {}).get("nearest"),
+            "lag": (f.get("lag_bars") or {}).get("slowest"),
+        }
+        out.append(
+            (
+                t,
+                r.state,
+                r.confidence,
+                json.dumps(audit, ensure_ascii=False),
+                json.dumps(r.rules, ensure_ascii=False),
+                RULES_VERSION,
+            )
+        )
+    return out
+
+
+def analyze_timeframe(df, timeframe: str, session_aware: bool = False) -> Regime:
+    """session_aware=True（美股永续的 1h/4h）时额外计算去季节化 ATR 分位影子字段。"""
+    struct = structure_features(df)
+    vol = volatility_features(
+        df,
+        bars_per_year=BARS_PER_YEAR[timeframe],
+        session_aware=session_aware and timeframe in ("1h", "4h"),
+    )
+    volu = volume_features(df)
+
+    er_s = efficiency_ratio_series(df["close"], n=30)
+    er_rank = pct_rank(er_s, 250)
+
+    regime = classify(struct, vol, volu, er_rank)
+    regime.features["er"] = round(float(er_s.iloc[-1]), 3)
+    regime.features["er_rank"] = round(er_rank, 3)
+    # 路径几何（影子特征，不参与判定）与滞后声明（regime-spectrum 采纳 #1/#4/#7）
+    try:
+        regime.features["pathgeom"] = path_features(df["close"])
+    except Exception:  # noqa: BLE001  影子字段绝不允许拖垮主判定
+        regime.features["pathgeom"] = None
+    regime.features["lag_bars"] = LAG_BARS
+    return regime

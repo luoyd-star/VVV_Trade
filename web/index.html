@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VVV 市场状态面板</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">VVV<span class="brand-sub">市场状态面板</span><span class="mode-tag">工程模式</span></div>
+  <nav id="tabs" class="tabs"></nav>
+  <div class="hstat">
+    <span id="mktBadge" class="badge" hidden></span>
+    <span id="fresh" class="badge">加载中…</span>
+    <span id="clock" class="mono muted"></span>
+    <span id="countdown" class="mono muted"></span>
+    <button id="hermesToggle" class="hbtn">VVVhermes</button>
+  </div>
+</header>
+
+<div class="layout">
+<main>
+  <div class="banner" id="banner" hidden></div>
+
+  <section class="row" id="stateCards"></section>
+
+  <section class="row">
+    <div class="card span8">
+      <div class="card-h">
+        <h3>价格结构 + cRSI <span class="sub" id="priceMeta"></span></h3>
+        <div class="tfpick" id="tfPicker"></div>
+      </div>
+      <div class="legend" id="priceLegend"></div>
+      <div id="priceChart" class="chart tall"></div>
+    </div>
+    <div class="col span4">
+      <div class="card">
+        <div class="card-h"><h3>波动率</h3><span class="sub" id="dvolMeta"></span></div>
+        <div id="dvolChart" class="chart half"></div>
+        <div class="divider"><span>ATR / BBW 分位（当前周期） · 0.15 挤压线 / 0.85 高波线</span></div>
+        <div id="volRankChart" class="chart half"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>持仓与杠杆（Binance 永续）</h3><span class="sub" id="derivMeta"></span></div>
+        <div class="kv2" id="derivInfo"></div>
+        <div id="derivChart" class="chart short"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="row">
+    <div class="card span8">
+      <div class="card-h"><h3>状态时间线（walk-forward 确认态）</h3><div class="legend" id="stripLegend"></div></div>
+      <div id="strips"></div>
+    </div>
+    <div class="card span4">
+      <div class="card-h"><h3>状态翻转日志</h3><span class="sub">确认态 · 最近 40 条</span></div>
+      <div class="tablewrap strips-h"><table id="flipTable"></table></div>
+    </div>
+  </section>
+
+  <section class="row">
+    <div class="card span9">
+      <div class="card-h"><h3>特征明细</h3><span class="sub">按支柱分组 · 完整原始值在 regime_history 审计快照</span></div>
+      <div class="tablewrap"><table id="featTable"></table></div>
+    </div>
+    <div class="card span3">
+      <div class="card-h"><h3>采集器</h3><span id="colStat" class="badge">--</span></div>
+      <div id="colInfo" class="kv"></div>
+      <pre id="colLog" class="log"></pre>
+    </div>
+  </section>
+
+  <footer>数据源 Deribit / OKX / Binance 公共接口 · 时间均为 UTC · 研究工具，不构成投资建议</footer>
+</main>
+
+<aside id="hermes" class="hermes">
+  <div class="h-head">
+    <b>VVVhermes</b>
+    <span class="sub" id="hermesMeta">…</span>
+    <button id="hermesClear" class="hbtn" title="清空对话，开始新会话">清空</button>
+    <button id="hermesClose" class="hbtn" title="收起">×</button>
+  </div>
+  <div class="h-note">每次提问自动附带 <span id="hermesSym" class="mono">--</span> 面板的实时数据</div>
+  <div class="h-msgs" id="hermesMsgs">
+    <div class="msg bot">你好，我是 VVVhermes。我能读到左边面板的实时状态、特征值、cRSI、IV/RV 与翻转历史——直接问即可，比如"当前 1d 为什么判定为挤压？"</div>
+  </div>
+  <div class="h-input">
+    <textarea id="hermesText" rows="2" placeholder="问 VVVhermes…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="hermesSend" class="hbtn primary">发送</button>
+  </div>
+</aside>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""可视化面板服务：只读 SQLite（collector 负责写入），标准库 HTTP server，零新增依赖。
+
+  .venv/bin/python dashboard.py --port 8787
+
+前端在 web/，图表库 ECharts 走 CDN（CDN 不可达时表格部分仍可用）。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import time
+import urllib.parse
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+
+from regime import instruments, storage
+from regime.agent import chat as agent_chat
+from regime.agent import load_config as agent_config
+from regime.agent import system_is_custom
+from regime.classify import FEATURE_WINDOW, STATES, analyze_timeframe, confirm_states
+from regime.features.crsi import crsi_features
+from regime.features.structure import ema, swing_pivots
+from regime.features.utils import pct_rank, rolling_pct_rank
+from regime.features.volatility import atr, bb_width, realized_vol
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = os.path.join(ROOT, "web")
+CANDLES = 240
+TIMEFRAMES = ("1d", "4h", "1h")
+TF_SEC = {"1h": 3600, "4h": 14_400, "1d": 86_400}
+WARMUP_BARS = 280  # 分位窗口 250 + 指标暖机 ~30；不足则分位参照期缩水，标记 warmup
+
+MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+
+
+def _deep_clean(obj):
+    """numpy 标量转原生类型、NaN/Inf 转 None，保证 JSON 可序列化。"""
+    if isinstance(obj, dict):
+        return {k: _deep_clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_deep_clean(v) for v in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.floating):
+        obj = float(obj)
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
+
+
+def _series(arr):
+    out = []
+    for v in arr:
+        f = float(v)
+        out.append(round(f, 6) if math.isfinite(f) else None)
+    return out
+
+
+def _tf_payload(conn, symbol: str, tf: str):
+    df = storage.get_ohlcv(conn, symbol, tf, limit=1200)
+    if len(df) < 90:  # 与采集端一致；90~280 根之间由 warmup 标志提示质量
+        return None
+    session_aware = instruments.get(symbol)["class"] == "us_stock_perp"
+    # 与 collector 的 walk-forward 用同一个窗长——否则历史攒过 FEATURE_WINDOW 根后，
+    # 同一根 bar 的面板读数与库内审计快照会分叉（atr_rank / atr_ds 对窗长敏感）
+    feat = df.iloc[-FEATURE_WINDOW:]
+    reg = analyze_timeframe(feat, tf, session_aware=session_aware)
+
+    win = df.tail(CANDLES).reset_index(drop=True)
+    offset = len(df) - len(win)
+    ts_ms = storage.ts_to_ms(win["ts"])
+    candles = [
+        [t, float(o), float(h), float(l), float(c), float(v)]
+        for t, o, h, l, c, v in zip(
+            ts_ms, win["open"], win["high"], win["low"], win["close"], win["volume"]
+        )
+    ]
+
+    ema50 = _series(ema(df["close"], 50).tail(len(win)))
+    piv = swing_pivots(win)
+    pivots = [
+        {"i": int(r.idx), "kind": r.kind, "price": float(r.price)}
+        for r in piv.itertuples()
+    ]
+    # 分位曲线同样在 FEATURE_WINDOW 内算，与上面的 reg 及库内审计口径一致
+    foff = len(df) - len(feat)
+    atr_ranks = _series(rolling_pct_rank(atr(feat) / feat["close"], 250)[offset - foff:])
+    bbw_ranks = _series(rolling_pct_rank(bb_width(feat["close"]), 250)[offset - foff:])
+
+    # 状态历史 -> 与 K 线窗口对齐的连续段（state 列已是迟滞确认态）
+    states = storage.get_states(conn, symbol, tf, limit=1500)
+    confirmed_now = states[-1]["state"] if states else reg.state
+    raw_now = states[-1]["raw_state"] if states else reg.state
+    candidate = None
+    if states:
+        _, candidate = confirm_states([r["raw_state"] for r in states])
+    ts_to_idx = {t: i for i, t in enumerate(ts_ms)}
+    segments = []
+    for srow in states:
+        i = ts_to_idx.get(srow["ts"])
+        if i is None:
+            continue
+        if segments and segments[-1]["state"] == srow["state"] and segments[-1]["e"] == i - 1:
+            segments[-1]["e"] = i
+        else:
+            segments.append({"s": i, "e": i, "state": srow["state"]})
+
+    crsi = crsi_features(df)
+    crsi_payload = {
+        "crsi": _series(crsi["series"]["crsi"][offset:]),
+        "db": _series(crsi["series"]["db"][offset:]),
+        "ub": _series(crsi["series"]["ub"][offset:]),
+        "divs": [
+            {"i": d["i"] - offset, "kind": d["kind"]}
+            for d in crsi["divergences"]
+            if d["i"] >= offset
+        ],
+        "last": crsi["last"],
+        "last_divergence": crsi["last_divergence"],
+    }
+
+    # 滚动预览：已收盘历史 + 形成中的 live bar 重算一次状态。
+    # 只作预警展示，明确标注"未收线"，永不写入 regime_history。
+    preview = None
+    live = storage.get_live_bar(conn, symbol, tf)
+    if live and live["ts"] and int(live["ts"]) > int(ts_ms[-1]):
+        live_age = time.time() - live["fetched_at"] / 1000
+        if live_age < 900:  # 采集正常（15 分钟内）才展示预览
+            live_row = pd.DataFrame([{
+                "ts": pd.to_datetime(int(live["ts"]), unit="ms", utc=True),
+                "open": live["open"], "high": live["high"],
+                "low": live["low"], "close": live["close"],
+                "volume": live["volume"],
+            }])
+            regp = analyze_timeframe(
+                pd.concat([feat.iloc[-(FEATURE_WINDOW - 1):], live_row], ignore_index=True),
+                tf, session_aware=session_aware,
+            )
+            preview = {
+                "state": regp.state,
+                "label": regp.label,
+                "confidence": regp.confidence,
+                "bar_ts": int(live["ts"]),
+                "close": float(live["close"]),
+                "age_sec": int(live_age),
+            }
+
+    # 数据健康：预热（历史不足，分位仅供参考）与陈旧（最后收线太久，状态不可信）。
+    # ohlcv.ts 是 K 线**开盘**时刻，所以要加一个周期才是收线时刻——原先直接用
+    # 开盘 ts 算，恒定多报一整个周期（1d 上把 6.6 小时说成 30.6 小时）。
+    # 阈值必须同步从 2.5×TF 收紧到 1.5×TF：old_age = new_age + TF，
+    # old_age > 2.5×TF ⟺ new_age > 1.5×TF，判定边界完全不变（已逐分钟扫描验证）。
+    last_close_age = time.time() - (int(ts_ms[-1]) / 1000 + TF_SEC[tf])
+    health = {
+        "warmup": bool(len(df) < WARMUP_BARS),
+        "stale": bool(last_close_age > 1.5 * TF_SEC[tf]),
+        "bars": int(len(df)),
+        "last_close_age_min": round(last_close_age / 60),
+    }
+
+    return {
+        "source": storage.last_source(conn, symbol, tf),
+        "health": health,
+        "candles": candles,
+        "ema50": ema50,
+        "pivots": pivots,
+        "atr_rank_series": atr_ranks,
+        "bbw_rank_series": bbw_ranks,
+        "segments": segments,
+        "crsi": crsi_payload,
+        "state": confirmed_now,
+        "state_label": STATES.get(confirmed_now, confirmed_now),
+        "raw_state": raw_now,
+        "candidate": candidate,
+        "preview": preview,
+        "confidence": reg.confidence,
+        "features": reg.features,
+    }
+
+
+def _dvol_payload(conn, symbol: str):
+    base = symbol.upper().replace("/", "-").split("-")[0]
+    if base not in ("BTC", "ETH"):
+        return None
+    dv = storage.get_dvol(conn, base, limit=730)
+    if not len(dv):
+        return None
+    iv_pairs = [
+        [int(t), round(float(v), 2)]
+        for t, v in zip(storage.ts_to_ms(dv["ts"]), dv["dvol"])
+    ]
+    d1 = storage.get_ohlcv(conn, symbol, "1d", limit=1200)
+    rv = realized_vol(d1["close"], 30, 365) * 100
+    rv_pairs = [
+        [int(t), round(float(v), 2)]
+        for t, v in zip(storage.ts_to_ms(d1["ts"]), rv)
+        if math.isfinite(float(v))
+    ]
+    iv_last = float(dv["dvol"].iloc[-1])
+    rv_last = float(rv.dropna().iloc[-1]) if rv.notna().any() else None
+    return {
+        "iv": iv_pairs[-365:],
+        "rv": rv_pairs[-365:],
+        "iv_last": round(iv_last, 1),
+        "iv_rank": round(pct_rank(dv["dvol"], 365), 3),
+        "rv_last": round(rv_last, 1) if rv_last is not None else None,
+        "spread": round(iv_last - rv_last, 1) if rv_last is not None else None,
+    }
+
+
+def _usvol_payload(conn, symbol: str):
+    """美股波动率维度：CBOE 指数 IV（VXN/VIX）+ 自算 RV30 + 自采个股 iv30 + 期限结构。
+
+    个股 iv30 无免费历史源，只能自采积累——iv30_days 告诉前端攒了多久，
+    攒够约 20 个观测后 deriv 卡的 iv30 分位才开始有意义。
+    """
+    inst = instruments.get(symbol)
+    if inst["class"] != "us_stock_perp":
+        return None
+    idx = inst.get("vol_index") or "VIX"
+    dfv = storage.get_usvol(conn, idx, limit=800)
+    if not len(dfv):
+        return None
+    idx_last = float(dfv["close"].iloc[-1])
+    # usvol 只存交易日（约 252/年），分位窗口取 252 行才真是"一年"；
+    # 图上多画一些（365 行 ≈ 1.4 年）看趋势，但分位不跟着放宽。
+    tail = dfv["close"].tail(252)
+    series = [[int(t), round(float(c), 2)] for t, c in zip(dfv["ts"], dfv["close"])][-365:]
+
+    # RV30 与加密 DVOL 卡同口径（1d 收盘年化），同图对照 IV-RV 剪刀差
+    rv_pairs, rv_last = [], None
+    d1 = storage.get_ohlcv(conn, symbol, "1d", limit=1200)
+    if len(d1) >= 40:
+        rv = realized_vol(d1["close"], 30, 365) * 100
+        rv_pairs = [
+            [int(t), round(float(v), 2)]
+            for t, v in zip(storage.ts_to_ms(d1["ts"]), rv)
+            if math.isfinite(float(v))
+        ][-365:]
+        rv_last = rv_pairs[-1][1] if rv_pairs else None
+
+    dd = storage.get_deriv(conn, symbol, limit=4000)
+    iv30_last, iv30_days = None, 0.0
+    if len(dd) and "iv30" in dd.columns:
+        s = dd[["ts", "iv30"]].dropna()
+        if len(s):
+            iv30_last = round(float(s["iv30"].iloc[-1]), 1)
+            iv30_days = round(
+                (int(s["ts"].iloc[-1]) - int(s["ts"].iloc[0])) / 86_400_000, 1
+            )
+
+    # 期限结构：VIX9D/VIX3M > 1 = 近端恐慌（倒挂），< 0.9 = 平静升水
+    ts_ratio = None
+    d9 = storage.get_usvol(conn, "VIX9D", limit=5)
+    d3 = storage.get_usvol(conn, "VIX3M", limit=5)
+    if len(d9) and len(d3) and float(d3["close"].iloc[-1]) > 0:
+        ts_ratio = round(float(d9["close"].iloc[-1]) / float(d3["close"].iloc[-1]), 3)
+
+    return {
+        "index": idx,
+        "index_last": round(idx_last, 2),
+        "index_rank": round(float((tail < idx_last).mean()), 3),
+        "series": series,
+        "rv": rv_pairs,
+        "rv_last": rv_last,
+        "spread": round(idx_last - rv_last, 1) if rv_last is not None else None,
+        "iv30_last": iv30_last,
+        "iv30_days": iv30_days,
+        "ts_ratio": ts_ratio,
+    }
+
+
+def _deriv_payload(conn, symbol: str):
+    """持仓/杠杆维度（Binance 永续）：最新值、历史分位、OI 变化与画图序列。"""
+    df = storage.get_deriv(conn, symbol, limit=4000)
+    if not len(df):
+        return None
+
+    def last_valid(col):
+        s = df[col].dropna()
+        if not len(s):
+            return None, None
+        return float(s.iloc[-1]), int(df["ts"][s.index[-1]])
+
+    def rank(col):
+        s = df[col].dropna()
+        if len(s) < 20:
+            return None
+        return round(float((s < s.iloc[-1]).mean()), 3)
+
+    oi, oi_ts = last_valid("oi")
+    funding, _ = last_valid("funding")
+    premium, _ = last_valid("premium")
+    taker, _ = last_valid("taker_ratio")
+    iv30, _ = last_valid("iv30") if "iv30" in df.columns else (None, None)
+
+    ois = df[["ts", "oi"]].dropna()
+
+    def oi_change(hours):
+        if oi is None or oi_ts is None or not len(ois):
+            return None
+        past = ois[ois["ts"] <= oi_ts - hours * 3_600_000]
+        if not len(past):
+            return None
+        base = float(past["oi"].iloc[-1])
+        return round(math.log(oi / base), 4) if base > 0 else None
+
+    # funding 列混着两种东西：回填的**已结算**费率（8h 结算网格，ts 落在整点）
+    # 与每轮快照的 lastFundingRate（**下一次的预测值**，ts 是墙钟）。只有前者能
+    # 用来算间隔与分位——用全列做 ts 差分，快照行一多中位数就塌成 5 分钟，
+    # 年化会虚增近百倍。整点判定留 1 秒容差：Binance 的 fundingTime 有毫秒抖动。
+    fs_all = df[["ts", "funding"]].dropna()
+    fs = fs_all[fs_all["ts"] % 3_600_000 < 1_000]
+    if len(fs) < 3:
+        fs = fs_all
+    span_days = (int(df["ts"].iloc[-1]) - int(df["ts"].iloc[0])) / 86_400_000
+    # 结算间隔由 collector 从 fundingInfo 接口取回存进 meta，面板只读库不打网络
+    interval_h = float(storage.get_meta(conn, f"funding_interval_{symbol}", 8.0) or 8.0)
+    per_year = 365 * 24.0 / interval_h if interval_h else 3 * 365.0
+
+    def settled_rank():
+        s = fs["funding"].dropna()
+        if len(s) < 20 or funding is None:
+            return None
+        return round(float((s < funding).mean()), 3)
+
+    return {
+        "oi": oi,
+        "oi_change_4h": oi_change(4),
+        "oi_change_24h": oi_change(24),
+        "oi_rank": rank("oi"),
+        "funding_pct": round(funding * 100, 5) if funding is not None else None,
+        "funding_annual_pct": round(funding * per_year * 100, 1) if funding is not None else None,
+        "funding_interval_h": interval_h,
+        "funding_rank": settled_rank(),
+        "premium_pct": round(premium * 100, 4) if premium is not None else None,
+        "premium_rank": rank("premium"),
+        "taker_ratio": round(taker, 3) if taker is not None else None,
+        "taker_rank": rank("taker_ratio"),
+        "iv30": round(iv30, 1) if iv30 is not None else None,
+        "iv30_rank": rank("iv30") if "iv30" in df.columns else None,
+        "span_days": round(span_days, 1),
+        "warmup": bool(span_days < 21),
+        "oi_series": [[int(t), round(float(v), 1)] for t, v in zip(ois["ts"], ois["oi"])][-500:],
+        "funding_series": [
+            [int(t), round(float(v) * 100, 5)] for t, v in zip(fs["ts"], fs["funding"])
+        ][-500:],
+    }
+
+
+def _flips(conn, symbol: str, tfs):
+    flips = []
+    for tf in tfs:
+        states = storage.get_states(conn, symbol, tf, limit=1500)
+        for prev, curr in zip(states, states[1:]):
+            if curr["state"] != prev["state"]:
+                flips.append(
+                    {
+                        "ts": curr["ts"],
+                        "tf": tf,
+                        "from": prev["state"],
+                        "to": curr["state"],
+                        "confidence": curr["confidence"],
+                    }
+                )
+    flips.sort(key=lambda x: -x["ts"])
+    return flips[:40]
+
+
+def _collector_info(conn):
+    try:
+        status = json.loads(storage.get_meta(conn, "status", "{}") or "{}")
+    except json.JSONDecodeError:
+        status = {}
+    log_tail = []
+    log_path = os.path.join(storage.DATA_DIR, "collector.log")
+    if os.path.exists(log_path):
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            log_tail = [line.rstrip("\n") for line in f.readlines()[-25:]]
+    return {
+        "last_run": int(storage.get_meta(conn, "last_run", 0) or 0),
+        "interval": status.get("interval", 300),
+        "cycle_sec": status.get("cycle_sec"),
+        "errors": status.get("errors", []),
+        "counts": storage.counts(conn),
+        "log_tail": log_tail,
+    }
+
+
+def _instrument_payload(symbol: str) -> dict:
+    """品种元信息；美股永续附带标的正股是否盘中（9:30-16:00 ET，工作日；不含假日历）。"""
+    inst = instruments.get(symbol)
+    market_open = None
+    if inst["class"] == "us_stock_perp":
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        market_open = bool(
+            now_et.weekday() < 5
+            and (9, 30) <= (now_et.hour, now_et.minute) < (16, 0)
+        )
+    return {
+        "class": inst["class"],
+        "display": inst.get("display"),
+        "market_open": market_open,
+    }
+
+
+def build_dashboard(symbol: str) -> dict:
+    conn = storage.connect()
+    try:
+        tfs_payload = {}
+        for tf in TIMEFRAMES:
+            payload = _tf_payload(conn, symbol, tf)
+            if payload:
+                tfs_payload[tf] = payload
+        deriv = _deriv_payload(conn, symbol)
+
+        # 数据健康汇总：问题清单直接给面板横幅与 VVVhermes
+        issues = []
+        for tf, t in tfs_payload.items():
+            h = t["health"]
+            if h["stale"]:
+                issues.append(f"{tf} 数据陈旧（最后收线 {h['last_close_age_min']} 分钟前）")
+            if h["warmup"]:
+                issues.append(f"{tf} 预热中（仅 {h['bars']} 根，分位参照期不足）")
+        if deriv and deriv.get("warmup"):
+            issues.append(f"持仓数据预热中（仅 {deriv['span_days']} 天，分位仅供参考）")
+
+        return _deep_clean(
+            {
+                "symbol": symbol,
+                "instrument": _instrument_payload(symbol),
+                "states_map": STATES,
+                "tfs": tfs_payload,
+                "dvol": _dvol_payload(conn, symbol),
+                "usvol": _usvol_payload(conn, symbol),
+                "deriv": deriv,
+                "health": {"issues": issues},
+                "flips": _flips(conn, symbol, tfs_payload.keys()),
+                "collector": _collector_info(conn),
+            }
+        )
+    finally:
+        conn.close()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            if parsed.path == "/api/symbols":
+                conn = storage.connect()
+                syms = storage.symbols(conn)
+                conn.close()
+                return self._json({"symbols": syms})
+            if parsed.path == "/api/dashboard":
+                symbol = (qs.get("symbol") or ["BTC-USDT"])[0]
+                return self._json(build_dashboard(symbol))
+            if parsed.path == "/api/agent/info":
+                cfg = agent_config()
+                return self._json(
+                    {
+                        "provider": cfg.get("provider"),
+                        "model": cfg.get("model"),
+                        "custom_system": system_is_custom(),
+                    }
+                )
+            if parsed.path == "/api/agent/history":
+                limit = int((qs.get("limit") or ["60"])[0])
+                conn = storage.connect()
+                try:
+                    return self._json({"messages": storage.get_chat(conn, limit)})
+                finally:
+                    conn.close()
+            if parsed.path in ("/", "/index.html"):
+                return self._file("index.html")
+            name = os.path.basename(parsed.path)
+            if name and os.path.exists(os.path.join(WEB_DIR, name)):
+                return self._file(name)
+            self.send_error(404)
+        except BrokenPipeError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            self._json({"error": str(e)}, code=500)
+
+    def do_POST(self):  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        try:
+            if parsed.path == "/api/agent/chat":
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 512 * 1024:
+                    return self._json({"error": "请求体过大"}, code=413)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                symbol = body.get("symbol") or "BTC-USDT"
+
+                # 新形态：只传一条新消息，历史由服务端从 chat 表拼装（面板/终端共享）
+                if "message" in body:
+                    text = str(body.get("message") or "").strip()
+                    if not text:
+                        return self._json({"error": "空消息"}, code=400)
+                    conn = storage.connect()
+                    try:
+                        msgs = [
+                            {"role": r["role"], "content": r["content"]}
+                            for r in storage.get_chat(conn, limit=20)
+                        ]
+                        msgs.append({"role": "user", "content": text})
+                        out = agent_chat(build_dashboard(symbol), msgs)
+                        if not out.get("error"):
+                            storage.add_chat(conn, "user", text)
+                            storage.add_chat(conn, "assistant", out["reply"])
+                    finally:
+                        conn.close()
+                    return self._json(out)
+
+                # 兼容旧形态：整段 messages 直传（无持久化）
+                messages = body.get("messages") or []
+                payload = build_dashboard(symbol)
+                return self._json(agent_chat(payload, messages))
+            if parsed.path == "/api/agent/clear":
+                conn = storage.connect()
+                try:
+                    storage.clear_chat(conn)
+                finally:
+                    conn.close()
+                return self._json({"ok": True})
+            self.send_error(404)
+        except BrokenPipeError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            self._json({"error": str(e)}, code=500)
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _file(self, name):
+        with open(os.path.join(WEB_DIR, name), "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header(
+            "Content-Type", MIME.get(os.path.splitext(name)[1], "application/octet-stream")
+        )
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # 静默访问日志
+        pass
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="市场状态面板")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8787)
+    args = ap.parse_args()
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"面板已启动: http://{args.host}:{args.port}  （Ctrl+C 退出）")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

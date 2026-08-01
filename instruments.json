@@ -1,0 +1,12 @@
+{
+  "_说明": "品种注册表（热读）。未登记 symbol 走加密默认源。us_stock_perp 的 sources 首选 binance_futures（fapi K线），有 hl_coin 的以 hyperliquid 兜底；衍生品四件套统一走币安 fapi（接口与加密永续同构）。",
+  "_对账": "品种上新/下架用 scripts/probe_stock_perps.py 复查；币安 EQUITY 区判别字段 underlyingType=EQUITY。",
+
+  "NVDA-USDT": { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:NVDA", "display": "英伟达", "vol_index": "VXN" },
+  "AAPL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:AAPL", "display": "苹果", "vol_index": "VXN" },
+  "TSLA-USDT": { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:TSLA", "display": "特斯拉", "vol_index": "VXN" },
+  "MU-USDT":   { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:MU",   "display": "美光", "vol_index": "VXN" },
+  "QQQ-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "纳指100 ETF", "vol_index": "VXN" },
+  "SPY-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "标普500 ETF", "vol_index": "VIX" },
+  "SOXL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "半导体3x ETF", "vol_index": "VXN" }
+}

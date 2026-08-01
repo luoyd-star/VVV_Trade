@@ -1,0 +1,30 @@
+{
+  "_说明": "复制本文件为 agent.json 并按需修改（agent.json 已加入 .gitignore，不会被提交）。以下划线开头的键会被忽略。",
+  "_方案A_Anthropic官方": {
+    "provider": "anthropic",
+    "model": "claude-opus-5",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+  "_方案B_OpenAI兼容_如OpenRouter上的Hermes": {
+    "provider": "openai",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "nousresearch/hermes-4-70b",
+    "api_key_env": "OPENROUTER_API_KEY"
+  },
+  "_方案C_Ollama本地": {
+    "provider": "ollama",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "hermes3"
+  },
+  "_方案D_Codex订阅_走本机官方CLI不经手token": {
+    "provider": "codex",
+    "model": "gpt-5.6-sol",
+    "codex_bin": "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "_注": "model 留空则用 ~/.codex/config.toml 的默认模型；codex_bin 留空则先找 PATH 里的 codex"
+  },
+
+  "provider": "mock",
+  "model": "claude-opus-5",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "max_tokens": 1024
+}
