@@ -37,7 +37,11 @@ LAG_BARS = {
 
 # 规则版本号：THRESHOLDS 或 classify 规则结构一旦改动必须递增——
 # 不同版本产生的 regime_history 行混在一起会悄悄污染回测统计。
-RULES_VERSION = "v1"
+# v2（2026-08-02）：direction 加权在 EMA200 缺席（<200 根）时改为权重重归一。
+#   v1 按 0 计入，|direction| 上限降到 0.90 却仍比同一个 0.30 阈值——
+#   同样的结构，短历史品种被系统性压低了趋势判定概率（50.8% 的行受影响）。
+#   阈值三件套（0.60/0.30/0.10）与规则树结构未动，仍待回测校准。
+RULES_VERSION = "v2"
 
 # 审计特征集版本：features JSON 的键集或口径一变就递增（规则可以不变）。
 # 两个版本都进入 state_ts_set 的跳过谓词：任一不匹配的行视为"缺失"、
@@ -51,12 +55,16 @@ THRESHOLDS = {
     "tilt_confirm": 0.10,     # 多空量差站队阈值
 }
 
+# 键是历史契约（入库、前端、Hermes 都认它），不动；中文标签只描述规则真正
+# 检验过的东西。"high_vol_chop" 的规则只是 ATR 分位 >0.85 且未过趋势判定——
+# 它没有证明"无序"（实测该态的 chop_freq 与 range 态只差 2.1%，62.5% 的行
+# 还通过了趋势两条腿之一），旧标签"高波动无序"比规则说得多，误导下游解读。
 STATES = {
     "trend_up": "趋势上行",
     "trend_down": "趋势下行",
     "range": "震荡",
     "squeeze": "低波动挤压（蓄势）",
-    "high_vol_chop": "高波动无序（转换期）",
+    "high_vol_chop": "高波动非趋势（方向未证）",
 }
 
 # squeeze / high_vol 的判定字面量镜像自 features/volatility.py（那边是硬编码），

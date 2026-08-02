@@ -68,14 +68,18 @@ def structure_features(df: pd.DataFrame, pivot_k: int = 4) -> dict:
     dc_pos = (float(close.iloc[-1]) - dc_low) / max(dc_high - dc_low, 1e-12)
     dc_score = 2 * dc_pos - 1
 
+    # 缺席的子分必须把权重让给在场的（重归一），而不是按 0 计入——
+    # 否则历史 <200 根时 |direction| 的上限悄悄从 1.00 掉到 0.90，
+    # 却仍去比同一个 0.30 阈值：同样的结构，短历史品种更难被判成趋势。
+    # 实测受影响的入库行占 50.8%（外部审阅发现，RULES_VERSION v1→v2 的动因之一）。
+    parts = [(0.45, pivot_dir), (0.25, slope_score), (0.20, dc_score)]
     if len(df) >= 200:
         above_ema200 = 1.0 if float(close.iloc[-1]) > float(ema(close, 200).iloc[-1]) else -1.0
+        parts.append((0.10, above_ema200))
     else:
         above_ema200 = 0.0
-
-    direction = (
-        0.45 * pivot_dir + 0.25 * slope_score + 0.20 * dc_score + 0.10 * above_ema200
-    )
+    wsum = sum(w for w, _ in parts)
+    direction = sum(w * v for w, v in parts) / wsum
 
     highs = piv[piv["kind"] == "H"]["price"]
     lows = piv[piv["kind"] == "L"]["price"]

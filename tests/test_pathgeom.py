@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""pathgeom + margin 的因果性与正确性测试（regime-spectrum 采纳批次一）。
+"""pathgeom + margin 的确定性与正确性测试（regime-spectrum 采纳批次一）。
 
 用法: .venv/bin/python tests/test_pathgeom.py
-设计对照：regime-spectrum 的 04 参考实现的"因果性自检"比较的是原始输入切片（恒真），
-这里比较的是**函数输出**——同一历史切片在"未来数据存在与否"两种内存布局下必须逐字段相等。
+注意：本文件的第 1 组只验证**确定性**（同值输入同输出）；walk-forward 的
+**因果性**（追加未来数据不改变过去输出）由 tests/test_causality.py 负责。
 """
 from __future__ import annotations
 
@@ -32,13 +32,17 @@ def make_df(close: np.ndarray) -> pd.DataFrame:
 def main() -> None:
     rng = np.random.default_rng(42)
 
-    # ── 1. 因果性（输出级，非输入级）──
+    # ── 1. 确定性（同值输入必须同输出；真正的因果性见 test_causality.py）──
+    # 说明：此断言曾被误标为"因果性测试"——full[:i].copy() 与 full.copy()[:i]
+    # 的值完全相同，只有底层 buffer 不同，测不出未来泄漏（外部审阅指出，属实）。
+    # 追加未来数据后过去输出不变的性质，由 test_causality.py 的前缀 vs 完整
+    # 逐字段比较负责（那条测试对"切片索引 i→i+1"的突变体必红）。
     full = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.01, 600)))
     for i in (200, 300, 450):
-        hist_only = full[:i].copy()                      # 未来不存在
-        hist_in_extended = full.copy()[:i]               # 未来存在于同一数组
+        hist_only = full[:i].copy()
+        hist_in_extended = full.copy()[:i]
         a, b = path_features(hist_only), path_features(hist_in_extended)
-        assert a == b, f"pathgeom 因果性失败 @ {i}: {a} != {b}"
+        assert a == b, f"pathgeom 确定性失败 @ {i}: {a} != {b}"
     # analyze_timeframe 级：同一前缀切片，全特征与状态必须一致
     df_full = make_df(full)
     r1 = analyze_timeframe(df_full.iloc[:300].reset_index(drop=True), "1h")

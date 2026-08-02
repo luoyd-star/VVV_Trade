@@ -23,6 +23,14 @@ def true_range(df: pd.DataFrame) -> pd.Series:
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """SMA-ATR(14)——**不是** Wilder RMA。
+
+    Wilder 的 alpha=1/14 等价 span≈27，记忆约为 SMA(14) 的两倍、尖峰后衰减
+    慢得多；实测 1h 末根两者差 39%~57%，经分位吸收后仍会翻转约 6%~10% 的
+    squeeze/high_vol 布尔。迁移阈值到 TradingView 等 Wilder 实现时必须换算。
+    是否切换 Wilder 留给回测校准裁决（那是 RULES_VERSION 升版级别的变更）；
+    在此之前，本实现的名字必须诚实：它是 SMA 变体。
+    """
     return true_range(df).rolling(n).mean()
 
 
