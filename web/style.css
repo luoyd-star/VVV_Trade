@@ -195,4 +195,4 @@ footer { text-align: center; color: var(--muted); font-size: 10.5px; padding: 14
 }
 
 /* 发送失败的乐观消息：仍显示但明确标注未入共享历史 */
-.hmsg.unsent { opacity: .55; border-left: 2px solid #b91f31; }
+.msg.unsent { opacity: .55; border-left: 2px solid #b91f31; }

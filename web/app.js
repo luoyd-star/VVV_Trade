@@ -500,7 +500,8 @@ function renderDeriv() {
     [chg(dr.oi_change_4h), 'OI Δ4h'],
     [chg(dr.oi_change_24h), 'OI Δ24h'],
     [dr.taker_ratio == null ? '—' : fmtN(dr.taker_ratio, 3), `Taker 买卖比${rk(dr.taker_rank)}`],
-    [dr.funding_pct == null ? '—' : `${fmtN(dr.funding_pct * 100, 2)}bp`, `Funding /${dr.funding_interval_h || 8}h${rk(dr.funding_rank)}`],
+    [dr.funding_pct == null ? '—' : `${fmtN(dr.funding_pct * 100, 2)}bp`, `Funding /${dr.funding_interval_h || 8}h（下期预测）`],
+    [dr.funding_settled_pct == null ? '—' : `${fmtN(dr.funding_settled_pct * 100, 2)}bp`, `上期结算${rk(dr.funding_rank)}`],
     [dr.funding_annual_pct == null ? '—' : `${fmtN(dr.funding_annual_pct, 1)}%`, 'Funding 年化'],
     [dr.premium_pct == null ? '—' : `${fmtN(dr.premium_pct * 100, 1)}bp`, `Premium${rk(dr.premium_rank)}`],
     dr.iv30 != null
@@ -733,6 +734,12 @@ async function hermesInfo() {
     const r = await fetch('/api/agent/info');
     const j = await r.json();
     const sys = j.custom_system ? ' · 提示词:hermes_system.md' : '';
+    // config_error 优先：agent.json 解析失败时 provider 会静默退回 mock，
+    // 只显示"未配置模型"会让人以为是没配，而不是配坏了
+    if (j.config_error) {
+      $('hermesMeta').textContent = `⚠ agent.json 解析失败：${j.config_error}（已退回 mock）`;
+      return;
+    }
     $('hermesMeta').textContent = (j.provider === 'mock'
       ? 'mock · 未配置模型（见 agent.example.json）'
       : `${j.provider} · ${j.model}`) + sys;

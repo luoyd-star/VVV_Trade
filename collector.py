@@ -22,7 +22,13 @@ import time
 from datetime import datetime, timezone
 
 from regime import instruments, storage
-from regime.classify import AUDIT_VERSION, RULES_VERSION, confirm_states, rolling_states_missing
+from regime.classify import (
+    AUDIT_VERSION,
+    FEATURE_WINDOW,
+    RULES_VERSION,
+    confirm_states,
+    rolling_states_missing,
+)
 from regime.data import fetch_dvol, fetch_ohlcv
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
@@ -92,19 +98,34 @@ def sync_vol_index(
     except Exception as e:  # noqa: BLE001
         errors.append(f"usvol quote {name}: {e}")
     try:
-        # 重拉 CSV 的时机：从未拉过 / 距上次满 24h（CBOE 偶有历史修订）/
-        # 报价已经进入 CSV 还没覆盖的交易日（收盘后确权，1h 重试下限防刷）。
-        at_key = f"usvol_csv_at_{name}"
+        # 两个时间戳分工：at=上次**尝试**（防刷），ok=上次**成功**（24h 刷新周期）。
+        # 合成一个的话，一次失败会被当成"刚刷过"，真正的刷新推迟满 24h。
+        at_key, ok_key = f"usvol_csv_at_{name}", f"usvol_csv_ok_{name}"
         at = float(storage.get_meta(conn, at_key, 0) or 0)
-        since = now - at
+        ok = float(storage.get_meta(conn, ok_key, 0) or 0)
         behind = q is not None and q["ts"] > csv_max
-        if not at or since > 86_400 or (behind and since > 3_600):
-            storage.set_meta(conn, at_key, str(now))  # 先记尝试，防刷
+        need = (
+            not ok                              # 从未成功过
+            or now - ok > 86_400                # 距上次成功满 24h（CBOE 偶有历史修订）
+            or (behind and now - at > 3_600)    # 报价进入未确权交易日（1h 重试下限）
+            or (not behind and now - at > 3_600 and now - ok > 86_400)
+        )
+        if need:
+            storage.set_meta(conn, at_key, str(now))  # 记尝试，防刷
             rows = fetch_csv(name)
             if rows:
                 storage.upsert_usvol(conn, name, rows)
-                csv_max = max(t for t, _ in rows)
+                # 水位必须单调：CSV 尾部偶发缺失会让 fetched_max 回退，
+                # 一旦水位降下去，同轮 quote 就获准覆盖已确权的官方收盘价
+                fetched_max = max(t for t, _ in rows)
+                if fetched_max < csv_max:
+                    errors.append(
+                        f"usvol csv {name}: 确权水位回退（{fetched_max} < {csv_max}），"
+                        "保持原水位，本轮不下调"
+                    )
+                csv_max = max(csv_max, fetched_max)
                 storage.set_meta(conn, f"usvol_csv_max_{name}", str(csv_max))
+                storage.set_meta(conn, ok_key, str(now))  # 只有真拿到行才算成功
                 msg = (
                     f"波动率指数日线 {name}：{len(rows)} 行，官方确权至 "
                     f"{datetime.fromtimestamp(csv_max / 1000, timezone.utc).date()}"
@@ -137,17 +158,19 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     "volume": live["volume"],
                     "fetched_at": int(time.time() * 1000),
                 })
-                # limit=10000：重算深度必须显著大于任一序列的实际长度，否则
-                # 状态失效后（版本升级/K线修订）超出窗口的旧行永远无法重算。
-                # 1h 每天 +24 根，10000 根 ≈ 13 个月的缓冲。
-                hist = storage.get_ohlcv(conn, sym, tf, limit=10_000)
+                # 重算窗 10000 根 + FEATURE_WINDOW-1 根 pre-roll。
+                # 没有 pre-roll 的话，窗口最老的那 399 根会在"上下文不足"的
+                # 情况下被算出来——同一根 bar 全量算与截尾算给出不同 features
+                # （实测 820 vs 420 根：331 个共同 ts 里 features 差 189 条）。
+                # 多读的部分只作上下文，min_bars 保证不为它们产出状态行。
+                hist = storage.get_ohlcv(conn, sym, tf, limit=10_000 + FEATURE_WINDOW - 1)
                 existing = storage.state_ts_set(conn, sym, tf, RULES_VERSION, AUDIT_VERSION)
                 new_states = rolling_states_missing(
                     hist, tf, existing, session_aware=session_aware, source=src
                 )
                 if new_states:
                     storage.upsert_states(conn, sym, tf, new_states)
-                if len(hist) >= 10_000:
+                if len(hist) >= 10_000 + FEATURE_WINDOW - 1:
                     # 重算窗已满：窗外若还有旧版本行，升版永远重算不到它们，
                     # 且 get_states 无版本谓词、折叠会混版——必须让人看见
                     n_stale = conn.execute(
@@ -192,15 +215,26 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
             # 结算周期与已结算费率每天补一次。独立 try + 成功后才记时间戳：
             # 用 _should 先记后做的话，一次网络失败要沉默等满 24h 才重试，
             # 而且异常会连带跳过同一 try 里的当轮快照。
-            fk = f"funding_info_at_{sym}"
-            last_fi = storage.get_meta(conn, fk)
-            if not last_fi or time.time() - float(last_fi) > 86_400:
+            # 结算周期与结算历史各自独立成功闸：合用一个的话，间隔查询失败被
+            # 静默当成 8h "成功"，真正 4h 结算的品种会 24h 不重试、年化少算一半
+            ik = f"funding_interval_at_{sym}"
+            last_i = storage.get_meta(conn, ik)
+            if not last_i or time.time() - float(last_i) > 86_400:
                 try:
-                    storage.set_meta(
-                        conn, f"funding_interval_{sym}", str(deriv_funding_interval(sym))
-                    )
+                    iv = deriv_funding_interval(sym)   # 失败返回 None，不写默认值
+                    if iv:
+                        storage.set_meta(conn, f"funding_interval_{sym}", str(iv))
+                        storage.set_meta(conn, ik, str(time.time()))
+                    else:
+                        errors.append(f"funding_interval {sym}: 接口未返回，沿用上次已知值")
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"funding_interval {sym}: {e}")
+            hk = f"funding_hist_at_{sym}"
+            last_h = storage.get_meta(conn, hk)
+            if not last_h or time.time() - float(last_h) > 86_400:
+                try:
                     storage.upsert_deriv(conn, sym, deriv_funding_history(sym))
-                    storage.set_meta(conn, fk, str(time.time()))
+                    storage.set_meta(conn, hk, str(time.time()))
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"funding_hist {sym}: {e}")
             snap = deriv_snapshot(sym)

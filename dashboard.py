@@ -371,9 +371,14 @@ def _deriv_payload(conn, symbol: str):
         "oi_change_4h": oi_change(4),
         "oi_change_24h": oi_change(24),
         "oi_rank": rank_of(oi_h["oi"], oi, spans["oi"]),
+        # 预测值与结算值分字段：两者是不同的量（预测=下一次的 lastFundingRate，
+        # 结算=上一次真实收取的费率），分位算的是**结算值**在结算分布中的位置。
+        # 挂在一起显示会让人把分位读成预测值的分位——实测 AAPL 预测 0 配分位
+        # 0.905，而 0 在同一分布里其实只在 0.059。
         "funding_pct": round(funding_pred * 100, 5) if funding_pred is not None else None,
         "funding_annual_pct": round(funding_pred * per_year * 100, 1) if funding_pred is not None else None,
         "funding_interval_h": interval_h,
+        "funding_settled_pct": round(funding_settled * 100, 5) if funding_settled is not None else None,
         "funding_rank": rank_of(f_settled["funding"], funding_settled, spans["funding"]),
         "premium_pct": round(premium * 100, 4) if premium is not None else None,
         "premium_rank": rank_of(prem_h["premium"], premium, spans["premium"]),

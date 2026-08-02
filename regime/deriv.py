@@ -118,12 +118,13 @@ def fetch_funding_history(symbol: str, limit: int = 1000) -> list:
     ]
 
 
-def funding_interval_h(symbol: str) -> float:
+def funding_interval_h(symbol: str):
     """结算周期（小时）。Binance 部分品种已从 8h 改为 4h，直接问接口而不是猜。
 
-    失败回退 8.0——比从数据反推安全：deriv.funding 一列里混着 8h 结算网格的
-    历史行与每 300s 一行的快照预测值，用 ts 差分中位数反推，快照行一多就会
-    把间隔算成 0.1h、年化虚增近百倍。
+    **失败返回 None**（不是伪装成 8.0）：调用方据此保留上次已知值并重试。
+    绝不从数据反推——deriv.funding 一列里混着结算网格的历史行与每 300s 一行的
+    快照预测值，用 ts 差分中位数反推，快照行一多就会把间隔算成 0.1h、年化虚增近百倍。
+    接口未列出该品种时同样返回 None：那意味着我们不知道，而不是"是 8h"。
     """
     sym = binance_perp(symbol)
     try:
@@ -132,4 +133,4 @@ def funding_interval_h(symbol: str) -> float:
                 return float(x["fundingIntervalHours"])
     except Exception:  # noqa: BLE001
         pass
-    return 8.0
+    return None

@@ -195,8 +195,9 @@ def render_context(p: dict) -> str:
         lines.append(
             f"持仓(Binance永续): OI={_f(dr['oi'], '{:.0f}')}张(分位{_f(dr['oi_rank'])}) "
             f"Δ4h={chg4}% Δ24h={chg24}% "
-            f"Funding={_f(dr['funding_pct'], '{:.4f}')}%/{dr.get('funding_interval_h') or 8:g}h"
-            f"(预测值；年化{_f(dr['funding_annual_pct'], '{:.1f}')}%,上期结算分位{_f(dr['funding_rank'])}) "
+            f"Funding预测={_f(dr['funding_pct'], '{:.4f}')}%/{dr.get('funding_interval_h') or 8:g}h"
+            f"(年化{_f(dr['funding_annual_pct'], '{:.1f}')}%) "
+            f"上期结算={_f(dr.get('funding_settled_pct'), '{:.4f}')}%(分位{_f(dr['funding_rank'])}) "
             f"Premium={_f(dr['premium_pct'], '{:.4f}')}%(分位{_f(dr['premium_rank'])}) "
             f"Taker买卖比={_f(dr['taker_ratio'], '{:.3f}')}(分位{_f(dr['taker_rank'])})"
             + ("（持仓历史<21天，分位仅供参考）" if dr.get("warmup") else "")
@@ -259,6 +260,34 @@ def _mock(context: str) -> str:
     )
 
 
+# codex_args 里绝不允许出现的参数：它们能关掉沙箱、改工作目录或扩大可写范围。
+# 聊天后端跑的是被面板数据注入的 prompt，必须钉死在只读沙箱里。
+_CODEX_FORBIDDEN = (
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--full-auto", "--yolo",
+    "-s", "--sandbox",
+    "-C", "--cd",
+    "-a", "--ask-for-approval",
+)
+
+
+def _safe_codex_args(args) -> list:
+    """过滤用户 codex_args：拒绝任何能突破只读沙箱或改变工作目录的参数。"""
+    out, skip = [], False
+    for raw in args:
+        a = str(raw)
+        if skip:                      # 上一个被拒参数的取值，一并丢弃
+            skip = False
+            continue
+        head = a.split("=", 1)[0]
+        if head in _CODEX_FORBIDDEN or head.startswith("--sandbox"):
+            skip = "=" not in a and head in ("-s", "--sandbox", "-C", "--cd",
+                                             "-a", "--ask-for-approval")
+            continue
+        out.append(a)
+    return out
+
+
 def _codex_bin(cfg: dict) -> str:
     import shutil
 
@@ -297,9 +326,10 @@ def _codex(cfg: dict, system: str, msgs: list) -> str:
     cmd = [bin_, "exec", "--skip-git-repo-check", "-o", out_path]
     if cfg.get("model"):
         cmd += ["-m", str(cfg["model"])]
-    cmd += [str(a) for a in (cfg.get("codex_args") or [])]
-    # 只读沙箱**强制殿后**（CLI 同名参数后者生效）：聊天后端是被注入面板数据的
-    # agentic CLI，绝不能带着写权限跑在仓库目录里——codex_args 也不许覆盖这条。
+    cmd += _safe_codex_args(cfg.get("codex_args") or [])
+    # 只读沙箱：放末尾让同名 -s/--sandbox 以本值为准；但**顺序不足以保证安全**——
+    # --dangerously-bypass-approvals-and-sandbox 是独立开关，无论放哪都会关掉沙箱。
+    # 真正的防线是上面的 _safe_codex_args 白名单。
     cmd += ["-s", "read-only"]
     cmd.append(prompt)
     try:

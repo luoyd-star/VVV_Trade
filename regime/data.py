@@ -62,6 +62,27 @@ def _deribit_instrument(symbol: str) -> str:
     return f"{base}_USDC-PERPETUAL"  # Deribit 线性永续命名，如 SOL_USDC-PERPETUAL
 
 
+def assert_no_gaps(df: pd.DataFrame, timeframe: str, source: str) -> None:
+    """已收盘序列中间不得有缺口。
+
+    丢弃残缺桶（首桶/中段）解决了"残值入库"，但留下的是**带洞的序列**：
+    下游一切按"每根 = 一个周期"计算的量（收益率、RV 年化、rolling 窗口）
+    都会在洞口失真——close.shift(1) 实际跨越了 8h 而代码以为是 4h。
+    有洞就拒绝本源，让 fetch_ohlcv 的兜底链换一个源，而不是带病分类。
+    """
+    if len(df) < 2:   # 两根就够算一个差分
+        return
+    step = _BAR_MS[timeframe]
+    gaps = (df["ts"].astype("int64") // 10**6).diff().dropna()
+    bad = gaps[gaps != step]
+    if len(bad):
+        worst = float(bad.max()) / step
+        raise RuntimeError(
+            f"{source} {timeframe} 序列有 {len(bad)} 处缺口（最大 {worst:.0f}×周期）"
+            "——拒绝使用，转兜底源"
+        )
+
+
 def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
     """1h -> 4h，按 UTC 整点分桶（与交易所 4h K 线对齐），不依赖 pandas 频率别名。
 
@@ -305,9 +326,15 @@ def fetch_ohlcv(
             errors.append(f"{name}: {e}")
             continue
         closed = df.iloc[:-1].reset_index(drop=True)
-        if len(closed) >= 90:  # 上市较新的美股永续（如 1d 仅 ~130 根）也放行，靠 warmup 标志提示质量
-            return (closed if drop_unclosed else df), name
-        errors.append(f"{name}: 仅 {len(closed)} 根已收盘 K 线，不足 90")
+        if len(closed) < 90:  # 上市较新的美股永续（如 1d 仅 ~130 根）也放行，靠 warmup 标志提示质量
+            errors.append(f"{name}: 仅 {len(closed)} 根已收盘 K 线，不足 90")
+            continue
+        try:
+            assert_no_gaps(closed, timeframe, name)
+        except RuntimeError as e:
+            errors.append(str(e))
+            continue  # 带洞的序列不如换一个源
+        return (closed if drop_unclosed else df), name
     raise RuntimeError("；".join(errors))
 
 

@@ -46,8 +46,11 @@ RULES_VERSION = "v2"
 # 审计特征集版本：features JSON 的键集或口径一变就递增（规则可以不变）。
 # 两个版本都进入 state_ts_set 的跳过谓词：任一不匹配的行视为"缺失"、
 # 下一轮被 upsert 原地重算——升版自动重算，不再需要全表 DELETE。
-# 代际史：v2 补四列 / v3 pathgeom+margin / v4 atr_ds / v5 时间对齐批 / a6 加 src 键
-AUDIT_VERSION = "a6"
+# 代际史：v2 补四列 / v3 pathgeom+margin / v4 atr_ds / v5 时间对齐批 /
+#         a6 加 src 键 / a7 direction 重归一改了 dir 口径 + src→src_round 改名
+# 契约：features 的**键集或任一字段口径**变化都必须升这里（口径变了不升版，
+#       同一个 a6 会同时标识两种语义的 dir——回测按版本分桶就失效了）
+AUDIT_VERSION = "a7"
 
 THRESHOLDS = {
     "er_rank_trend": 0.60,    # ER 分位高于此才算"有趋势效率"
@@ -57,14 +60,15 @@ THRESHOLDS = {
 
 # 键是历史契约（入库、前端、Hermes 都认它），不动；中文标签只描述规则真正
 # 检验过的东西。"high_vol_chop" 的规则只是 ATR 分位 >0.85 且未过趋势判定——
-# 它没有证明"无序"（实测该态的 chop_freq 与 range 态只差 2.1%，62.5% 的行
-# 还通过了趋势两条腿之一），旧标签"高波动无序"比规则说得多，误导下游解读。
+# 它没有证明"无序"（实测该态的 chop_freq 与 range 态只差 2.1%），也没有证明
+# "方向未证"（实测 45.2% 的该态行方向腿 |dir|>=0.30 已通过，只是 ER 腿没过）。
+# 所以标签只说"趋势条件未齐"——这是规则字面上唯一成立的陈述。
 STATES = {
     "trend_up": "趋势上行",
     "trend_down": "趋势下行",
     "range": "震荡",
     "squeeze": "低波动挤压（蓄势）",
-    "high_vol_chop": "高波动非趋势（方向未证）",
+    "high_vol_chop": "高波动非趋势（趋势条件未齐）",
 }
 
 # squeeze / high_vol 的判定字面量镜像自 features/volatility.py（那边是硬编码），
@@ -260,9 +264,11 @@ def rolling_states_missing(
             "margin": (f.get("margin") or {}).get("margin"),
             "m_near": (f.get("margin") or {}).get("nearest"),
             "lag": (f.get("lag_bars") or {}).get("slowest"),
-            # 数据源随行入库：ohlcv 的 source 列会被换源覆盖（last-write-wins），
-            # 快照里不留一份，换源恢复后就永久失去"这行状态当时用的是谁的数据"的取证能力
-            "src": source,
+            # 本轮采集源。**注意语义边界**：这是写入这一行时 collector 本轮的
+            # fetch 来源，不是该状态 400 根计算窗口内每根 K 线的来源——历史重算
+            # 时窗口里可能混着旧源的行。作为取证线索够用（ohlcv.source 会被
+            # 换源 last-write-wins 覆盖，快照不留就彻底没了），但别当成逐根 provenance。
+            "src_round": source,
         }
         out.append(
             (

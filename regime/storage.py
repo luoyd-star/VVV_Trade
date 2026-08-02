@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sqlite3
 
+import numpy as np
 import pandas as pd
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -180,13 +181,21 @@ def _invalidate_if_revised(conn, symbol: str, tf: str, rows) -> None:
             (symbol, tf, ts_lo, ts_hi),
         )
     }
+    # 结构性修订：往历史**中间**补进此前缺失的 K 线，同样会让其后的状态失真
+    # （那些状态是在缺这一根的序列上算出来的）。只有纯尾部追加可以跳过失效。
+    old_max = conn.execute(
+        "SELECT MAX(ts) FROM ohlcv WHERE symbol=? AND tf=?", (symbol, tf)
+    ).fetchone()[0]
     first_changed = None
     for r in rows:
         prev = old.get(r[2])
         if prev is None:
+            if old_max is not None and r[2] < old_max:
+                first_changed = r[2] if first_changed is None else min(first_changed, r[2])
             continue
         for a, b in zip(prev, r[3:8]):
-            if a is None or (a != a):  # 库内历史遗留 NULL/NaN：一律视为已修订
+            if a is None or not (np.isfinite(a) and np.isfinite(b)):
+                # 任一侧非有限（历史遗留 NULL/NaN/Inf）：比较无意义，一律判为已修订
                 first_changed = r[2] if first_changed is None else min(first_changed, r[2])
                 break
             if abs(a - b) > 1e-9 * max(1.0, abs(a), abs(b)):
@@ -208,8 +217,11 @@ def _invalidate_if_revised(conn, symbol: str, tf: str, rows) -> None:
 def upsert_ohlcv(conn, symbol: str, tf: str, df: pd.DataFrame, source: str) -> None:
     # NaN 拒收：NaN 会以 SQL NULL 落库，下一轮对账时 None 与 float 相减抛
     # TypeError，把该 (symbol,tf) 永久炸死在 cycle 的 try 里。宁可这一轮报错。
-    if df[["open", "high", "low", "close", "volume"]].isna().any().any():
-        raise ValueError(f"{symbol} {tf} 行情含 NaN，拒绝入库（source={source}）")
+    _vals = df[["open", "high", "low", "close", "volume"]].to_numpy(dtype=float)
+    if not np.isfinite(_vals).all():
+        # NaN 与 ±Inf 一并拒收：非有限值落库后，下一轮修订对账的
+        # abs(a-b) 对 Inf 恒为 nan（比较为 False），旧状态永远不会被失效
+        raise ValueError(f"{symbol} {tf} 行情含 NaN/Inf，拒绝入库（source={source}）")
     _assert_grid(conn, symbol, tf, ts_to_ms(df["ts"]), source)
     rows = [
         (symbol, tf, int(t), float(o), float(h), float(l), float(c), float(v), source)

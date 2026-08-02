@@ -19,7 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from regime.data import _resample_4h  # noqa: E402
+from regime.data import _resample_4h, assert_no_gaps  # noqa: E402
 
 
 def hourly(start_hour_utc: int, n: int) -> pd.DataFrame:
@@ -74,6 +74,15 @@ def main() -> None:
     print(f"⑤ 中段缺口    保留桶起始小时={hours5}（04 桶残缺应被丢）")
     assert 4 not in hours5, f"中段残桶未被丢弃: {hours5}"
     assert hours5 == [0, 8], f"应只剩完整的 00 桶与末桶 08: {hours5}"
+
+    # ⑥ 丢桶之后留下的**缺口**必须被下游拒绝：丢残桶解决了"残值入库"，
+    #    但带洞的序列会让一切"每根=一个周期"的计算失真（close.shift(1) 跨了 8h）
+    assert_no_gaps(g3, "4h", "test")          # 无洞序列放行
+    try:
+        assert_no_gaps(g5, "4h", "test")      # ⑤ 造出的序列缺 04 桶
+        raise AssertionError("带缺口的序列本应被拒绝")
+    except RuntimeError as e:
+        print(f"⑥ 缺口检测    带洞序列被拒 ✓（{str(e)[:38]}…）")
 
     print("\n全部通过 ✓")
 
