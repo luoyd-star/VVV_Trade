@@ -3,3 +3,4 @@ numpy>=1.23
 requests>=2.28
 urllib3<2  # macOS 系统 Python 的 ssl 基于 LibreSSL，urllib3 2.x 会告警
 anthropic>=0.120  # Hermes 面板助手的 anthropic provider（其余 provider 走 requests）
+pytest>=7  # tests/ 的自动化入口（每个文件保留 python 直跑的 main()）

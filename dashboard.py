@@ -284,80 +284,112 @@ def _usvol_payload(conn, symbol: str):
     }
 
 
+def _hourly(col_df):
+    """5m 快照与 1h 回填混在同一列时，重采样到 1h 格（每小时取末值）再作统计。
+
+    不重采样的话，分位的分母会随运行时间从"1h 样本"漂成"5m 样本为主"——
+    同一个百分位在系统跑两周前后不是同一个统计量。
+    """
+    if not len(col_df):
+        return col_df
+    g = col_df.copy()
+    g["hb"] = g["ts"] // 3_600_000
+    g = g.groupby("hb").last().reset_index(drop=True)
+    return g
+
+
 def _deriv_payload(conn, symbol: str):
-    """持仓/杠杆维度（Binance 永续）：最新值、历史分位、OI 变化与画图序列。"""
-    df = storage.get_deriv(conn, symbol, limit=4000)
-    if not len(df):
+    """持仓/杠杆维度（Binance 永续）。
+
+    每个指标**独立取窗、独立算跨度与分位**——deriv 是稀疏宽表，四种时间格
+    （funding 8h 结算 / OI·premium·taker 1h 回填 / 快照 5m / iv30 30min）混存，
+    任何"整表"统计都会让最长的列替最短的列背书（iv30 攒了 1 天却顶着
+    funding 的 168 天跨度显示"不预热"），或让高频列挤掉低频列的历史。
+    """
+    cols = {}
+    for c in ("oi", "funding", "premium", "taker_ratio", "iv30"):
+        cols[c] = storage.get_deriv_col(conn, symbol, c, limit=6000)
+    if not any(len(v) for v in cols.values()):
         return None
 
-    def last_valid(col):
-        s = df[col].dropna()
-        if not len(s):
-            return None, None
-        return float(s.iloc[-1]), int(df["ts"][s.index[-1]])
+    def span_of(cdf):
+        if len(cdf) < 2:
+            return 0.0
+        return round((int(cdf["ts"].iloc[-1]) - int(cdf["ts"].iloc[0])) / 86_400_000, 1)
 
-    def rank(col):
-        s = df[col].dropna()
-        if len(s) < 20:
+    def last_of(cdf, col):
+        return (float(cdf[col].iloc[-1]), int(cdf["ts"].iloc[-1])) if len(cdf) else (None, None)
+
+    def rank_of(series, current, span_days_):
+        """分位可用的门槛：≥20 个观测 且 跨度 ≥7 天——1 天攒出的 26 个点
+        算出来的"分位"没有任何历史含义，宁缺毋滥。"""
+        s = series.dropna()
+        if len(s) < 20 or span_days_ < 7 or current is None:
             return None
-        return round(float((s < s.iloc[-1]).mean()), 3)
+        return round(float((s < current).mean()), 3)
 
-    oi, oi_ts = last_valid("oi")
-    funding, _ = last_valid("funding")
-    premium, _ = last_valid("premium")
-    taker, _ = last_valid("taker_ratio")
-    iv30, _ = last_valid("iv30") if "iv30" in df.columns else (None, None)
+    oi_h = _hourly(cols["oi"])
+    prem_h = _hourly(cols["premium"])
+    taker_h = _hourly(cols["taker_ratio"])
+    iv30_h = _hourly(cols["iv30"])
+    # funding：只认 8h 结算网格上的行（1 秒容差吸收 Binance fundingTime 的毫秒抖动）。
+    # 最新一行（墙钟 ts）是 lastFundingRate = 下一次的**预测值**，只作展示；
+    # 分位的分子分母都用已结算值——预测 vs 结算是两个分布，不能混比。
+    f_all = cols["funding"]
+    f_settled = f_all[f_all["ts"] % 3_600_000 < 1_000] if len(f_all) else f_all
 
-    ois = df[["ts", "oi"]].dropna()
+    oi, oi_ts = last_of(cols["oi"], "oi")
+    funding_pred, _ = last_of(cols["funding"], "funding")
+    funding_settled, _ = last_of(f_settled, "funding")
+    premium, _ = last_of(cols["premium"], "premium")
+    taker, _ = last_of(cols["taker_ratio"], "taker_ratio")
+    iv30, _ = last_of(cols["iv30"], "iv30")
+
+    spans = {
+        "oi": span_of(cols["oi"]),
+        "funding": span_of(f_settled),
+        "premium": span_of(cols["premium"]),
+        "taker": span_of(cols["taker_ratio"]),
+        "iv30": span_of(cols["iv30"]),
+    }
 
     def oi_change(hours):
-        if oi is None or oi_ts is None or not len(ois):
+        if oi is None or oi_ts is None or not len(cols["oi"]):
             return None
-        past = ois[ois["ts"] <= oi_ts - hours * 3_600_000]
+        past = cols["oi"][cols["oi"]["ts"] <= oi_ts - hours * 3_600_000]
         if not len(past):
             return None
         base = float(past["oi"].iloc[-1])
         return round(math.log(oi / base), 4) if base > 0 else None
 
-    # funding 列混着两种东西：回填的**已结算**费率（8h 结算网格，ts 落在整点）
-    # 与每轮快照的 lastFundingRate（**下一次的预测值**，ts 是墙钟）。只有前者能
-    # 用来算间隔与分位——用全列做 ts 差分，快照行一多中位数就塌成 5 分钟，
-    # 年化会虚增近百倍。整点判定留 1 秒容差：Binance 的 fundingTime 有毫秒抖动。
-    fs_all = df[["ts", "funding"]].dropna()
-    fs = fs_all[fs_all["ts"] % 3_600_000 < 1_000]
-    if len(fs) < 3:
-        fs = fs_all
-    span_days = (int(df["ts"].iloc[-1]) - int(df["ts"].iloc[0])) / 86_400_000
     # 结算间隔由 collector 从 fundingInfo 接口取回存进 meta，面板只读库不打网络
     interval_h = float(storage.get_meta(conn, f"funding_interval_{symbol}", 8.0) or 8.0)
     per_year = 365 * 24.0 / interval_h if interval_h else 3 * 365.0
-
-    def settled_rank():
-        s = fs["funding"].dropna()
-        if len(s) < 20 or funding is None:
-            return None
-        return round(float((s < funding).mean()), 3)
 
     return {
         "oi": oi,
         "oi_change_4h": oi_change(4),
         "oi_change_24h": oi_change(24),
-        "oi_rank": rank("oi"),
-        "funding_pct": round(funding * 100, 5) if funding is not None else None,
-        "funding_annual_pct": round(funding * per_year * 100, 1) if funding is not None else None,
+        "oi_rank": rank_of(oi_h["oi"], oi, spans["oi"]),
+        "funding_pct": round(funding_pred * 100, 5) if funding_pred is not None else None,
+        "funding_annual_pct": round(funding_pred * per_year * 100, 1) if funding_pred is not None else None,
         "funding_interval_h": interval_h,
-        "funding_rank": settled_rank(),
+        "funding_rank": rank_of(f_settled["funding"], funding_settled, spans["funding"]),
         "premium_pct": round(premium * 100, 4) if premium is not None else None,
-        "premium_rank": rank("premium"),
+        "premium_rank": rank_of(prem_h["premium"], premium, spans["premium"]),
         "taker_ratio": round(taker, 3) if taker is not None else None,
-        "taker_rank": rank("taker_ratio"),
+        "taker_rank": rank_of(taker_h["taker_ratio"], taker, spans["taker"]),
         "iv30": round(iv30, 1) if iv30 is not None else None,
-        "iv30_rank": rank("iv30") if "iv30" in df.columns else None,
-        "span_days": round(span_days, 1),
-        "warmup": bool(span_days < 21),
-        "oi_series": [[int(t), round(float(v), 1)] for t, v in zip(ois["ts"], ois["oi"])][-500:],
+        "iv30_rank": rank_of(iv30_h["iv30"], iv30, spans["iv30"]),
+        "spans": spans,
+        "span_days": spans["oi"],          # 兼容旧前端字段：持仓图的核心序列是 OI
+        "warmup": bool(spans["oi"] < 21),  # 预热指"持仓维度"（OI 侧），逐指标看 spans
+        "oi_series": [
+            [int(t), round(float(v), 1)] for t, v in zip(oi_h["ts"], oi_h["oi"])
+        ][-500:],
         "funding_series": [
-            [int(t), round(float(v) * 100, 5)] for t, v in zip(fs["ts"], fs["funding"])
+            [int(t), round(float(v) * 100, 5)]
+            for t, v in zip(f_settled["ts"], f_settled["funding"])
         ][-500:],
     }
 
@@ -419,7 +451,7 @@ def _instrument_payload(symbol: str) -> dict:
 
 
 def build_dashboard(symbol: str) -> dict:
-    conn = storage.connect()
+    conn = storage.connect_ro()
     try:
         tfs_payload = {}
         for tf in TIMEFRAMES:
@@ -463,7 +495,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/symbols":
-                conn = storage.connect()
+                conn = storage.connect_ro()
                 syms = storage.symbols(conn)
                 conn.close()
                 return self._json({"symbols": syms})
@@ -481,7 +513,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if parsed.path == "/api/agent/history":
                 limit = int((qs.get("limit") or ["60"])[0])
-                conn = storage.connect()
+                conn = storage.connect_ro()
                 try:
                     return self._json({"messages": storage.get_chat(conn, limit)})
                 finally:
@@ -512,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                     text = str(body.get("message") or "").strip()
                     if not text:
                         return self._json({"error": "空消息"}, code=400)
-                    conn = storage.connect()
+                    conn = storage.connect_rw_nomigrate()
                     try:
                         msgs = [
                             {"role": r["role"], "content": r["content"]}
@@ -532,7 +564,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = build_dashboard(symbol)
                 return self._json(agent_chat(payload, messages))
             if parsed.path == "/api/agent/clear":
-                conn = storage.connect()
+                conn = storage.connect_rw_nomigrate()
                 try:
                     storage.clear_chat(conn)
                 finally:

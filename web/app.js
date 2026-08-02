@@ -482,7 +482,9 @@ function renderDeriv() {
     if (c) c.clear();
     return;
   }
-  meta.textContent = `历史 ${dr.span_days} 天${dr.warmup ? '（<21天，分位仅供参考）' : ''}`;
+  const sp = dr.spans || {};
+  meta.textContent = `历史 OI ${sp.oi ?? dr.span_days}d · Funding ${sp.funding ?? '—'}d`
+    + `${sp.iv30 != null ? ` · iv30 ${sp.iv30}d` : ''}${dr.warmup ? '（OI<21天，分位仅供参考）' : ''}`;
   const chg = (v) => (v == null ? '—' : fmtN((Math.exp(v) - 1) * 100, 2, true) + '%');
   const rk = (v) => (v == null ? '' : `（分位 ${fmtN(v, 2)}）`);
   info.innerHTML = [

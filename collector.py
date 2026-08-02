@@ -22,10 +22,11 @@ import time
 from datetime import datetime, timezone
 
 from regime import instruments, storage
-from regime.classify import confirm_states, rolling_states_missing
+from regime.classify import AUDIT_VERSION, RULES_VERSION, confirm_states, rolling_states_missing
 from regime.data import fetch_dvol, fetch_ohlcv
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
+from regime.deriv import fetch_funding_history as deriv_funding_history
 from regime.deriv import funding_interval_h as deriv_funding_interval
 from regime.usvol import (
     VOL_INDEXES,
@@ -136,10 +137,13 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     "volume": live["volume"],
                     "fetched_at": int(time.time() * 1000),
                 })
-                hist = storage.get_ohlcv(conn, sym, tf, limit=1200)
-                existing = storage.state_ts_set(conn, sym, tf)
+                # limit=10000：重算深度必须显著大于任一序列的实际长度，否则
+                # 状态失效后（版本升级/K线修订）超出窗口的旧行永远无法重算。
+                # 1h 每天 +24 根，10000 根 ≈ 13 个月的缓冲。
+                hist = storage.get_ohlcv(conn, sym, tf, limit=10_000)
+                existing = storage.state_ts_set(conn, sym, tf, RULES_VERSION, AUDIT_VERSION)
                 new_states = rolling_states_missing(
-                    hist, tf, existing, session_aware=session_aware
+                    hist, tf, existing, session_aware=session_aware, source=src
                 )
                 if new_states:
                     storage.upsert_states(conn, sym, tf, new_states)
@@ -175,11 +179,13 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                 storage.set_meta(conn, flag, "1")
                 log.info("衍生品回填 %s：%d 行（funding≈333天，OI/taker/premium≈20天）", sym, len(rows))
             # 结算周期每天问一次接口存 meta，面板/Hermes 只读库（不从数据反推，
-            # 因为 funding 列混着快照预测行，差分中位数会被带偏）
+            # 因为 funding 列混着快照预测行，差分中位数会被带偏）；
+            # 同时补拉已结算费率——结算行是分位的分母，不补采会随窗口滚动而枯竭
             if _should(conn, f"funding_info_at_{sym}", 86_400):
                 storage.set_meta(
                     conn, f"funding_interval_{sym}", str(deriv_funding_interval(sym))
                 )
+                storage.upsert_deriv(conn, sym, deriv_funding_history(sym))
             snap = deriv_snapshot(sym)
             storage.upsert_deriv(conn, sym, [snap])
             log.info(

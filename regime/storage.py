@@ -53,6 +53,13 @@ _DERIV_COLS = ("oi", "oi_notional", "funding", "premium", "taker_ratio", "iv30")
 
 
 def connect() -> sqlite3.Connection:
+    """写者连接（collector 专用）：建表 + 迁移。
+
+    迁移里有 ALTER / 全量 UPDATE / 代际清空重算这类重武器，**只允许 collector
+    这一个进程持有扳机**。面板等只读消费者一律用 connect_ro()——曾实测：
+    面板每次请求都跑迁移时，审计代际一升版，谁先 connect 谁执行 purge，
+    一条 GET /api/dashboard 就能把 regime_history 清成 0 行。
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -61,11 +68,28 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def connect_ro() -> sqlite3.Connection:
+    """只读连接：不建表、不迁移，数据库层面拒绝一切写入。
+
+    库还不存在时直接抛错——先起 collector 是部署顺序的一部分，
+    面板在库出现前返回 500 比静默建一个空库诚实。
+    """
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=15)
+    return conn
+
+
+def connect_rw_nomigrate() -> sqlite3.Connection:
+    """可写但不迁移：面板的 chat 表读写专用（面板不该有迁移扳机）。"""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def _migrate(conn) -> None:
     """就地迁移：regime_history 增加审计列；旧的无审计行一次性清空重算
     （walk-forward 状态完全可由 K 线重算，不丢信息）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(regime_history)")}
-    for col in ("features", "rules", "version", "raw_state"):
+    for col in ("features", "rules", "version", "raw_state", "audit_version"):
         if col not in cols:
             conn.execute(f"ALTER TABLE regime_history ADD COLUMN {col} TEXT")
     conn.execute("UPDATE regime_history SET raw_state=state WHERE raw_state IS NULL")
@@ -73,19 +97,11 @@ def _migrate(conn) -> None:
     if "iv30" not in dcols:
         conn.execute("ALTER TABLE deriv ADD COLUMN iv30 REAL")
     conn.commit()
-    # 审计特征集变更时递增 key 名触发一次性重算，保证所有行的 features 字段同构
-    # v3：加入 pathgeom（freq/domp/tau）、margin、lag 影子字段（规则未变，RULES_VERSION 仍 v1）
-    # v4：加入 atr_ds（hour-of-day 去季节化 ATR 分位，美股永续 1h/4h 专属影子字段）
-    # ⚠ 未来再做 v4 式全量 purge 前必查：collector 重算深度为 get_ohlcv(limit=1200)，
-    #   任一 (symbol,tf) 的 ohlcv 超过 1200 根后，全量 DELETE 将永久截断更老的状态行——
-    #   届时应改为限窗 purge 或先提高重算深度（对抗校验发现的前瞻风险）。
-    # v5：时间对齐批次——4h 残桶修复后 ohlcv 值变了、atr_ds 改按 ET 分桶、
-    #     lag 字段从硬编码 15 换成按算子计算。三项都改了审计快照的口径。
-    #     （atr_ds/lag 都是影子字段不参与判定，RULES_VERSION 仍 v1。）
-    if get_meta(conn, "regime_audit_v5") is None:
-        conn.execute("DELETE FROM regime_history")
-        conn.commit()
-        set_meta(conn, "regime_audit_v5", "1")
+    # 历史上这里有一套"regime_audit_vN 键不存在就 DELETE FROM regime_history"的
+    # 代际清空机制（v2 补列 / v3 pathgeom / v4 atr_ds / v5 时间对齐批），已被
+    # state_ts_set 的版本谓词取代：RULES_VERSION / AUDIT_VERSION 升版时旧行被判
+    # 为缺失、下一轮 upsert 原地重算。谓词方案没有删除动作——旧机制的两个雷
+    # （超出重算窗口的历史被永久截断；任何持有迁移的连接都能触发清库）同时拆除。
     # usvol 时间格统一为交易日 00:00 UTC：清掉早期用 time.time() 写入的盘中点位行
     # （日线格里混盘中点位会让 tail(365) 的"一年分位"悄悄退化成"最近几天分位"）。
     # 日线本身每天从 CSV 重拉，删掉即由下一轮补回，不丢信息。
@@ -135,6 +151,48 @@ def _assert_grid(conn, symbol: str, tf: str, ts_list, source: str) -> None:
         )
 
 
+def _invalidate_if_revised(conn, symbol: str, tf: str, rows) -> None:
+    """写入前对账：同 ts 的行若 OHLCV 任一值有变，删掉该 ts 起的全部状态历史。
+
+    这是对「K 线被修订/换源覆盖，但状态按 ts 已存在而跳过重算」这个机制的
+    结构性关闭——比 bar_hash 更直接：不是记录污染，是让污染无法存在。
+    删除后 collector 同轮的 rolling_states_missing 会自然把缺的 ts 补算回来。
+    容差取相对 1e-9：同源重复写入的浮点必然逐位相等，只有真修订才会触发。
+    """
+    if not rows:
+        return
+    all_ts = [r[2] for r in rows]
+    ts_lo, ts_hi = min(all_ts), max(all_ts)
+    old = {
+        r[0]: r[1:]
+        for r in conn.execute(
+            "SELECT ts,open,high,low,close,volume FROM ohlcv"
+            " WHERE symbol=? AND tf=? AND ts BETWEEN ? AND ?",
+            (symbol, tf, ts_lo, ts_hi),
+        )
+    }
+    first_changed = None
+    for r in rows:
+        prev = old.get(r[2])
+        if prev is None:
+            continue
+        for a, b in zip(prev, r[3:8]):
+            if abs(a - b) > 1e-9 * max(1.0, abs(a), abs(b)):
+                first_changed = r[2] if first_changed is None else min(first_changed, r[2])
+                break
+    if first_changed is not None:
+        n = conn.execute(
+            "DELETE FROM regime_history WHERE symbol=? AND tf=? AND ts>=?",
+            (symbol, tf, first_changed),
+        ).rowcount
+        conn.commit()
+        log = __import__("logging").getLogger("storage")
+        log.warning(
+            "%s %s 检测到 K 线修订（首个变更 ts=%d）→ 已失效 %d 行状态，本轮将重算",
+            symbol, tf, first_changed, n,
+        )
+
+
 def upsert_ohlcv(conn, symbol: str, tf: str, df: pd.DataFrame, source: str) -> None:
     _assert_grid(conn, symbol, tf, ts_to_ms(df["ts"]), source)
     rows = [
@@ -143,6 +201,7 @@ def upsert_ohlcv(conn, symbol: str, tf: str, df: pd.DataFrame, source: str) -> N
             ts_to_ms(df["ts"]), df["open"], df["high"], df["low"], df["close"], df["volume"]
         )
     ]
+    _invalidate_if_revised(conn, symbol, tf, rows)
     conn.executemany(
         "INSERT INTO ohlcv(symbol,tf,ts,open,high,low,close,volume,source)"
         " VALUES(?,?,?,?,?,?,?,?,?)"
@@ -196,25 +255,42 @@ def get_dvol(conn, currency: str, limit: int = 730) -> pd.DataFrame:
     return df
 
 
-def state_ts_set(conn, symbol: str, tf: str) -> set:
-    rows = conn.execute(
-        "SELECT ts FROM regime_history WHERE symbol=? AND tf=?", (symbol, tf)
-    ).fetchall()
+def state_ts_set(conn, symbol: str, tf: str, version: str = None,
+                 audit_version: str = None) -> set:
+    """已算过的 ts 集合。版本谓词是这套系统"升版自动重算"的机关：
+
+    只有 version 与 audit_version **都匹配当前代码**的行才算"已存在"；
+    旧版本行被视为缺失 → rolling_states_missing 会重算 → upsert 原地覆盖。
+    这取代了旧的"regime_audit_vN 键不存在就 DELETE 全表"迁移——那套机制
+    要求所有历史都在重算窗口内（超窗即永久截断），且任何持有迁移扳机的
+    连接（曾包括面板）都可能触发清库。谓词方案没有删除动作，天然无此风险。
+    """
+    if version is None:
+        rows = conn.execute(
+            "SELECT ts FROM regime_history WHERE symbol=? AND tf=?", (symbol, tf)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT ts FROM regime_history WHERE symbol=? AND tf=?"
+            " AND version=? AND audit_version=?",
+            (symbol, tf, version, audit_version),
+        ).fetchall()
     return {r[0] for r in rows}
 
 
 def upsert_states(conn, symbol: str, tf: str, rows) -> None:
-    """rows: 可迭代的 (ts_ms, state, confidence, features_json, rules_json, version)。"""
+    """rows: (ts_ms, state, confidence, features_json, rules_json, version, audit_version)。"""
     conn.executemany(
-        "INSERT INTO regime_history(symbol,tf,ts,state,raw_state,confidence,features,rules,version)"
-        " VALUES(?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO regime_history(symbol,tf,ts,state,raw_state,confidence,features,rules,version,audit_version)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(symbol,tf,ts) DO UPDATE SET state=excluded.state,"
         " raw_state=excluded.raw_state,"
         " confidence=excluded.confidence, features=excluded.features,"
-        " rules=excluded.rules, version=excluded.version",
+        " rules=excluded.rules, version=excluded.version,"
+        " audit_version=excluded.audit_version",
         [
-            (symbol, tf, int(t), s, s, float(c), f, ru, v)
-            for t, s, c, f, ru, v in rows
+            (symbol, tf, int(t), s, s, float(c), f, ru, v, av)
+            for t, s, c, f, ru, v, av in rows
         ],
     )
     conn.commit()
@@ -290,6 +366,25 @@ def get_deriv(conn, symbol: str, limit: int = 4000) -> pd.DataFrame:
     df = pd.read_sql_query(
         f"SELECT ts,{','.join(_DERIV_COLS)} FROM deriv"
         " WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+        conn,
+        params=(symbol, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+def get_deriv_col(conn, symbol: str, col: str, limit: int = 6000) -> pd.DataFrame:
+    """单指标窗口：只取该列非空的行，各指标窗口互不挤占。
+
+    背景：deriv 是稀疏宽表（funding 8h 结算格 / OI·premium·taker 1h 回填格 /
+    快照 5m 墙钟格 / iv30 30 分钟格全在一张表里）。按行整表取窗（LIMIT 4000）
+    会让高频的 5m 快照把低频的 funding 历史挤出窗口——每 5 分钟一行时
+    4000 行 ≈ 13.9 天，168 天的 funding 结算史两周内被淘汰殆尽。
+    """
+    if col not in _DERIV_COLS:
+        raise ValueError(f"未知 deriv 列: {col}")
+    df = pd.read_sql_query(
+        f"SELECT ts,{col} FROM deriv WHERE symbol=? AND {col} IS NOT NULL"
+        " ORDER BY ts DESC LIMIT ?",
         conn,
         params=(symbol, limit),
     )

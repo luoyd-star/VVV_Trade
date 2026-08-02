@@ -24,7 +24,7 @@ from regime.agent import chat, load_config
 
 
 def ask(symbol: str, text: str) -> None:
-    conn = storage.connect()
+    conn = storage.connect_rw_nomigrate()
     try:
         msgs = [
             {"role": r["role"], "content": r["content"]}
@@ -51,7 +51,7 @@ def main() -> None:
 
     cfg = load_config()
     symbol = args.symbol.upper()
-    conn = storage.connect()
+    conn = storage.connect_ro()
     n_hist = len(storage.get_chat(conn, limit=60))
     conn.close()
     print(
@@ -80,7 +80,7 @@ def main() -> None:
             print(f"已切换到 {symbol}", file=sys.stderr)
             continue
         if line == "/clear":
-            conn = storage.connect()
+            conn = storage.connect_rw_nomigrate()
             storage.clear_chat(conn)
             conn.close()
             print("共享历史已清空（面板刷新后同步）", file=sys.stderr)

@@ -103,6 +103,16 @@ def backfill(symbol: str) -> list:
     return rows
 
 
+def fetch_funding_history(symbol: str, limit: int = 1000) -> list:
+    """已结算资金费率（8h 结算网格）。collector 每天补拉一次。
+
+    没有这条补采，结算行就只有首轮回填那一批——窗口一旦滚过去，
+    面板的"结算行过滤"会因样本归零而静默退回混口径兜底，修复悄悄失效。
+    """
+    fr = _get("/fapi/v1/fundingRate", {"symbol": binance_perp(symbol), "limit": limit})
+    return [{"ts": int(x["fundingTime"]), "funding": float(x["fundingRate"])} for x in fr]
+
+
 def funding_interval_h(symbol: str) -> float:
     """结算周期（小时）。Binance 部分品种已从 8h 改为 4h，直接问接口而不是猜。
 

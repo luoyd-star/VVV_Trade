@@ -39,6 +39,12 @@ LAG_BARS = {
 # 不同版本产生的 regime_history 行混在一起会悄悄污染回测统计。
 RULES_VERSION = "v1"
 
+# 审计特征集版本：features JSON 的键集或口径一变就递增（规则可以不变）。
+# 两个版本都进入 state_ts_set 的跳过谓词：任一不匹配的行视为"缺失"、
+# 下一轮被 upsert 原地重算——升版自动重算，不再需要全表 DELETE。
+# 代际史：v2 补四列 / v3 pathgeom+margin / v4 atr_ds / v5 时间对齐批 / a6 加 src 键
+AUDIT_VERSION = "a6"
+
 THRESHOLDS = {
     "er_rank_trend": 0.60,    # ER 分位高于此才算"有趋势效率"
     "direction_trend": 0.30,  # 方向分绝对值高于此才认趋势
@@ -200,13 +206,16 @@ def rolling_states_missing(
     min_bars: int = 90,
     window: int = FEATURE_WINDOW,
     session_aware: bool = False,
+    source: str = None,
 ):
     """逐根 K 线做 walk-forward 状态分类，只计算 existing_ts_ms 里没有的时间戳。
 
     每根 K 线的状态只使用该根及之前的数据（窗口截断到最近 window 根），
     没有未来函数，与日后回测的口径一致。
-    返回 [(ts_ms, state, confidence, features_json, rules_json, version), ...]——
-    特征值与规则命中随行入库（审计化快照），回测无需重算特征、也不会混用规则版本。
+    返回 [(ts_ms, state, confidence, features_json, rules_json, version, audit_version), ...]
+    ——特征值与规则命中随行入库（审计化快照），回测无需重算特征、也不会混用规则版本。
+    RULES_VERSION 或 AUDIT_VERSION 任一升版，旧行会被 state_ts_set 的谓词判为缺失、
+    下一轮自动原地重算（upsert 覆盖）——升版即重算，无需手工迁移。
     """
     if len(df) < min_bars:
         return []
@@ -243,6 +252,9 @@ def rolling_states_missing(
             "margin": (f.get("margin") or {}).get("margin"),
             "m_near": (f.get("margin") or {}).get("nearest"),
             "lag": (f.get("lag_bars") or {}).get("slowest"),
+            # 数据源随行入库：ohlcv 的 source 列会被换源覆盖（last-write-wins），
+            # 快照里不留一份，换源恢复后就永久失去"这行状态当时用的是谁的数据"的取证能力
+            "src": source,
         }
         out.append(
             (
@@ -252,6 +264,7 @@ def rolling_states_missing(
                 json.dumps(audit, ensure_ascii=False),
                 json.dumps(r.rules, ensure_ascii=False),
                 RULES_VERSION,
+                AUDIT_VERSION,
             )
         )
     return out

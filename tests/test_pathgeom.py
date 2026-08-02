@@ -115,3 +115,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_all():
+    """pytest 入口：main() 内的 assert 即断言，任何一条失败即测试失败。"""
+    main()
