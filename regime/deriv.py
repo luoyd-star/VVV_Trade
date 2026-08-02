@@ -41,6 +41,7 @@ def fetch_snapshot(symbol: str) -> dict:
         "oi": float(oi["openInterest"]),
         "oi_notional": float(oi["openInterest"]) * mark,
         "funding": float(pi["lastFundingRate"]),
+        "kind": "pred",
         "premium": (mark - index) / index if index else None,
         "taker_ratio": None,
     }
@@ -67,7 +68,8 @@ def backfill(symbol: str) -> list:
 
     fr = _get("/fapi/v1/fundingRate", {"symbol": sym, "limit": 1000})
     rows += [
-        {"ts": int(x["fundingTime"]), "funding": float(x["fundingRate"])} for x in fr
+        {"ts": int(x["fundingTime"]), "funding": float(x["fundingRate"]), "kind": "settled"}
+        for x in fr
     ]
 
     oh = _get(
@@ -110,7 +112,10 @@ def fetch_funding_history(symbol: str, limit: int = 1000) -> list:
     面板的"结算行过滤"会因样本归零而静默退回混口径兜底，修复悄悄失效。
     """
     fr = _get("/fapi/v1/fundingRate", {"symbol": binance_perp(symbol), "limit": limit})
-    return [{"ts": int(x["fundingTime"]), "funding": float(x["fundingRate"])} for x in fr]
+    return [
+        {"ts": int(x["fundingTime"]), "funding": float(x["fundingRate"]), "kind": "settled"}
+        for x in fr
+    ]
 
 
 def funding_interval_h(symbol: str) -> float:

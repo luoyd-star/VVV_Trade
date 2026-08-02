@@ -7,6 +7,18 @@
 - 背离采用枢轴确认，天然滞后 piv_len 根——无未来函数：事件在确认根成立，
   标记画在枢轴根（对应 Pine 的 offset=-pivLen）；
 - ta.rma 以 SMA 为种子；ta.change 首根为 na，故 RMA 从第 2 根开始积累。
+
+与 Pine 的**有意偏离**（Codex 对照评审确认行为差异后，确认保留）：
+- 自适应带暖机期：Pine 从首根就用 nz 哨兵（-999999/999999）扫描 40 槽历史，
+  样本不足时照样输出退化带（如 4 个有效值给出 db=0/ub=10）；本实现等满
+  40 个有效 cRSI 才出带——宁缺毋滥，与全仓"样本不足返回 None"的纪律一致。
+- NaN 语义：本实现假设输入无 NaN（storage.upsert_ohlcv 在入口拒收 NaN，
+  管道保证成立），入口显式校验；Pine 的 na 传播语义（na 参与 max/rma 仍为 na）
+  在无 NaN 输入下与本实现逐值一致。
+
+时间语义：divergences 的 i 是**枢轴根**（画标记用，对应 Pine offset=-pivLen），
+confirmed_i = i + piv_len 是**确认根**——事件在确认根才可知。回测/告警必须用
+confirmed_i，否则有 piv_len 根前视。
 """
 from __future__ import annotations
 
@@ -47,7 +59,15 @@ def crsi_features(
       divergences: [{i, kind}]  kind 为 bull/bear，i 是枢轴根索引
       last_divergence: {kind, i, bars_ago} 或 None
     """
+    if not (10 <= dom_cycle <= 200 and 1 <= vibration <= 50
+            and 0.1 <= leveling <= 50.0 and 2 <= piv_len <= 20):
+        raise ValueError(
+            f"cRSI 参数越出 Pine 输入边界: dom_cycle={dom_cycle} vibration={vibration}"
+            f" leveling={leveling} piv_len={piv_len}"
+        )
     src = df[src_col].to_numpy(dtype=float)
+    if np.isnan(src).any():
+        raise ValueError("cRSI 输入含 NaN——管道上游应已拒收（upsert_ohlcv NaN 守卫）")
     n = len(src)
     cycle_len = max(1, dom_cycle // 2)
     mem = dom_cycle * 2
@@ -56,9 +76,11 @@ def crsi_features(
     aperc = leveling / 100.0
 
     # ── cRSI 主线 ──
+    # np.maximum/-minimum 保 NaN（np.where 会把 NaN 当 0）——对无 NaN 输入零改变，
+    # 让首根 na 的语义与 Pine 的 math.max(ta.change(src), 0) 逐位一致
     delta = np.diff(src, prepend=np.nan)
-    up_in = np.where(delta > 0, delta, 0.0)
-    dn_in = np.where(delta < 0, -delta, 0.0)
+    up_in = np.maximum(delta, 0.0)
+    dn_in = -np.minimum(delta, 0.0)
     up_in[0] = np.nan  # ta.change 首根为 na
     dn_in[0] = np.nan
     up = _rma(up_in, cycle_len)
@@ -139,17 +161,21 @@ def crsi_features(
             continue
         if (c < left).all() and (c < right).all():  # 枢轴低点
             if pl_prev is not None and c > pl_prev[0] and lows[i] < pl_prev[1]:
-                divergences.append({"i": i, "kind": "bull"})
+                divergences.append({"i": i, "kind": "bull", "confirmed_i": i + piv_len})
             pl_prev = (c, lows[i])
         if (c > left).all() and (c > right).all():  # 枢轴高点
             if ph_prev is not None and c < ph_prev[0] and highs[i] > ph_prev[1]:
-                divergences.append({"i": i, "kind": "bear"})
+                divergences.append({"i": i, "kind": "bear", "confirmed_i": i + piv_len})
             ph_prev = (c, highs[i])
 
     last_div = None
     if divergences:
         d0 = divergences[-1]
-        last_div = {"kind": d0["kind"], "i": d0["i"], "bars_ago": (n - 1) - d0["i"]}
+        last_div = {
+            "kind": d0["kind"], "i": d0["i"],
+            "bars_ago": (n - 1) - d0["i"],                      # 距枢轴根（展示口径）
+            "confirmed_bars_ago": (n - 1) - d0["confirmed_i"],  # 距确认根（回测/告警口径）
+        }
 
     def _r(v):
         return round(float(v), 2) if v is not None and np.isfinite(v) else None

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS regime_history(
 );
 CREATE TABLE IF NOT EXISTS deriv(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL,
-  oi REAL, oi_notional REAL, funding REAL, premium REAL, taker_ratio REAL, iv30 REAL,
+  oi REAL, oi_notional REAL, funding REAL, premium REAL, taker_ratio REAL, iv30 REAL, kind TEXT,
   PRIMARY KEY(symbol, ts)
 );
 CREATE TABLE IF NOT EXISTS usvol(
@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS live_bars(
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
-_DERIV_COLS = ("oi", "oi_notional", "funding", "premium", "taker_ratio", "iv30")
+# kind: funding 行的显式语义标记（settled=已结算 / pred=快照预测）。靠时间戳猜
+# 结算行不可靠——墙钟快照会撞进整点 ±60s 窗口（实测 523 个网格样本混入 18 个）。
+_DERIV_COLS = ("oi", "oi_notional", "funding", "premium", "taker_ratio", "iv30", "kind")
 
 
 def connect() -> sqlite3.Connection:
@@ -101,6 +103,8 @@ def _migrate(conn) -> None:
     dcols = {r[1] for r in conn.execute("PRAGMA table_info(deriv)")}
     if "iv30" not in dcols:
         conn.execute("ALTER TABLE deriv ADD COLUMN iv30 REAL")
+    if "kind" not in dcols:
+        conn.execute("ALTER TABLE deriv ADD COLUMN kind TEXT")
     conn.commit()
     # 历史上这里有一套"regime_audit_vN 键不存在就 DELETE FROM regime_history"的
     # 代际清空机制（v2 补列 / v3 pathgeom / v4 atr_ds / v5 时间对齐批），已被
@@ -399,7 +403,15 @@ def get_deriv_col(conn, symbol: str, col: str, limit: int = 6000,
     # 1001ms 级抖动，且理论上可早可晚）。这一步必须在 SQL 层做：LIMIT 若对
     # 全部非空行计数，每 5 分钟一行的快照会把网格行重新挤出窗口——
     # "结算样本枯竭"就只是被推迟而不是被消除。
-    grid = " AND MIN(ts % 3600000, 3600000 - ts % 3600000) < 60000" if hourly_grid else ""
+    # settled：kind='settled' 显式命中；kind 为 NULL 的旧行退回 **8h 结算格**判定
+    # （只是升级旧库后、首次每日补采前的过渡通道——补采会把全部真结算行重写为
+    # kind='settled'，此后这个分支不再命中任何行。不能用 1h 格：墙钟快照撞进
+    # 整点 ±60s 的旧污染行会被重新放进来）
+    grid = (
+        " AND (kind='settled'"
+        " OR (kind IS NULL AND MIN(ts % 28800000, 28800000 - ts % 28800000) < 60000))"
+        if hourly_grid else ""
+    )
     df = pd.read_sql_query(
         f"SELECT ts,{col} FROM deriv WHERE symbol=? AND {col} IS NOT NULL{grid}"
         " ORDER BY ts DESC LIMIT ?",

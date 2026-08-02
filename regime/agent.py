@@ -42,7 +42,7 @@ PANEL_LEGEND = """<panel_legend>
 下方 <panel> 是面板此刻的实时数据（每次提问自动注入）。字段说明：dir 方向分[-1,1]；
 ER% 趋势效率分位；ATR%/BBW% 波动率分位(0-1，低=挤压 高=高波)；tilt 近20根多空量差[-1,1]；
 cRSI 为周期自适应RSI，带位 0=下带 100=上带（可超界）；IV=Deribit DVOL 隐含波动率，
-RV=已实现波动率，IV−RV 为波动率风险溢价；OI=永续未平仓量（张），Funding 为每8小时费率，
+RV=已实现波动率，IV−RV 为波动率风险溢价；OI=永续未平仓量（张），Funding 为按品种结算周期的费率（显示值为下期预测、分位对照已结算分布），
 Premium=标记价对指数价的基差，Taker买卖比>1 表示主动买盘占优——这组是持仓/杠杆维度。
 状态为迟滞确认态（一般 2 根确认、恢复震荡 3 根、高波冲击立即）；[原始判定]为未折叠的逐根判定，
 [酝酿中]为尚未确认的候选切换，[未收线预览]用形成中的K线试算、只作预警不作确认依据。
@@ -118,7 +118,10 @@ def render_context(p: dict) -> str:
     if inst.get("class") == "us_stock_perp":
         name = inst.get("display") or ""
         if inst.get("market_open"):
-            lines.append(f"品种类型: 美股永续（标的 {name} 正股盘中，NYSE 9:30-16:00 ET）")
+            lines.append(
+                f"品种类型: 美股永续（标的 {name} 按工作日时钟推断为盘中 9:30-16:00 ET；"
+                "未校验节假日——若今日为美股假日则此判断错误）"
+            )
         else:
             lines.append(
                 f"品种类型: 美股永续（标的 {name} 正股休市中）——合约 24/7 交易但休市期波动塌陷，"
@@ -135,7 +138,7 @@ def render_context(p: dict) -> str:
         cand = t.get("candidate")
         raw = t.get("raw_state")
         parts = [
-            f"[{tf}] 状态={t['state_label']}(conf {t['confidence']:.2f})"
+            f"[{tf}] 状态={t['state_label']}(原始判定conf {t['confidence']:.2f}——确认态无独立置信度)"
             + (f"[原始判定={raw}]" if raw and raw != t.get("state") else "")
             + (f"[酝酿中:{cand['state']} {cand['count']}/{cand['need']}]" if cand else "")
             + (
@@ -162,12 +165,15 @@ def render_context(p: dict) -> str:
     if dv:
         lines.append(
             f"波动率: DVOL隐含={dv['iv_last']}(一年分位{dv['iv_rank']}) "
-            f"RV30={dv['rv_last']} IV−RV={dv['spread']:+.1f}pt"
+            f"RV30={dv['rv_last']}"
+            + (f" IV−RV={dv['spread']:+.1f}pt" if dv.get("spread") is not None else "")
         )
     uv = p.get("usvol")
     if uv:
+        _ivr = (p.get("deriv") or {}).get("iv30_rank")
         iv30_txt = (
-            f"个股iv30={uv['iv30_last']}(自采{uv['iv30_days']}天,历史短勿看分位)"
+            (f"个股iv30={uv['iv30_last']}(自采{uv['iv30_days']}天"
+             + (f",分位{_ivr}" if _ivr is not None else ",历史短勿看分位") + ")")
             if uv.get("iv30_last") is not None else "个股iv30=采集中"
         )
         ts_txt = (
@@ -189,7 +195,8 @@ def render_context(p: dict) -> str:
         lines.append(
             f"持仓(Binance永续): OI={_f(dr['oi'], '{:.0f}')}张(分位{_f(dr['oi_rank'])}) "
             f"Δ4h={chg4}% Δ24h={chg24}% "
-            f"Funding={_f(dr['funding_pct'], '{:.4f}')}%/8h(年化{_f(dr['funding_annual_pct'], '{:.1f}')}%,分位{_f(dr['funding_rank'])}) "
+            f"Funding={_f(dr['funding_pct'], '{:.4f}')}%/{dr.get('funding_interval_h') or 8:g}h"
+            f"(预测值；年化{_f(dr['funding_annual_pct'], '{:.1f}')}%,上期结算分位{_f(dr['funding_rank'])}) "
             f"Premium={_f(dr['premium_pct'], '{:.4f}')}%(分位{_f(dr['premium_rank'])}) "
             f"Taker买卖比={_f(dr['taker_ratio'], '{:.3f}')}(分位{_f(dr['taker_rank'])})"
             + ("（持仓历史<21天，分位仅供参考）" if dr.get("warmup") else "")
@@ -216,6 +223,10 @@ def chat(payload: dict, messages: list) -> dict:
         for m in messages
         if m.get("role") in ("user", "assistant") and str(m.get("content", "")).strip()
     ][-20:]
+    # 裁剪可能砍在 turn 中间（U1 被裁掉、A1 留下）：开头的孤立 assistant 会让
+    # 模型把上一轮回答当成对当前问题的既有立场。掐头到首个 user 为止。
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
     if not msgs or msgs[-1]["role"] != "user":
         return {"error": "最后一条消息必须是用户消息"}
 
@@ -287,6 +298,9 @@ def _codex(cfg: dict, system: str, msgs: list) -> str:
     if cfg.get("model"):
         cmd += ["-m", str(cfg["model"])]
     cmd += [str(a) for a in (cfg.get("codex_args") or [])]
+    # 只读沙箱**强制殿后**（CLI 同名参数后者生效）：聊天后端是被注入面板数据的
+    # agentic CLI，绝不能带着写权限跑在仓库目录里——codex_args 也不许覆盖这条。
+    cmd += ["-s", "read-only"]
     cmd.append(prompt)
     try:
         proc = subprocess.run(
@@ -346,6 +360,14 @@ def _anthropic(cfg: dict, system: str, msgs: list) -> str:
 
 def _openai(cfg: dict, system: str, msgs: list) -> str:
     base = (cfg.get("base_url") or "https://openrouter.ai/api/v1").rstrip("/")
+    # fail closed：openai 分支必须显式配置自己的 key 来源。全局默认的
+    # api_key_env 指向 ANTHROPIC_API_KEY——不拦的话，只切 provider 不改配置，
+    # Anthropic 的密钥就会被 Bearer 头发给 OpenRouter/任意第三方 base_url。
+    if not cfg.get("api_key") and (cfg.get("api_key_env") or "").upper().startswith("ANTHROPIC"):
+        raise RuntimeError(
+            "openai provider 需要显式配置 api_key 或 api_key_env"
+            "（拒绝把 ANTHROPIC_API_KEY 发给非 Anthropic 端点）"
+        )
     key = _api_key(cfg)
     r = requests.post(
         f"{base}/chat/completions",
@@ -355,7 +377,7 @@ def _openai(cfg: dict, system: str, msgs: list) -> str:
             "max_tokens": int(cfg.get("max_tokens", 1024)),
             "messages": [{"role": "system", "content": system}] + msgs,
         },
-        timeout=120,
+        timeout=int(cfg.get("timeout_sec", 120)),
     )
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]

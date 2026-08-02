@@ -23,7 +23,7 @@ from regime import storage
 from regime.agent import chat, load_config
 
 
-def ask(symbol: str, text: str) -> None:
+def ask(symbol: str, text: str) -> bool:
     conn = storage.connect_rw_nomigrate()
     try:
         msgs = [
@@ -35,10 +35,11 @@ def ask(symbol: str, text: str) -> None:
         out = chat(payload, msgs)
         if out.get("error"):
             print(f"[错误] {out['error']}", file=sys.stderr)
-            return
+            return False
         storage.add_chat(conn, "user", text)
         storage.add_chat(conn, "assistant", out["reply"])
         print(out["reply"])
+        return True
     finally:
         conn.close()
 
@@ -61,7 +62,9 @@ def main() -> None:
     )
 
     if args.question:
-        ask(symbol, " ".join(args.question))
+        # 单问模式失败必须以非零退出——否则 cron/脚本把静默失败当成功
+        if not ask(symbol, " ".join(args.question)):
+            sys.exit(1)
         return
 
     print("交互模式：直接提问；/symbol ETH-USDT 切品种；/clear 清空共享历史；/q 退出", file=sys.stderr)

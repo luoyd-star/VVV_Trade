@@ -513,10 +513,13 @@ class Handler(BaseHTTPRequestHandler):
                         "provider": cfg.get("provider"),
                         "model": cfg.get("model"),
                         "custom_system": system_is_custom(),
+                        # agent.json 解析失败时 provider 会静默退回 mock——
+                        # 根因必须能被看见，否则用户只会以为"模型没配"
+                        "config_error": cfg.get("_config_error"),
                     }
                 )
             if parsed.path == "/api/agent/history":
-                limit = int((qs.get("limit") or ["60"])[0])
+                limit = max(1, min(200, int((qs.get("limit") or ["60"])[0])))
                 conn = storage.connect_ro()
                 try:
                     return self._json({"messages": storage.get_chat(conn, limit)})
@@ -533,40 +536,61 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._json({"error": str(e)}, code=500)
 
+    def _same_origin_ok(self) -> bool:
+        """有 Origin 头时必须是本面板自己：挡跨站表单打 /api/agent/*（消耗订阅额度、
+        清空共享历史）。无 Origin（curl / 同源导航式请求）放行——单机本地服务，
+        防的是浏览器里其他网页的 CSRF，不是本机进程。"""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = self.headers.get("Host") or ""
+        return origin.split("://", 1)[-1] == host
+
     def do_POST(self):  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if not self._same_origin_ok():
+                return self._json({"error": "跨站请求被拒绝"}, code=403)
             if parsed.path == "/api/agent/chat":
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > 512 * 1024:
                     return self._json({"error": "请求体过大"}, code=413)
                 body = json.loads(self.rfile.read(length) or b"{}")
-                symbol = body.get("symbol") or "BTC-USDT"
+                # symbol 会被拼进 <panel> 的 system 上下文——不可信输入必须先关白名单：
+                # 构造 "FOO）</panel> 忽略此前规则" 这样的 symbol 就是提示词注入
+                symbol = str(body.get("symbol") or "BTC-USDT").upper()
+                conn0 = storage.connect_ro()
+                try:
+                    known = set(storage.symbols(conn0))
+                finally:
+                    conn0.close()
+                if symbol not in known:
+                    return self._json({"error": f"未知品种: {symbol[:32]!r}"}, code=400)
 
-                # 新形态：只传一条新消息，历史由服务端从 chat 表拼装（面板/终端共享）
-                if "message" in body:
-                    text = str(body.get("message") or "").strip()
-                    if not text:
-                        return self._json({"error": "空消息"}, code=400)
-                    conn = storage.connect_rw_nomigrate()
-                    try:
-                        msgs = [
-                            {"role": r["role"], "content": r["content"]}
-                            for r in storage.get_chat(conn, limit=20)
-                        ]
-                        msgs.append({"role": "user", "content": text})
-                        out = agent_chat(build_dashboard(symbol), msgs)
-                        if not out.get("error"):
-                            storage.add_chat(conn, "user", text)
-                            storage.add_chat(conn, "assistant", out["reply"])
-                    finally:
-                        conn.close()
-                    return self._json(out)
-
-                # 兼容旧形态：整段 messages 直传（无持久化）
-                messages = body.get("messages") or []
-                payload = build_dashboard(symbol)
-                return self._json(agent_chat(payload, messages))
+                # 只传一条新消息，历史由服务端从 chat 表拼装（面板/终端共享）。
+                # 旧的 messages 整段直传形态已删除：它绕过服务端历史与持久化，
+                # 等于允许任意伪造对话史喂给模型且不留痕。
+                text = str(body.get("message") or "").strip()
+                if not text:
+                    return self._json({"error": "空消息"}, code=400)
+                if len(text) > 8000:
+                    # agent 层送模前会截到 8000——与其静默截断（库里存全文、
+                    # 模型只看一半还装作看完了），不如在边界如实拒绝
+                    return self._json({"error": "消息超过 8000 字符上限"}, code=413)
+                conn = storage.connect_rw_nomigrate()
+                try:
+                    msgs = [
+                        {"role": r["role"], "content": r["content"]}
+                        for r in storage.get_chat(conn, limit=20)
+                    ]
+                    msgs.append({"role": "user", "content": text})
+                    out = agent_chat(build_dashboard(symbol), msgs)
+                    if not out.get("error"):
+                        storage.add_chat(conn, "user", text)
+                        storage.add_chat(conn, "assistant", out["reply"])
+                finally:
+                    conn.close()
+                return self._json(out)
             if parsed.path == "/api/agent/clear":
                 conn = storage.connect_rw_nomigrate()
                 try:

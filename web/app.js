@@ -22,9 +22,14 @@ const TF_ORDER = ['1d', '4h', '1h'];
 const S = {
   symbol: null, tf: '1d', data: null, charts: {},
   nextRefresh: Date.now() + REFRESH_MS,
-  hermes: { busy: false, lastId: 0 },
+  loadSeq: 0,
+  hermes: { busy: false, lastId: 0, syncSeq: 0 },
 };
 const $ = (id) => document.getElementById(id);
+// 服务端字符串进 innerHTML 前必须过这里：正常后端只产枚举值，但库被污染或
+// payload 异常时，未知 state 原样回退进 HTML 就是存储型 XSS 的入口
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
+  (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const hasEcharts = typeof echarts !== 'undefined';
 
 /* ---------- 格式化 ---------- */
@@ -78,13 +83,20 @@ function setActiveTab() {
   $('hermesSym').textContent = S.symbol || '--';
 }
 async function load() {
+  // 过期响应丢弃：切标的/手动加载/定时刷新并发时，晚到的旧响应不得覆盖新数据
+  // （曾可复现"标题是 ETH、内容是 BTC"的错标行情）
+  const sym = S.symbol;
+  const seq = ++S.loadSeq;
+  let j;
   try {
-    const r = await fetch(`/api/dashboard?symbol=${encodeURIComponent(S.symbol)}`);
-    S.data = await r.json();
+    const r = await fetch(`/api/dashboard?symbol=${encodeURIComponent(sym)}`);
+    j = await r.json();
   } catch (e) {
-    banner(`接口请求失败：${e}`);
+    if (seq === S.loadSeq) banner(`接口请求失败：${e}`);
     return;
   }
+  if (seq !== S.loadSeq || sym !== S.symbol) return; // 已有更新的请求在途/已完成
+  S.data = j;
   S.nextRefresh = Date.now() + REFRESH_MS;
   renderAll();
   hermesSync(); // 顺带同步共享对话（终端里的新提问会出现在这里）
@@ -112,18 +124,12 @@ function renderAll() {
   banner(issues.length ? `⚠ ${issues.join(' · ')}` : '');
   if (!d.tfs[S.tf]) S.tf = tfs[0];
 
-  renderMktBadge();
-  renderStateCards();
-  renderTfPicker();
-  renderPriceChart();
-  renderDvol();
-  renderVolRank();
-  renderDeriv();
-  renderStrips();
-  renderFeatTable();
-  renderFlips();
-  renderCollector();
-  renderFresh();
+  // 每个区块独立 try：单个卡片的数据异常只坏它自己，不把整页渲染拖死
+  [renderMktBadge, renderStateCards, renderTfPicker, renderPriceChart,
+   renderDvol, renderVolRank, renderDeriv, renderStrips, renderFeatTable,
+   renderFlips, renderCollector, renderFresh].forEach((fn) => {
+    try { fn(); } catch (e) { console.error(`渲染区块 ${fn.name} 失败:`, e); }
+  });
 }
 
 function renderMktBadge() {
@@ -148,7 +154,7 @@ function renderStateCards() {
   host.innerHTML = '';
   TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
     const t = d.tfs[tf];
-    const meta = SM[t.state] || { label: t.state, color: COL.muted };
+    const meta = SM[t.state] || { label: esc(t.state), color: COL.muted };
     const f = t.features;
     const cl = (t.crsi || {}).last || {};
 
@@ -164,14 +170,14 @@ function renderStateCards() {
     // 动态行：预览 / 酝酿 / 原始判定 统一收纳成一行
     const dyn = [];
     if (t.preview) {
-      const pm = SM[t.preview.state] || { label: t.preview.state };
+      const pm = SM[t.preview.state] || { label: esc(t.preview.state) };
       dyn.push(`预览(未收线) <b>${pm.label}</b> ${fmtN(t.preview.confidence, 2)}`);
     }
     if (t.candidate) {
-      const cm = SM[t.candidate.state] || { label: t.candidate.state };
+      const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
       dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`);
     } else if (t.raw_state && t.raw_state !== t.state) {
-      const rm = SM[t.raw_state] || { label: t.raw_state };
+      const rm = SM[t.raw_state] || { label: esc(t.raw_state) };
       dyn.push(`原始判定 <b>${rm.label}</b>`);
     }
     const mg = (f.margin || {});
@@ -409,6 +415,7 @@ function renderDvol() {
   if (!c) return;
   c.setOption({
     animation: false,
+    useUTC: true,
     color: [COL.blue, COL.amber],
     tooltip: {
       trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
@@ -447,6 +454,7 @@ function renderUsvol(uv, meta, c) {
   if (!c) return;
   c.setOption({
     animation: false,
+    useUTC: true,
     color: [COL.blue, COL.amber],
     tooltip: {
       trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
@@ -502,6 +510,7 @@ function renderDeriv() {
   if (!c) return;
   c.setOption({
     animation: false,
+    useUTC: true,
     color: [COL.blue, COL.amber],
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
     tooltip: {
@@ -526,7 +535,7 @@ function renderDeriv() {
       { name: 'OI', type: 'line', data: dr.oi_series, symbol: 'none',
         lineStyle: { width: 2 }, xAxisIndex: 0, yAxisIndex: 0,
         endLabel: { show: true, formatter: 'OI', color: COL.sub, fontSize: 9 } },
-      { name: 'Funding %/8h', type: 'bar', data: dr.funding_series,
+      { name: `Funding %/${dr.funding_interval_h || 8}h（已结算）`, type: 'bar', data: dr.funding_series,
         xAxisIndex: 1, yAxisIndex: 1, barWidth: 2 },
     ],
   }, true);
@@ -543,7 +552,7 @@ function renderStrips() {
     const row = document.createElement('div');
     row.className = 'strip-row';
     const segs = t.segments.map((sg) => {
-      const m = SM[sg.state] || { label: sg.state, color: COL.muted };
+      const m = SM[sg.state] || { label: esc(sg.state), color: COL.muted };
       const w = ((sg.e - sg.s + 1) / N * 100).toFixed(3);
       const tip = `${tf} · ${m.label} · ${fmtTs(t.candles[sg.s][0], tf)} → ${fmtTs(t.candles[sg.e][0], tf)} UTC`;
       return `<span class="seg" style="width:${w}%;background:${m.color};opacity:.85" title="${tip}"></span>`;
@@ -558,7 +567,7 @@ function renderStrips() {
 }
 
 function stchip(state) {
-  const m = SM[state] || { label: state, color: COL.muted };
+  const m = SM[state] || { label: esc(state), color: COL.muted };
   return `<span class="stchip"><span class="dot" style="background:${m.color}"></span>${m.label}</span>`;
 }
 
@@ -622,7 +631,7 @@ function renderFeatTable() {
 function renderFlips() {
   const flips = S.data.flips || [];
   const rows = flips.map((f) =>
-    `<tr><td>${fmtTs(f.ts, '4h')}</td><td>${f.tf}</td>` +
+    `<tr><td>${fmtTs(f.ts, '4h')}</td><td>${esc(f.tf)}</td>` +
     `<td style="text-align:left">${stchip(f.from)} → ${stchip(f.to)}</td>` +
     `<td>${fmtN(f.confidence, 2)}</td></tr>`);
   $('flipTable').innerHTML =
@@ -684,10 +693,15 @@ function hermesRenderAll(messages) {
 
 async function hermesSync(force) {
   if (S.hermes.busy) return; // 回答进行中不重建，避免吃掉乐观气泡
+  const seq = ++S.hermes.syncSeq;
   try {
     const r = await fetch('/api/agent/history?limit=60');
+    if (!r.ok) return;                       // 500 不是"空历史"，保持现状
     const j = await r.json();
-    const msgs = j.messages || [];
+    if (!Array.isArray(j.messages)) return;
+    // await 之后世界可能变了：有更新的同步在途，或用户已开始提问——都不准回滚
+    if (seq !== S.hermes.syncSeq || S.hermes.busy) return;
+    const msgs = j.messages;
     const lastId = msgs.length ? msgs[msgs.length - 1].id : 0;
     if (force || lastId !== S.hermes.lastId) {
       S.hermes.lastId = lastId;
@@ -703,7 +717,13 @@ function hermesRestore() {
 }
 
 async function hermesClear() {
-  try { await fetch('/api/agent/clear', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+  if (S.hermes.busy) { hermesAdd('err', '回答生成中，暂不能清空（否则在途回答会重新入库）。'); return; }
+  let okc = false;
+  try {
+    const r = await fetch('/api/agent/clear', { method: 'POST' });
+    okc = r.ok && ((await r.json()).ok === true);
+  } catch (e) { /* fallthrough */ }
+  if (!okc) { hermesAdd('err', '清空失败：服务端未确认，历史保持不变。'); return; }
   S.hermes.lastId = 0;
   hermesRenderAll([]);
   hermesAdd('bot', '已开始新会话（面板与终端共享的历史已清空）。');
@@ -725,7 +745,7 @@ async function hermesSend() {
   const text = ta.value.trim();
   if (!text || S.hermes.busy) return;
   ta.value = '';
-  hermesAdd('user', text); // 乐观展示；服务端成功后以库中记录为准
+  const optimistic = hermesAdd('user', text); // 乐观展示；服务端成功后以库中记录为准
   S.hermes.busy = true;
   $('hermesSend').disabled = true;
   const busyEl = hermesAdd('bot busy', 'VVVhermes 思考中…（codex 后端通常需要 1-3 分钟）');
@@ -739,7 +759,9 @@ async function hermesSend() {
     const j = await r.json();
     busyEl.remove();
     if (j.error) {
-      hermesAdd('err', j.error); // 失败的提问不入库（服务端保证），刷新后自然消失
+      hermesAdd('err', j.error);
+      optimistic.classList.add('unsent');
+      optimistic.title = '发送失败：此条未入共享历史';
     } else {
       hermesAdd('bot', j.reply);
       ok = true;
@@ -747,6 +769,8 @@ async function hermesSend() {
   } catch (e) {
     busyEl.remove();
     hermesAdd('err', `请求失败：${e}`);
+    optimistic.classList.add('unsent');
+    optimistic.title = '发送失败：此条未入共享历史';
   } finally {
     S.hermes.busy = false;
     $('hermesSend').disabled = false;
