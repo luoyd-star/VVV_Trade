@@ -306,9 +306,14 @@ def _deriv_payload(conn, symbol: str):
     任何"整表"统计都会让最长的列替最短的列背书（iv30 攒了 1 天却顶着
     funding 的 168 天跨度显示"不预热"），或让高频列挤掉低频列的历史。
     """
+    # oi/premium/taker/iv30 用 20000 行窗口（5m 满勤 ≈69 天，_hourly 再统一口径）；
+    # funding 的结算行在 SQL 层按整点网格分流（LIMIT 只对结算行计数——否则
+    # 每 5 分钟一行的快照预测值会把结算史重新挤出窗口，枯竭只是被推迟）。
     cols = {}
-    for c in ("oi", "funding", "premium", "taker_ratio", "iv30"):
-        cols[c] = storage.get_deriv_col(conn, symbol, c, limit=6000)
+    for c in ("oi", "premium", "taker_ratio", "iv30"):
+        cols[c] = storage.get_deriv_col(conn, symbol, c, limit=20_000)
+    cols["funding"] = storage.get_deriv_col(conn, symbol, "funding", limit=50)
+    f_settled = storage.get_deriv_col(conn, symbol, "funding", limit=1100, hourly_grid=True)
     if not any(len(v) for v in cols.values()):
         return None
 
@@ -332,11 +337,6 @@ def _deriv_payload(conn, symbol: str):
     prem_h = _hourly(cols["premium"])
     taker_h = _hourly(cols["taker_ratio"])
     iv30_h = _hourly(cols["iv30"])
-    # funding：只认 8h 结算网格上的行（1 秒容差吸收 Binance fundingTime 的毫秒抖动）。
-    # 最新一行（墙钟 ts）是 lastFundingRate = 下一次的**预测值**，只作展示；
-    # 分位的分子分母都用已结算值——预测 vs 结算是两个分布，不能混比。
-    f_all = cols["funding"]
-    f_settled = f_all[f_all["ts"] % 3_600_000 < 1_000] if len(f_all) else f_all
 
     oi, oi_ts = last_of(cols["oi"], "oi")
     funding_pred, _ = last_of(cols["funding"], "funding")
@@ -378,7 +378,11 @@ def _deriv_payload(conn, symbol: str):
         "premium_pct": round(premium * 100, 4) if premium is not None else None,
         "premium_rank": rank_of(prem_h["premium"], premium, spans["premium"]),
         "taker_ratio": round(taker, 3) if taker is not None else None,
-        "taker_rank": rank_of(taker_h["taker_ratio"], taker, spans["taker"]),
+        "taker_rank": rank_of(
+            taker_h["taker_ratio"],
+            float(taker_h["taker_ratio"].iloc[-1]) if len(taker_h) else None,
+            spans["taker"],
+        ),
         "iv30": round(iv30, 1) if iv30 is not None else None,
         "iv30_rank": rank_of(iv30_h["iv30"], iv30, spans["iv30"]),
         "spans": spans,

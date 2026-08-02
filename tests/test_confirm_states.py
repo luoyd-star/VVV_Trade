@@ -35,8 +35,9 @@ def main() -> None:
     conf, cand = confirm_states([T, T, R, R])
     assert conf == [T, T, T, T], f"range 2 根就切了: {conf}"
     assert cand == {"state": R, "count": 2, "need": 3}, f"候选计数错: {cand}"
-    conf, _ = confirm_states([T, T, R, R, R])
+    conf, cand = confirm_states([T, T, R, R, R])
     assert conf[-1] == R and conf[-2] == T, f"range 第 3 根应确认: {conf}"
+    assert cand is None, f"确认恰在末根时 candidate 必须清空: {cand}"
     print("③ 恢复震荡    2 根不切且报候选 (2/3)，第 3 根切 ✓")
 
     # ④ 冲击立即：单根 chop 直接确认
@@ -63,9 +64,10 @@ def main() -> None:
     # ⑧ 输出与输入等长、空输入安全
     assert confirm_states([]) == ([], None)
     seq = [R, T, T, C, R, R, R, S, S]
-    conf, _ = confirm_states(seq)
+    conf, cand = confirm_states(seq)
     assert len(conf) == len(seq)
     assert conf == [R, R, T, C, C, C, R, R, S], f"综合序列错: {conf}"
+    assert cand is None, f"末根恰好确认 S(2/2)，candidate 必须为 None: {cand}"
     print("⑧ 综合序列    进 T(2)→冲击 C(1)→恢复 R(3)→进 S(2) 全对 ✓")
 
     print("\n全部通过 ✓")

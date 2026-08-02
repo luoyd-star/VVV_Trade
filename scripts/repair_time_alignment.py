@@ -13,8 +13,8 @@
    deriv_backfilled_* 是一次性开关，那行永不刷新。重拉一次 premiumIndexKlines
    覆盖（新代码已带 [:-1]）。
 
-两处修完后必须让 collector 跑一轮触发 regime_audit_v5 重算——4h 的 ohlcv 值变了，
-库里的审计快照对不上了（实测 BTC 4h 90/221 行 atr_rank 不符）。
+两处修完后跑一轮 collector 即可：upsert_ohlcv 的写入对账（_invalidate_if_revised）
+会自动失效被改动 ts 之后的状态行，下一轮按版本谓词补算——无需任何手工迁移键。
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只报告差异，不写库")
     args = ap.parse_args()
-    conn = storage.connect()
+    conn = storage.connect_rw_nomigrate()
     total_fixed = 0
 
     print("=== 1. 4h 残桶修复（Deribit 1h 宽窗重采样） ===")
@@ -110,7 +110,7 @@ def main() -> None:
         print("\n[dry-run] 未写库。")
     else:
         print(f"\n完成，共写回 {total_fixed} 行。")
-        print("下一步：跑一轮 collector 触发 regime_audit_v5 全量重算。")
+        print("下一步：跑一轮 collector（写入对账已自动失效受影响状态，会按谓词补算）。")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ const SM = {
   trend_down:    { label: '趋势下行',   color: '#b91f31' },
   range:         { label: '震荡',       color: '#4a90d9' },
   squeeze:       { label: '低波动挤压', color: '#a87c05' },
-  high_vol_chop: { label: '高波动无序', color: '#5f35c9' },
+  high_vol_chop: { label: '高波动非趋势', color: '#5f35c9' },
 };
 const COL = {
   up: '#0a8a66', down: '#b91f31',

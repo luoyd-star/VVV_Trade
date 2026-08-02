@@ -59,7 +59,7 @@ def fetch_snapshot(symbol: str) -> dict:
 def backfill(symbol: str) -> list:
     """一次性回填历史，返回稀疏行列表（不同指标各自的时间网格，入库时按 ts 合并）。
 
-    funding 每 8h 结算×1000≈333 天；OI/taker/premium 按 1h×500≈20.8 天
+    funding 结算史实测约 168 天（接口 limit=1000 但只供约 6 个月）；OI/taker/premium 按 1h×500≈20.8 天
     （OI 与 taker 受 Binance 约 30 天保留期限制，这是能拿到的全部）。
     """
     sym = binance_perp(symbol)

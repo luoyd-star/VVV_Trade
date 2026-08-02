@@ -1,5 +1,8 @@
 # VVV_Trade 系统日志 · 2026-07-31
 
+> **本文是截至 2026-08-02 的快照**。此后系统已升 RULES_VERSION v2 / AUDIT_VERSION a6，
+> 版本谓词取代了文中描述的 regime_audit_vN 全表清空机制、面板已改只读连接、
+> deriv 已逐指标取窗——现状以 README 与 classify.py/storage.py 为准，本文不逐条改史。
 > 覆盖期：项目启动 → 2026-08-01 UTC
 > 数据基准：`data/market.db`（只读 `mode=ro` 盘点）、`data/collector.log`（全量）、`tests/` 实跑输出
 > 数字来源标注：📊 库内实测 / 🧪 测试实跑 / 📐 外推推算（非实测）/ ⚠️ 一次性执行、无留存工件

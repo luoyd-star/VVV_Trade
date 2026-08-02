@@ -4,7 +4,10 @@
 用法: .venv/bin/python tests/test_causality.py
 
 这是对 rolling_states_missing 那句 docstring 承诺（"没有未来函数，与日后回测
-的口径一致"）的直接检验。关键在于未来数据**真的被传进函数**：
+的口径一致"）的**装配层**检验——它证明 walk-forward 的窗口切片不引入未来数据，
+但**测不出特征内部的 shift 方向错误**（那类 bug 会同时改变前缀与完整两条路径的
+输出，两边一起错就比不出来；特征级的端点行为由 test_session_ds 等分头把守）。
+关键在于未来数据**真的被传进函数**：
     前缀路径:  rolling_states_missing(df.iloc[:cut], ...)
     完整路径:  rolling_states_missing(df, ...)
 两条路径在重叠 ts 上的 (state, confidence, features, rules) 必须逐字段相等。
@@ -49,7 +52,11 @@ def run(df, tf="1h", session_aware=False):
 
 
 def compare(past: dict, future: dict) -> dict:
-    """重叠 ts 上逐字段比较，返回各字段的不一致计数。"""
+    """重叠 ts 上逐字段比较，返回各字段的不一致计数。
+
+    四个字段一个都不能删：泄漏通常只在每个切点的末根显形，且 state 往往
+    不翻转——真正抓到差异的是 confidence（2 位小数）与 features（3 位小数）
+    的逐字段比较。把它"简化"成只比 state，突变体就存活了。"""
     bad = {"state": 0, "confidence": 0, "features": 0, "rules": 0}
     shared = set(past) & set(future)
     assert len(shared) > 100, f"重叠样本太少（{len(shared)}），fixture 不成立"
@@ -78,12 +85,18 @@ def main() -> None:
         print(f"① 切点 {cut}: 不一致 {bad}")
         assert n_bad == 0, f"追加未来数据改变了过去的输出: {bad}"
 
-    # ② session_aware 路径（去季节化因子有自己的 rolling+shift，单独验）
+    # ② session_aware 路径（走到去季节化分支，验它的装配层无泄漏）
     bad = compare(
         run(df.iloc[:600], session_aware=True), run(df, session_aware=True)
     )
     print(f"② session_aware: 不一致 {bad}")
     assert sum(bad.values()) == 0, f"去季节化路径存在未来泄漏: {bad}"
+
+    # ②b 1d 路径：BARS_PER_YEAR 不同、任何按 timeframe 条件化的逻辑都在此设防
+    d1 = make_df(420, seed=11, hourly=False)
+    bad = compare(run(d1.iloc[:300], tf="1d"), run(d1, tf="1d"))
+    print(f"②b 1d 路径: 不一致 {bad}")
+    assert sum(bad.values()) == 0, f"1d 路径存在未来泄漏: {bad}"
 
     # ③ 增量口径 = 全量口径：existing 集合跳过已算 ts 后，补出来的行
     #    必须与一次性全量算出的完全一致（collector 每轮走的就是增量路径）

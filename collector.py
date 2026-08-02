@@ -147,6 +147,17 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                 )
                 if new_states:
                     storage.upsert_states(conn, sym, tf, new_states)
+                if len(hist) >= 10_000:
+                    # 重算窗已满：窗外若还有旧版本行，升版永远重算不到它们，
+                    # 且 get_states 无版本谓词、折叠会混版——必须让人看见
+                    n_stale = conn.execute(
+                        "SELECT count(*) FROM regime_history WHERE symbol=? AND tf=?"
+                        " AND ts < ? AND (version<>? OR audit_version<>?)",
+                        (sym, tf, int(hist["ts"].iloc[0].value // 10**6),
+                         RULES_VERSION, AUDIT_VERSION),
+                    ).fetchone()[0]
+                    if n_stale:
+                        errors.append(f"{sym} {tf}: 重算窗外有 {n_stale} 行旧版本状态（混版风险）")
                 # 非对称迟滞：对整条 raw 序列做确认折叠，把确认态写回 state 列
                 rows_all = storage.get_states(conn, sym, tf, limit=100_000)
                 confirmed, cand = confirm_states([r["raw_state"] for r in rows_all])
@@ -178,14 +189,20 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                 storage.upsert_deriv(conn, sym, rows)
                 storage.set_meta(conn, flag, "1")
                 log.info("衍生品回填 %s：%d 行（funding≈333天，OI/taker/premium≈20天）", sym, len(rows))
-            # 结算周期每天问一次接口存 meta，面板/Hermes 只读库（不从数据反推，
-            # 因为 funding 列混着快照预测行，差分中位数会被带偏）；
-            # 同时补拉已结算费率——结算行是分位的分母，不补采会随窗口滚动而枯竭
-            if _should(conn, f"funding_info_at_{sym}", 86_400):
-                storage.set_meta(
-                    conn, f"funding_interval_{sym}", str(deriv_funding_interval(sym))
-                )
-                storage.upsert_deriv(conn, sym, deriv_funding_history(sym))
+            # 结算周期与已结算费率每天补一次。独立 try + 成功后才记时间戳：
+            # 用 _should 先记后做的话，一次网络失败要沉默等满 24h 才重试，
+            # 而且异常会连带跳过同一 try 里的当轮快照。
+            fk = f"funding_info_at_{sym}"
+            last_fi = storage.get_meta(conn, fk)
+            if not last_fi or time.time() - float(last_fi) > 86_400:
+                try:
+                    storage.set_meta(
+                        conn, f"funding_interval_{sym}", str(deriv_funding_interval(sym))
+                    )
+                    storage.upsert_deriv(conn, sym, deriv_funding_history(sym))
+                    storage.set_meta(conn, fk, str(time.time()))
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"funding_hist {sym}: {e}")
             snap = deriv_snapshot(sym)
             storage.upsert_deriv(conn, sym, [snap])
             log.info(

@@ -56,7 +56,7 @@ def interpret(regimes: dict) -> str:
     if d1.state == "range" and h4.state == "squeeze":
         return "日线震荡 + 4小时挤压：波动率蓄势末期，等待放量突破定方向，避免提前押注。"
     if "high_vol_chop" in (d1.state, h4.state):
-        return "存在高波动无序状态：常见于顶底转换期，此时降低敞口、等待结构重建，比预测方向更重要。"
+        return "存在高波动非趋势状态：波动率极高且未过趋势判定（规则未证明无序，也可能是高波新趋势的启动段）。此时降低敞口、等待结构确认，比预测方向更重要。"
     parts = " | ".join(f"{tf} {regimes[tf].label}" for tf in regimes)
     return f"{parts}：以大周期为背景、小周期找位置。"
 

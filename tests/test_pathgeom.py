@@ -48,7 +48,7 @@ def main() -> None:
     r1 = analyze_timeframe(df_full.iloc[:300].reset_index(drop=True), "1h")
     r2 = analyze_timeframe(df_full.iloc[:300].copy().reset_index(drop=True), "1h")
     assert r1.state == r2.state and r1.features == r2.features, "analyze 因果性失败"
-    print("1. 因果性（输出级）: PASS")
+    print("1. 确定性（输出级）: PASS")
 
     # ── 2. 慢正弦 → 低频率、主周期≈40 ──
     t = np.arange(240)

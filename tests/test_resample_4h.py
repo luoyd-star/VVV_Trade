@@ -65,6 +65,16 @@ def main() -> None:
     assert g3.equals(_resample_4h(df3)), "重采样不幂等"
     print("④ 幂等性      两次重采样逐值相等 ✓")
 
+    # ⑤ 中段缺口：窗口中部缺 1h（交易所维护/断流）产生的残桶必须丢弃——
+    #    与首桶同一腐坏类别：残值经 upsert 定格入库，代码修好了也不自愈
+    df5 = hourly(0, 12)
+    df5 = df5[df5.index != 5].reset_index(drop=True)   # 挖掉 05:00 → 04-07 桶只剩 3 根
+    g5 = _resample_4h(df5)
+    hours5 = [int(t.value // 10**9) % 86_400 // 3600 for t in g5["ts"]]
+    print(f"⑤ 中段缺口    保留桶起始小时={hours5}（04 桶残缺应被丢）")
+    assert 4 not in hours5, f"中段残桶未被丢弃: {hours5}"
+    assert hours5 == [0, 8], f"应只剩完整的 00 桶与末桶 08: {hours5}"
+
     print("\n全部通过 ✓")
 
 

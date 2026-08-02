@@ -79,8 +79,13 @@ def connect_ro() -> sqlite3.Connection:
 
 
 def connect_rw_nomigrate() -> sqlite3.Connection:
-    """可写但不迁移：面板的 chat 表读写专用（面板不该有迁移扳机）。"""
-    conn = sqlite3.connect(DB_PATH, timeout=15)
+    """可写但不迁移：面板的 chat 表读写专用（面板不该有迁移扳机）。
+
+    mode=rw：只打开已存在的库，绝不新建——否则库尚未由 collector 建立时，
+    一次 POST /api/agent/chat 会静默留下一个无表空库文件，把"先起 collector"
+    的部署顺序语义悄悄破坏掉。
+    """
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=rw", uri=True, timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -177,6 +182,9 @@ def _invalidate_if_revised(conn, symbol: str, tf: str, rows) -> None:
         if prev is None:
             continue
         for a, b in zip(prev, r[3:8]):
+            if a is None or (a != a):  # 库内历史遗留 NULL/NaN：一律视为已修订
+                first_changed = r[2] if first_changed is None else min(first_changed, r[2])
+                break
             if abs(a - b) > 1e-9 * max(1.0, abs(a), abs(b)):
                 first_changed = r[2] if first_changed is None else min(first_changed, r[2])
                 break
@@ -186,14 +194,18 @@ def _invalidate_if_revised(conn, symbol: str, tf: str, rows) -> None:
             (symbol, tf, first_changed),
         ).rowcount
         conn.commit()
-        log = __import__("logging").getLogger("storage")
-        log.warning(
-            "%s %s 检测到 K 线修订（首个变更 ts=%d）→ 已失效 %d 行状态，本轮将重算",
-            symbol, tf, first_changed, n,
-        )
+        if n:
+            __import__("logging").getLogger("storage").warning(
+                "%s %s 检测到 K 线修订（首个变更 ts=%d）→ 已失效 %d 行状态，本轮将重算",
+                symbol, tf, first_changed, n,
+            )
 
 
 def upsert_ohlcv(conn, symbol: str, tf: str, df: pd.DataFrame, source: str) -> None:
+    # NaN 拒收：NaN 会以 SQL NULL 落库，下一轮对账时 None 与 float 相减抛
+    # TypeError，把该 (symbol,tf) 永久炸死在 cycle 的 try 里。宁可这一轮报错。
+    if df[["open", "high", "low", "close", "volume"]].isna().any().any():
+        raise ValueError(f"{symbol} {tf} 行情含 NaN，拒绝入库（source={source}）")
     _assert_grid(conn, symbol, tf, ts_to_ms(df["ts"]), source)
     rows = [
         (symbol, tf, int(t), float(o), float(h), float(l), float(c), float(v), source)
@@ -372,7 +384,8 @@ def get_deriv(conn, symbol: str, limit: int = 4000) -> pd.DataFrame:
     return df.iloc[::-1].reset_index(drop=True)
 
 
-def get_deriv_col(conn, symbol: str, col: str, limit: int = 6000) -> pd.DataFrame:
+def get_deriv_col(conn, symbol: str, col: str, limit: int = 6000,
+                  hourly_grid: bool = False) -> pd.DataFrame:
     """单指标窗口：只取该列非空的行，各指标窗口互不挤占。
 
     背景：deriv 是稀疏宽表（funding 8h 结算格 / OI·premium·taker 1h 回填格 /
@@ -382,8 +395,13 @@ def get_deriv_col(conn, symbol: str, col: str, limit: int = 6000) -> pd.DataFram
     """
     if col not in _DERIV_COLS:
         raise ValueError(f"未知 deriv 列: {col}")
+    # hourly_grid：只取落在整点网格上的行（±60s 双向容差——fundingTime 实测有
+    # 1001ms 级抖动，且理论上可早可晚）。这一步必须在 SQL 层做：LIMIT 若对
+    # 全部非空行计数，每 5 分钟一行的快照会把网格行重新挤出窗口——
+    # "结算样本枯竭"就只是被推迟而不是被消除。
+    grid = " AND MIN(ts % 3600000, 3600000 - ts % 3600000) < 60000" if hourly_grid else ""
     df = pd.read_sql_query(
-        f"SELECT ts,{col} FROM deriv WHERE symbol=? AND {col} IS NOT NULL"
+        f"SELECT ts,{col} FROM deriv WHERE symbol=? AND {col} IS NOT NULL{grid}"
         " ORDER BY ts DESC LIMIT ?",
         conn,
         params=(symbol, limit),

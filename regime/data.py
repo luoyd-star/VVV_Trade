@@ -81,8 +81,13 @@ def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
         volume=("volume", "sum"),
         n=("close", "size"),
     )
-    if len(g) and int(g["n"].iloc[0]) < 4:
-        g = g.iloc[1:]
+    # 非末桶必须完整（n==4）：不止首桶——取数窗口中段的 1h 缺口（交易所维护/
+    # 断流）同样会产生残桶，经 upsert 定格入库就是当年 4h 残桶事故的翻版。
+    # 末桶无论残否都保留：它是"形成中"的当前 4h，live_bars 预览要用。
+    if len(g) > 1:
+        keep = (g["n"] == 4).values
+        keep[-1] = True
+        g = g[keep]
     g = g.drop(columns=["n"])
     g.insert(0, "ts", pd.to_datetime(g.index, unit="s", utc=True))
     return g.reset_index(drop=True)
