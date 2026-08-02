@@ -26,8 +26,8 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     """SMA-ATR(14)——**不是** Wilder RMA。
 
     Wilder 的 alpha=1/14 等价 span≈27，记忆约为 SMA(14) 的两倍、尖峰后衰减
-    慢得多；实测 1h 末根两者差 39%~57%，经分位吸收后仍会翻转约 6%~10% 的
-    squeeze/high_vol 布尔。迁移阈值到 TradingView 等 Wilder 实现时必须换算。
+    慢得多；实测 BTC 1h（358 根）末根差 9.9%、中位 9.3%、P90 24.0%（早期快照记的 39%~57%
+    是特定时点的极值，已核伪）；经分位吸收后仍会翻转部分 squeeze/high_vol 布尔。迁移阈值到 TradingView 等 Wilder 实现时必须换算。
     是否切换 Wilder 留给回测校准裁决（那是 RULES_VERSION 升版级别的变更）；
     在此之前，本实现的名字必须诚实：它是 SMA 变体。
     """

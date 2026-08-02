@@ -23,6 +23,22 @@ from regime import storage
 from regime.agent import chat, load_config
 
 
+def _check_symbol(symbol: str) -> str:
+    """品种白名单：symbol 会被拼进 <panel> 的 system 上下文，是提示词注入向量。
+    面板端点早就关死了（dashboard.py），CLI 一直漏着——审计时用
+    `-s NOPE-USDT` 验退出码，结果真调了一次模型并写库两行（本文档 6.5 案例）。"""
+    conn = storage.connect_ro()
+    try:
+        known = set(storage.symbols(conn))
+    finally:
+        conn.close()
+    if symbol not in known:
+        raise SystemExit(
+            f"未知品种 {symbol!r}——库里现有：{', '.join(sorted(known))}"
+        )
+    return symbol
+
+
 def ask(symbol: str, text: str) -> bool:
     conn = storage.connect_rw_nomigrate()
     try:
@@ -51,7 +67,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config()
-    symbol = args.symbol.upper()
+    symbol = _check_symbol(args.symbol.upper())
     conn = storage.connect_ro()
     n_hist = len(storage.get_chat(conn, limit=60))
     conn.close()
@@ -61,6 +77,8 @@ def main() -> None:
         file=sys.stderr,
     )
 
+    if args.question and len(" ".join(args.question)) > 8000:
+        raise SystemExit("消息超过 8000 字符上限（与面板 /api/agent/chat 同一边界）")
     if args.question:
         # 单问模式失败必须以非零退出——否则 cron/脚本把静默失败当成功
         if not ask(symbol, " ".join(args.question)):
@@ -79,7 +97,12 @@ def main() -> None:
         if line in ("/q", "/quit", "exit"):
             break
         if line.startswith("/symbol "):
-            symbol = line.split(None, 1)[1].strip().upper()
+            want = line.split(None, 1)[1].strip().upper()
+            try:
+                symbol = _check_symbol(want)
+            except SystemExit as e:   # REPL 里不该退出进程，提示后继续
+                print(str(e), file=sys.stderr)
+                continue
             print(f"已切换到 {symbol}", file=sys.stderr)
             continue
         if line == "/clear":

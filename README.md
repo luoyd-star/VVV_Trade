@@ -19,7 +19,7 @@
 一般状态连续 2 根确认进入、恢复震荡需 3 根、高波冲击立即进入；未确认的切换以"候选状态
 (n/need)"暴露给面板与 VVVhermes。实测 BTC 1h 翻转从 26 次降到 12 次。
 
-**审计化快照**：每行随存 `features`（键集随 `AUDIT_VERSION` 演进，当前 a6 为 23 项）、`rules`（触发/未满足规则清单）与
+**审计化快照**：每行随存 `features`（键集随 `AUDIT_VERSION` 演进，当前 a7 为 23 项）、`rules`（触发/未满足规则清单）与
 `version`（RULES_VERSION，改阈值必须递增）——回测无需重算特征，也不会混用规则版本。
 
 **数据健康**：每周期标记 `warmup`（历史 <280 根，分位参照期不足）与 `stale`
@@ -118,7 +118,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python collector.py
 ```
 
-可视化面板（工程模式，深色，zero 额外依赖；ECharts 走 CDN）：
+可视化面板（工程模式，浅色主题，零额外依赖；ECharts 走 CDN）：
 
 ```bash
 .venv/bin/python dashboard.py    # → http://127.0.0.1:8787
