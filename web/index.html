@@ -10,7 +10,19 @@
 <body>
 <header>
   <div class="brand">VVV<span class="brand-sub">市场状态面板</span><span class="mode-tag">工程模式</span></div>
-  <nav id="tabs" class="tabs"></nav>
+
+  <!-- 品种：下拉 + 搜索（替代原来的一排 pill；品种增长后不再挤爆顶栏） -->
+  <div class="symsel" id="symSel">
+    <button class="symbtn" id="symBtn" type="button">
+      <span class="dot" id="symDot"></span><span class="mono" id="symName">--</span><span class="caret">▾</span>
+    </button>
+    <div class="symmenu" id="symMenu" hidden>
+      <input id="symSearch" class="syminput" placeholder="搜索品种…" autocomplete="off">
+      <div class="symlist" id="symList"></div>
+    </div>
+  </div>
+
+  <div class="hgap"></div>
   <div class="hstat">
     <span id="mktBadge" class="badge" hidden></span>
     <span id="fresh" class="badge">加载中…</span>
@@ -24,12 +36,26 @@
 <main>
   <div class="banner" id="banner" hidden></div>
 
-  <section class="row" id="stateCards"></section>
+  <!-- ① 结论板：三周期状态 / 波动率是否极值 / 有没有在酝酿切换 -->
+  <section class="board">
+    <div class="board-states" id="stateCards"></div>
+    <div class="board-lower">
+      <div>
+        <div class="board-lbl">波动率分位 · 刻线 0.15 挤压 / 0.85 高波</div>
+        <div class="ranks" id="volRanks"></div>
+      </div>
+      <div>
+        <div class="board-lbl">待确认切换与边界</div>
+        <div class="alerts" id="alerts"></div>
+      </div>
+    </div>
+  </section>
 
+  <!-- ② 证据层：主图 + 波动率 / 持仓 -->
   <section class="row">
     <div class="card span8">
       <div class="card-h">
-        <h3>价格结构 + cRSI <span class="sub" id="priceMeta"></span></h3>
+        <h3>价格结构 + cRSI + VWAP <span class="sub" id="priceMeta"></span></h3>
         <div class="tfpick" id="tfPicker"></div>
       </div>
       <div class="legend" id="priceLegend"></div>
@@ -37,10 +63,8 @@
     </div>
     <div class="col span4">
       <div class="card">
-        <div class="card-h"><h3>波动率</h3><span class="sub" id="dvolMeta"></span></div>
-        <div id="dvolChart" class="chart half"></div>
-        <div class="divider"><span>ATR / BBW 分位（当前周期） · 0.15 挤压线 / 0.85 高波线</span></div>
-        <div id="volRankChart" class="chart half"></div>
+        <div class="card-h"><h3>IV vs RV30</h3><span class="sub" id="dvolMeta"></span></div>
+        <div id="dvolChart" class="chart iv"></div>
       </div>
       <div class="card">
         <div class="card-h"><h3>持仓与杠杆（Binance 永续）</h3><span class="sub" id="derivMeta"></span></div>
@@ -50,28 +74,45 @@
     </div>
   </section>
 
+  <!-- ③ 历史：时间线与翻转合成一张卡 -->
   <section class="row">
-    <div class="card span8">
-      <div class="card-h"><h3>状态时间线（walk-forward 确认态）</h3><div class="legend" id="stripLegend"></div></div>
-      <div id="strips"></div>
-    </div>
-    <div class="card span4">
-      <div class="card-h"><h3>状态翻转日志</h3><span class="sub">确认态 · 最近 40 条</span></div>
-      <div class="tablewrap strips-h"><table id="flipTable"></table></div>
+    <div class="card span12">
+      <div class="card-h">
+        <h3>状态时间线与翻转 <span class="sub">walk-forward 确认态</span></h3>
+        <div class="legend" id="stripLegend"></div>
+      </div>
+      <div class="hist">
+        <div id="strips"></div>
+        <div class="hist-flips">
+          <div class="tablewrap"><table id="flipTable"></table></div>
+        </div>
+      </div>
     </div>
   </section>
 
-  <section class="row">
-    <div class="card span9">
-      <div class="card-h"><h3>特征明细</h3><span class="sub">按支柱分组 · 完整原始值在 regime_history 审计快照</span></div>
-      <div class="tablewrap"><table id="featTable"></table></div>
+  <!-- ④ 明细与运维：默认折叠 -->
+  <details class="fold" id="detail">
+    <summary><b>特征明细与运维</b><span class="sub">26 项特征 · ATR/BBW 分位历史 · 采集器</span><span class="foldhint"></span></summary>
+    <div class="fold-body">
+      <div class="row">
+        <div class="card span9">
+          <div class="card-h"><h3>特征明细</h3><span class="sub">按支柱分组 · 完整原始值在 regime_history 审计快照</span></div>
+          <div class="tablewrap"><table id="featTable"></table></div>
+        </div>
+        <div class="card span3">
+          <div class="card-h"><h3>采集器</h3><span id="colStat" class="badge">--</span></div>
+          <div id="colInfo" class="kv"></div>
+          <pre id="colLog" class="log"></pre>
+        </div>
+      </div>
+      <div class="row">
+        <div class="card span12">
+          <div class="card-h"><h3>ATR / BBW 分位历史（当前周期）</h3><span class="sub">0.15 挤压线 / 0.85 高波线</span></div>
+          <div id="volRankChart" class="chart half"></div>
+        </div>
+      </div>
     </div>
-    <div class="card span3">
-      <div class="card-h"><h3>采集器</h3><span id="colStat" class="badge">--</span></div>
-      <div id="colInfo" class="kv"></div>
-      <pre id="colLog" class="log"></pre>
-    </div>
-  </section>
+  </details>
 
   <footer>数据源 Deribit / OKX / Binance 公共接口 · 时间均为 UTC · 研究工具，不构成投资建议</footer>
 </main>
@@ -84,8 +125,14 @@
     <button id="hermesClose" class="hbtn" title="收起">×</button>
   </div>
   <div class="h-note">每次提问自动附带 <span id="hermesSym" class="mono">--</span> 面板的实时数据</div>
+  <div class="h-chips" id="hermesChips">
+    <button class="chipbtn" type="button">三周期是否共振？</button>
+    <button class="chipbtn" type="button">为什么还没确认切换？</button>
+    <button class="chipbtn" type="button">VWAP 偏离说明什么？</button>
+    <button class="chipbtn" type="button">数据健康有问题吗？</button>
+  </div>
   <div class="h-msgs" id="hermesMsgs">
-    <div class="msg bot">你好，我是 VVVhermes。我能读到左边面板的实时状态、特征值、cRSI、IV/RV 与翻转历史——直接问即可，比如"当前 1d 为什么判定为挤压？"</div>
+    <div class="msg bot">你好，我是 VVVhermes。我能读到左边面板的实时状态、特征值、cRSI、IV/RV、VWAP 偏离与翻转历史——直接问即可，比如"当前 1d 为什么判定为挤压？"</div>
   </div>
   <div class="h-input">
     <textarea id="hermesText" rows="2" placeholder="问 VVVhermes…（Enter 发送，Shift+Enter 换行）"></textarea>

@@ -11,3 +11,4 @@ agent.json
 
 # 本机工具授权，与项目本身无关
 .claude/settings.local.json
+web/*.bak

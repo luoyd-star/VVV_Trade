@@ -64,23 +64,51 @@ function ago(ms) {
 async function loadSymbols() {
   const r = await fetch('/api/symbols');
   const j = await r.json();
-  const syms = j.symbols && j.symbols.length ? j.symbols : ['BTC-USDT'];
-  const nav = $('tabs');
-  nav.innerHTML = '';
-  syms.forEach((sym) => {
-    const b = document.createElement('button');
-    b.textContent = sym;
-    b.onclick = () => { S.symbol = sym; setActiveTab(); load(); };
-    b.dataset.sym = sym;
-    nav.appendChild(b);
-  });
-  S.symbol = S.symbol || syms[0];
+  S.symbols = (j.symbols && j.symbols.length) ? j.symbols : ['BTC-USDT'];
+  S.symbol = S.symbol || S.symbols[0];
+  renderSymList();
   setActiveTab();
+  $('symBtn').onclick = (e) => {
+    e.stopPropagation();
+    const m = $('symMenu');
+    m.hidden = !m.hidden;
+    if (!m.hidden) { $('symSearch').value = ''; renderSymList(); $('symSearch').focus(); }
+  };
+  $('symSearch').oninput = renderSymList;
+  $('symSearch').onkeydown = (e) => { if (e.key === 'Escape') $('symMenu').hidden = true; };
+  document.addEventListener('click', (e) => {
+    if (!$('symSel').contains(e.target)) $('symMenu').hidden = true;
+  });
 }
+
+function renderSymList() {
+  const q = ($('symSearch').value || '').trim().toUpperCase();
+  const host = $('symList');
+  host.innerHTML = '';
+  (S.symbols || []).filter((s) => !q || s.toUpperCase().includes(q)).forEach((sym) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = sym === S.symbol ? 'active' : '';
+    b.innerHTML = `<span class="sym">${esc(sym)}</span>`;
+    b.onclick = () => {
+      S.symbol = sym;
+      $('symMenu').hidden = true;
+      setActiveTab();
+      load();
+    };
+    host.appendChild(b);
+  });
+  if (!host.children.length) host.innerHTML = '<div class="sub" style="padding:6px">无匹配品种</div>';
+}
+
+// 顶栏按钮：名称 + 1d 状态色圆点（数据到了才有颜色）
 function setActiveTab() {
-  document.querySelectorAll('#tabs button').forEach((b) =>
-    b.classList.toggle('active', b.dataset.sym === S.symbol));
+  $('symName').textContent = S.symbol || '--';
   $('hermesSym').textContent = S.symbol || '--';
+  const t = S.data && S.data.tfs && (S.data.tfs['1d'] || S.data.tfs['4h'] || S.data.tfs['1h']);
+  $('symDot').style.background = t ? ((SM[t.state] || {}).color || COL.muted) : COL.muted;
+  document.querySelectorAll('#symList button').forEach((b) =>
+    b.classList.toggle('active', b.textContent === S.symbol));
 }
 async function load() {
   // 过期响应丢弃：切标的/手动加载/定时刷新并发时，晚到的旧响应不得覆盖新数据
@@ -125,9 +153,9 @@ function renderAll() {
   if (!d.tfs[S.tf]) S.tf = tfs[0];
 
   // 每个区块独立 try：单个卡片的数据异常只坏它自己，不把整页渲染拖死
-  [renderMktBadge, renderStateCards, renderTfPicker, renderPriceChart,
-   renderDvol, renderVolRank, renderDeriv, renderStrips, renderFeatTable,
-   renderFlips, renderCollector, renderFresh].forEach((fn) => {
+  [renderMktBadge, renderStateCards, renderVolRanks, renderAlerts, renderTfPicker,
+   renderPriceChart, renderDvol, renderVolRank, renderDeriv, renderStrips,
+   renderFeatTable, renderFlips, renderCollector, renderFresh].forEach((fn) => {
     try { fn(); } catch (e) { console.error(`渲染区块 ${fn.name} 失败:`, e); }
   });
 }
@@ -158,7 +186,6 @@ function renderStateCards() {
     const f = t.features;
     const cl = (t.crsi || {}).last || {};
 
-    // 数据健康 → tf 旁角标（悬浮看详情），不再占用标记行
     let warn = '';
     if (t.health && (t.health.stale || t.health.warmup)) {
       const tips = [];
@@ -167,12 +194,9 @@ function renderStateCards() {
       warn = `<span class="warn-ico" title="${tips.join('；')}">⚠️</span>`;
     }
 
-    // conf 属于最新**原始判定**，且各状态公式不同、不可跨状态挪用（squeeze 的
-    // conf=1-bbw_rank 不能给"趋势上行"背书）。与确认态分歧时必须挂在原始判定旁。
     const diverged = t.raw_state && t.raw_state !== t.state;
     const confTxt = `conf ${fmtN(t.confidence, 2)}`;
 
-    // 动态行：预览 / 酝酿 / 原始判定 统一收纳成一行
     const dyn = [];
     if (t.preview) {
       const pm = SM[t.preview.state] || { label: esc(t.preview.state) };
@@ -180,7 +204,6 @@ function renderStateCards() {
     }
     if (t.candidate) {
       const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
-      // candidate.state 恒等于最新 raw（confirm_states 保证），conf 可直接挂这
       dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`
         + (diverged && t.candidate.state === t.raw_state ? ` · ${confTxt}` : ''));
     }
@@ -190,49 +213,112 @@ function renderStateCards() {
     }
     const mg = (f.margin || {});
     if (mg.margin != null && mg.margin < 0.15) {
-      dyn.push(`⚡边界过渡 m=${fmtN(mg.margin, 2)}（${mg.nearest}）`);
+      dyn.push(`⚡边界过渡 m=${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
     }
-    const transHtml = dyn.length ? dyn.join(' · ') : '稳定 · 无待确认切换';
+    if (!dyn.length) dyn.push('稳定 · 无待确认切换'
+      + (mg.margin != null ? ` · margin ${fmtN(mg.margin, 2)}` : ''));
 
-    // 标记 chips：按优先级最多 4 个
+    // 标记（原 chips）压成一行灰字，优先级前 4 个
     const flags = [];
     if (f.volatility.squeeze) flags.push('SQZ 挤压');
     if (f.volatility.high_vol) flags.push('HV 高波');
-    if (cl.zone && cl.zone !== '带内') flags.push(`cRSI ${cl.zone}（${fmtN(cl.pos, 0)}%）`);
-    const dv = (t.crsi || {}).last_divergence;
-    if (dv && dv.bars_ago <= 10) flags.push(`${dv.kind === 'bull' ? '看涨' : '看跌'}背离 ${dv.bars_ago}根前`);
+    if (cl.zone && cl.zone !== '带内') flags.push(`cRSI ${esc(cl.zone)}（${fmtN(cl.pos, 0)}%）`);
+    const dvg = (t.crsi || {}).last_divergence;
+    if (dvg && dvg.bars_ago <= 10) flags.push(`${dvg.kind === 'bull' ? '看涨' : '看跌'}背离 ${dvg.bars_ago}根前`);
     if (f.volume.breakout) {
       const b = f.volume.breakout;
       flags.push(`突破${b.dir === 'up' ? '↑' : '↓'} 量分位 ${fmtN(b.vol_rank, 2)}`);
     }
 
-    // 置信度条恒表示原始判定：分歧时用原始态的颜色（与下方动态行配对），
-    // 不再借确认态的颜色/位置为其背书；无分歧时二者本就是同一状态
-    const rawMeta = diverged ? (SM[t.raw_state] || { color: COL.muted }) : meta;
+    // VWAP 偏离双向条：0 居中，±2 ATR 刻线，墨色（琥珀是挤压状态色，不能复用）
+    const vw = t.vwap || null;
+    const dev = vw && vw.dev != null ? vw.dev : null;
+    const w = dev == null ? 0 : Math.min(Math.abs(dev) / 3, 1) * 50;
+    const left = dev == null ? 50 : (dev >= 0 ? 50 : 50 - w);
+    const vwapHtml = dev == null
+      ? '<span class="muted">VWAP 偏离 —（量流未就绪）</span>'
+      : `<span class="bipolar"><u class="zero"></u><u class="n2"></u><u class="p2"></u>
+           <i style="left:${left}%;width:${w}%"></i></span>
+         <span>VWAP 偏离 ${fmtN(dev, 2, true)} ATR`
+        + `${vw.dev_rank != null ? ` · 分位 ${fmtN(vw.dev_rank, 2)}` : ''}`
+        + ` · 币安量 ${vw.win_hours}h 窗</span>`;
+
     const el = document.createElement('div');
-    el.className = 'scard';
-    el.style.borderLeftColor = meta.color;
+    el.className = 'sblock';
     el.innerHTML = `
-      <div class="top">
+      <div class="sb-top">
         <span class="tf">${tf}</span>${warn}
-        <span class="dot" style="background:${meta.color}"></span>
-        <span class="stname">${meta.label}</span>
-        ${diverged ? '' : `<span class="conf">${confTxt}</span>`}
+        <span class="sb-conf">${confTxt}</span>
       </div>
-      <div class="meter" title="原始判定置信度"><i style="width:${Math.round(t.confidence * 100)}%;background:${rawMeta.color}"></i></div>
-      <div class="trans">${transHtml}</div>
-      <div class="metrics">
-        <div class="m"><b>${fmtN(f.structure.direction, 2, true)}</b><span>dir</span></div>
-        <div class="m"><b>${fmtN(f.er_rank, 2)}</b><span>ER%</span></div>
-        <div class="m"><b>${fmtN(f.volatility.atr_rank, 2)}</b><span>ATR%</span></div>
-        <div class="m"><b>${fmtN(f.volatility.bbw_rank, 2)}</b><span>BBW%</span></div>
-        <div class="m"><b>${fmtN(f.volume.updown_tilt_20, 2, true)}</b><span>tilt</span></div>
-        <div class="m"><b>${fmtN(cl.crsi, 1)}</b><span>cRSI</span></div>
-        <div class="m"><b>${t.vwap && t.vwap.dev != null ? fmtN(t.vwap.dev, 2, true) : '—'}</b><span>VWAPd</span></div>
+      <div class="sb-name"><i style="background:${meta.color}"></i><b>${meta.label}</b></div>
+      <div class="sb-dyn">
+        ${dyn.map((x) => `<span>${x}</span>`).join('')}
+        ${flags.length ? `<span class="muted">${flags.slice(0, 4).join(' · ')}</span>` : ''}
       </div>
-      <div class="flagline">${flags.slice(0, 4).map((x) => `<span class="chip">${x}</span>`).join('') || '<span class="chip">无标记</span>'}</div>`;
+      <div class="sb-vwap">${vwapHtml}</div>`;
     host.appendChild(el);
   });
+  setActiveTab(); // 顶栏圆点跟随 1d 状态色
+}
+
+// 六条分位条：1d/4h/1h × ATR/BBW。<0.15 涂挤压色、>0.85 涂高波色，其余 accent。
+function renderVolRanks() {
+  const d = S.data;
+  const items = [];
+  TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
+    const v = d.tfs[tf].features.volatility;
+    items.push([`${tf} ATR`, v.atr_rank]);
+    items.push([`${tf} BBW`, v.bbw_rank]);
+  });
+  $('volRanks').innerHTML = items.map(([k, val]) => {
+    if (val == null) {
+      return `<div class="rank"><div class="rank-h"><span>${k}</span><b class="muted">—</b></div>
+              <div class="bar"><u class="t15"></u><u class="t85"></u></div></div>`;
+    }
+    const c = val < 0.15 ? 'var(--squeeze)' : (val > 0.85 ? 'var(--chop)' : 'var(--accent)');
+    return `<div class="rank">
+      <div class="rank-h"><span>${k}</span><b style="color:${c}">${fmtN(val, 2)}</b></div>
+      <div class="bar"><i style="width:${Math.round(val * 100)}%;background:${c}"></i>
+        <u class="t15"></u><u class="t85"></u></div></div>`;
+  }).join('');
+}
+
+// 每个周期一行：酝酿中的候选 > 未收线预览 > 边界过渡 > 数据健康 > 稳定
+function renderAlerts() {
+  const d = S.data;
+  const rows = TF_ORDER.filter((tf) => d.tfs[tf]).map((tf) => {
+    const t = d.tfs[tf];
+    const mg = (t.features.margin || {});
+    const bits = [];
+    let cls = '';
+    if (t.candidate) {
+      const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
+      bits.push(`酝酿 ${cm.label} ${t.candidate.count}/${t.candidate.need}`);
+      cls = 'warn';
+    }
+    if (t.preview) {
+      const pm = SM[t.preview.state] || { label: esc(t.preview.state) };
+      bits.push(`预览(未收线) ${pm.label} ${fmtN(t.preview.confidence, 2)}`);
+      cls = cls || 'warn';
+    }
+    if (mg.margin != null && mg.margin < 0.15) {
+      bits.push(`margin ${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
+      cls = cls || 'warn';
+    }
+    if (t.health && t.health.stale) {
+      bits.push(`数据陈旧 ${t.health.last_close_age_min} 分钟`);
+      cls = 'bad';
+    } else if (t.health && t.health.warmup) {
+      bits.push(`预热中 ${t.health.bars} 根`);
+      cls = cls || 'warn';
+    }
+    if (!bits.length) {
+      bits.push('稳定 · 无待确认切换'
+        + (mg.margin != null ? ` · margin ${fmtN(mg.margin, 2)}` : ''));
+    }
+    return `<div class="alert ${cls}"><span class="tf">${tf}</span><span>${bits.join(' · ')}</span></div>`;
+  });
+  $('alerts').innerHTML = rows.join('');
 }
 
 function renderTfPicker() {
@@ -264,7 +350,7 @@ function renderPriceChart() {
   ).join('') + `<span class="li"><span class="sw" style="background:${COL.blue}"></span>EMA50 / cRSI</span>
     <span class="li"><span class="sw" style="background:${COL.azure}"></span>cRSI 自适应带</span>
     <span class="li"><span class="sw" style="background:${COL.muted}"></span>H/L 摆动点 · ●背离</span>
-    <span class="li"><span class="sw" style="background:#a87c05"></span>VWAP（币安量）/ 偏离</span>`;
+    <span class="li"><span class="sw" style="background:${COL.ink}"></span>VWAP（币安量）/ 偏离</span>`;
   const c = chart('priceChart');
   if (!c) return;
 
@@ -348,8 +434,8 @@ function renderPriceChart() {
       { scale: true, gridIndex: 2, splitLine: { lineStyle: { color: COL.grid } },
         axisLabel: { color: COL.muted, fontSize: 9.5 } },
       { scale: true, gridIndex: 3, splitLine: { show: false },
-        axisLabel: { color: '#a87c05', fontSize: 9 },
-        name: 'VWAP偏离(ATR)', nameTextStyle: { color: '#a87c05', fontSize: 9 },
+        axisLabel: { color: COL.ink, fontSize: 9 },
+        name: 'VWAP偏离(ATR)', nameTextStyle: { color: COL.ink, fontSize: 9 },
         nameGap: 6 },
     ],
     dataZoom: [
@@ -389,11 +475,11 @@ function renderPriceChart() {
       { name: '看跌背离', type: 'scatter', data: divBear, symbolSize: 8, z: 5,
         itemStyle: { color: COL.down }, xAxisIndex: 2, yAxisIndex: 2 },
       { name: 'VWAP', type: 'line', data: vwSeries, symbol: 'none', z: 2,
-        lineStyle: { width: 1.5, color: '#a87c05', type: 'dashed' },
+        lineStyle: { width: 1.5, color: COL.ink, type: 'dashed' },
         xAxisIndex: 0, yAxisIndex: 0 },
       { name: 'VWAP偏离', type: 'line', data: vwDev, symbol: 'none', z: 2,
-        lineStyle: { width: 1.5, color: '#a87c05' },
-        areaStyle: { color: 'rgba(168,124,5,.07)', origin: 0 },
+        lineStyle: { width: 1.5, color: COL.ink },
+        areaStyle: { color: 'rgba(23,26,32,.07)', origin: 0 },
         xAxisIndex: 3, yAxisIndex: 3,
         markLine: { silent: true, symbol: 'none',
           lineStyle: { type: 'dashed', color: '#c3c9d4' },
@@ -545,7 +631,7 @@ function renderDeriv() {
     dr.iv30 != null
       ? [fmtN(dr.iv30, 1), `个股 iv30${rk(dr.iv30_rank)}`]
       : [`${dr.span_days}d`, '样本跨度'],
-  ].map(([v, k]) => `<div class="m"><b>${v}</b><span>${k}</span></div>`).join('');
+  ].map(([v, k]) => `<div class="m"><span>${k}</span><b>${v}</b></div>`).join('');
   if (!c) return;
   c.setOption({
     animation: false,
@@ -861,5 +947,27 @@ window.addEventListener('resize', () => {
     await Promise.all([load(), hermesInfo()]);
   } catch (e) {
     banner(`初始化失败：${e}`);
+  }
+})();
+
+// ATR/BBW 分位历史图在 <details> 里，收起时容器宽高为 0——展开时必须 resize
+(() => {
+  const D_KEY = 'vvv_detail_open';
+  const det = $('detail');
+  if (det) {
+    if (localStorage.getItem(D_KEY) === '1') det.open = true;
+    det.addEventListener('toggle', () => {
+      localStorage.setItem(D_KEY, det.open ? '1' : '0');
+      if (det.open) Object.values(S.charts).forEach((c) => c && c.resize());
+    });
+  }
+  const chips = $('hermesChips');
+  if (chips) {
+    chips.addEventListener('click', (e) => {
+      const b = e.target.closest('.chipbtn');
+      if (!b) return;
+      $('hermesText').value = b.textContent;
+      $('hermesSend').click();
+    });
   }
 })();
