@@ -167,6 +167,11 @@ function renderStateCards() {
       warn = `<span class="warn-ico" title="${tips.join('；')}">⚠️</span>`;
     }
 
+    // conf 属于最新**原始判定**，且各状态公式不同、不可跨状态挪用（squeeze 的
+    // conf=1-bbw_rank 不能给"趋势上行"背书）。与确认态分歧时必须挂在原始判定旁。
+    const diverged = t.raw_state && t.raw_state !== t.state;
+    const confTxt = `conf ${fmtN(t.confidence, 2)}`;
+
     // 动态行：预览 / 酝酿 / 原始判定 统一收纳成一行
     const dyn = [];
     if (t.preview) {
@@ -175,10 +180,13 @@ function renderStateCards() {
     }
     if (t.candidate) {
       const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
-      dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`);
-    } else if (t.raw_state && t.raw_state !== t.state) {
+      // candidate.state 恒等于最新 raw（confirm_states 保证），conf 可直接挂这
+      dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`
+        + (diverged && t.candidate.state === t.raw_state ? ` · ${confTxt}` : ''));
+    }
+    if (diverged && !(t.candidate && t.candidate.state === t.raw_state)) {
       const rm = SM[t.raw_state] || { label: esc(t.raw_state) };
-      dyn.push(`原始判定 <b>${rm.label}</b>`);
+      dyn.push(`原始判定 <b>${rm.label}</b> ${confTxt}`);
     }
     const mg = (f.margin || {});
     if (mg.margin != null && mg.margin < 0.15) {
@@ -198,6 +206,9 @@ function renderStateCards() {
       flags.push(`突破${b.dir === 'up' ? '↑' : '↓'} 量分位 ${fmtN(b.vol_rank, 2)}`);
     }
 
+    // 置信度条恒表示原始判定：分歧时用原始态的颜色（与下方动态行配对），
+    // 不再借确认态的颜色/位置为其背书；无分歧时二者本就是同一状态
+    const rawMeta = diverged ? (SM[t.raw_state] || { color: COL.muted }) : meta;
     const el = document.createElement('div');
     el.className = 'scard';
     el.style.borderLeftColor = meta.color;
@@ -206,9 +217,9 @@ function renderStateCards() {
         <span class="tf">${tf}</span>${warn}
         <span class="dot" style="background:${meta.color}"></span>
         <span class="stname">${meta.label}</span>
-        <span class="conf">conf ${fmtN(t.confidence, 2)}</span>
+        ${diverged ? '' : `<span class="conf">${confTxt}</span>`}
       </div>
-      <div class="meter"><i style="width:${Math.round(t.confidence * 100)}%;background:${meta.color}"></i></div>
+      <div class="meter" title="原始判定置信度"><i style="width:${Math.round(t.confidence * 100)}%;background:${rawMeta.color}"></i></div>
       <div class="trans">${transHtml}</div>
       <div class="metrics">
         <div class="m"><b>${fmtN(f.structure.direction, 2, true)}</b><span>dir</span></div>
@@ -576,7 +587,8 @@ function renderFeatTable() {
   const d = S.data;
   // 按支柱分组的两行表头；组首列画左分隔线（gs）
   const groups = [
-    ['标识', ['TF', '状态', '原始', 'conf']],
+    // conf 属于"原始"列的判定（分歧时"状态"列是迟滞确认态，没有自己的置信度）
+    ['标识', ['TF', '状态', '原始', 'conf(原始)']],
     ['结构', ['dir', 'ER%', '摆动高', '摆动低']],
     ['波动率', ['ATR%', 'ATR%ds', 'BBW%', 'RV年化%', '加速度', '下行方差']],
     ['量能', ['tilt', 'volZ', '突破']],

@@ -290,7 +290,7 @@ flowchart LR
 
 ### 6.2 结转未修项（07-31 快照即存在，未根治）
 
-- **confidence 与确认态错配**：confidence 是 raw_state 的置信度，迟滞折叠后的确认态没有自己的置信度。本次只做了口径标注（agent.py:141「原始判定 conf——确认态无独立置信度」），结构未动。
+- ~~**confidence 与确认态错配**~~ → **2026-08-03 按方案 1 修复（纯前端归属修正）**：confidence 是 raw_state 的置信度，迟滞折叠后的确认态没有自己的置信度。agent 侧此前已口径标注（agent.py:141）；本次把面板侧也改齐——分歧时卡片头部不再显示 conf、conf 数字挂到酝酿/原始判定行、置信度条改用原始态颜色（app.js），特征表表头改「conf(原始)」。翻转表经核不必改：确认切换那根 bar 上 raw 恒等于新确认态（confirm_states 仅在 raw==pending 达标时切换），conf 归属本来就对。实测 ETH 1d 分歧活案例（trend_up/raw=squeeze/0.93）与无分歧案例渲染均正确。**给确认态定义独立置信度**属新指标设计，仍归回测校准裁决，不在本修范围。
 - **1d 日界跨源未根治**：加密 1d 锚 Deribit 08:00 UTC、美股永续锚 00:00。_assert_grid 保证了「永不混格」，但代价是加密 1d **实际上不可换源**——Deribit 若失效，兜底链会被网格校验拦死，只能整层重建。
 - **chat 无 symbol 维度**（storage.py:40-43 仅 id/ts/role/content）：终端 /symbol 切换、面板切品种在历史里不留痕，模型可能看到「BTC 的历史问答 + AAPL 的面板」的拼接且无从察觉。
 - **NYSE 假日历缺失**：market_open 判定无真实假日历，盘中分支只有节假日免责文案（agent.py:119-129）——文案兜底不是数据兜底。
