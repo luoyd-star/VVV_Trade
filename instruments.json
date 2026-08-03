@@ -8,5 +8,9 @@
   "MU-USDT":   { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:MU",   "display": "美光", "vol_index": "VXN" },
   "QQQ-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "纳指100 ETF", "vol_index": "VXN" },
   "SPY-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "标普500 ETF", "vol_index": "VIX" },
-  "SOXL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "半导体3x ETF", "vol_index": "VXN" }
+  "SOXL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "半导体3x ETF", "vol_index": "VXN" },
+
+  "HYPE-USDT": { "class": "crypto", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "HYPE", "display": "Hyperliquid" },
+  "AMD-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "超威半导体", "vol_index": "VXN" },
+  "MSFT-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "display": "微软", "vol_index": "VXN" }
 }
