@@ -79,7 +79,7 @@ main { flex: 1; min-width: 0; padding: 10px 16px 24px; }
 .sub { font-size: 11px; color: var(--muted); font-weight: 400; }
 
 .chart { height: 250px; }
-.chart.tall { height: 560px; }
+.chart.tall { height: 640px; }  /* 四面板：价格/量/cRSI/VWAP偏离 */
 .chart.short { height: 210px; }
 .chart.half { height: 170px; }
 

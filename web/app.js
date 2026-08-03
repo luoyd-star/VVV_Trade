@@ -329,14 +329,17 @@ function renderPriceChart() {
       },
     },
     grid: [
-      { left: 62, right: 18, top: 10, height: '47%' },
-      { left: 62, right: 18, top: '60%', height: '11%' },
-      { left: 62, right: 18, top: '75%', height: '16%' },
+      { left: 62, right: 18, top: 10, height: '42%' },
+      { left: 62, right: 18, top: '54%', height: '8%' },
+      { left: 62, right: 18, top: '66%', height: '12%' },
+      // VWAP 偏离独立面板（用户反馈：与 cRSI 同格量纲混叠）
+      { left: 62, right: 18, top: '81%', height: '11%' },
     ],
     xAxis: [
       { ...axisCommon, gridIndex: 0, axisLabel: { show: false } },
       { ...axisCommon, gridIndex: 1, axisLabel: { show: false } },
-      { ...axisCommon, gridIndex: 2, axisLabel: { color: COL.muted, fontSize: 10 } },
+      { ...axisCommon, gridIndex: 2, axisLabel: { show: false } },
+      { ...axisCommon, gridIndex: 3, axisLabel: { color: COL.muted, fontSize: 10 } },
     ],
     yAxis: [
       { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: COL.grid } },
@@ -344,13 +347,14 @@ function renderPriceChart() {
       { gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false } },
       { scale: true, gridIndex: 2, splitLine: { lineStyle: { color: COL.grid } },
         axisLabel: { color: COL.muted, fontSize: 9.5 } },
-      // VWAP 偏离（ATR 单位）副轴：与 cRSI 同格，右侧
-      { scale: true, gridIndex: 2, position: 'right', splitLine: { show: false },
-        axisLabel: { color: '#a87c05', fontSize: 9 } },
+      { scale: true, gridIndex: 3, splitLine: { show: false },
+        axisLabel: { color: '#a87c05', fontSize: 9 },
+        name: 'VWAP偏离(ATR)', nameTextStyle: { color: '#a87c05', fontSize: 9 },
+        nameGap: 6 },
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1, 2], start: Math.max(0, 100 - 11000 / N), end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1, 2], bottom: 4, height: 14,
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: Math.max(0, 100 - 11000 / N), end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 4, height: 14,
         borderColor: COL.border, backgroundColor: 'rgba(23,26,32,.03)',
         fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
         textStyle: { color: COL.muted, fontSize: 9 } },
@@ -389,10 +393,12 @@ function renderPriceChart() {
         xAxisIndex: 0, yAxisIndex: 0 },
       { name: 'VWAP偏离', type: 'line', data: vwDev, symbol: 'none', z: 2,
         lineStyle: { width: 1.5, color: '#a87c05' },
-        xAxisIndex: 2, yAxisIndex: 3,
+        areaStyle: { color: 'rgba(168,124,5,.07)', origin: 0 },
+        xAxisIndex: 3, yAxisIndex: 3,
         markLine: { silent: true, symbol: 'none',
-          lineStyle: { type: 'dotted', color: '#d8c58a' },
-          label: { show: false }, data: [{ yAxis: 0 }] } },
+          lineStyle: { type: 'dashed', color: '#c3c9d4' },
+          label: { color: COL.muted, fontSize: 9, position: 'insideEndTop' },
+          data: [{ yAxis: 0 }, { yAxis: 2 }, { yAxis: -2 }] } },
     ],
   }, true);
 }
