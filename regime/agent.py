@@ -285,12 +285,78 @@ def system_brief() -> str:
     return "\n".join(parts)
 
 
+_TFMS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+
+
+def overview_brief() -> str:
+    """全品种状态概览——修复"站在 AAPL 页看不见 QQQ/SPY"的单品种上下文盲区。
+
+    直接读 regime_history 各序列最新行（审计快照自带特征，零重算），
+    每问装配 ~2KB。<panel> 仍是当前品种的全量细节；这里给的是横截面。
+    任何失败静默省略，绝不拖垮对话。
+    """
+    try:
+        from . import storage
+        conn = storage.connect_ro()
+        try:
+            rows = conn.execute(
+                "SELECT r.symbol, r.tf, r.ts, r.state, r.raw_state, r.confidence,"
+                " r.features FROM regime_history r JOIN ("
+                "  SELECT symbol, tf, MAX(ts) mts FROM regime_history GROUP BY symbol, tf"
+                " ) m ON r.symbol=m.symbol AND r.tf=m.tf AND r.ts=m.mts"
+                " ORDER BY r.symbol, r.tf"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return ""
+        now = time.time() * 1000
+        by_sym: dict = {}
+        for sym, tf, ts, st, raw, conf, feats in rows:
+            try:
+                f = json.loads(feats) if feats else {}
+            except Exception:  # noqa: BLE001
+                f = {}
+            raw = raw or st
+            step = _TFMS.get(tf, 0)
+            stale = step and (now - (ts + step)) > 1.5 * step
+            bits = st
+            if raw != st:
+                bits += f"(原始:{raw})"
+            bits += f" c{conf:.2f}" if conf is not None else ""
+            atr_r = f.get("atr_rank")
+            if atr_r is not None:
+                bits += f" atr%{atr_r:.2f}"
+            if f.get("warmup"):
+                bits += " ⚠预热"
+            if stale:
+                bits += " ⚠陈旧"
+            by_sym.setdefault(sym, {})[tf] = bits
+        lines = ["<all_symbols_snapshot>（全品种最新确认态横截面，每问装配；",
+                 "state(原始:xx)=确认态与原始判定分歧中；c=原始判定conf；atr%=ATR分位）"]
+        for sym in sorted(by_sym):
+            tfs = by_sym[sym]
+            lines.append(sym + " | " + " | ".join(
+                f"{tf}: {tfs[tf]}" for tf in ("1d", "4h", "1h") if tf in tfs))
+        lines.append(
+            "以上仅横截面摘要。当前品种的全量细节在 <panel>；其他品种的深度数据"
+            "（K线/特征/VWAP/衍生品）可在只读沙箱用 sqlite3 查 data/market.db"
+            "（务必 file:...?mode=ro 只读打开），表：ohlcv/regime_history(features"
+            "为审计快照JSON)/deriv/vol1h/usvol/dvol。")
+        lines.append("</all_symbols_snapshot>")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def chat(payload: dict, messages: list) -> dict:
     cfg = load_config()
     context = render_context(payload)
+    ov = overview_brief()
     system = (
-        load_system() + "\n\n" + system_brief() + "\n\n"
-        + PANEL_LEGEND + "\n<panel>\n" + context + "\n</panel>"
+        load_system() + "\n\n" + system_brief()
+        + (("\n\n" + ov) if ov else "")
+        + "\n\n" + PANEL_LEGEND + "\n<panel>\n" + context + "\n</panel>"
     )
     msgs = [
         {"role": m["role"], "content": str(m.get("content", ""))[:8000]}
