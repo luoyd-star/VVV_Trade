@@ -339,10 +339,15 @@ def overview_brief() -> str:
             lines.append(sym + " | " + " | ".join(
                 f"{tf}: {tfs[tf]}" for tf in ("1d", "4h", "1h") if tf in tfs))
         lines.append(
-            "以上仅横截面摘要。当前品种的全量细节在 <panel>；其他品种的深度数据"
-            "（K线/特征/VWAP/衍生品）可在只读沙箱用 sqlite3 查 data/market.db"
-            "（务必 file:...?mode=ro 只读打开），表：ohlcv/regime_history(features"
-            "为审计快照JSON)/deriv/vol1h/usvol/dvol。")
+            "以上仅横截面摘要。当前品种的全量细节在 <panel>。要查其他品种的深度"
+            "数据，用只读查询接口（已实测你的沙箱可运行）：\n"
+            "  .venv/bin/python scripts/vvvquery.py panel QQQ-USDT   "
+            "# 任意品种的全量面板文本（与 <panel> 同口径）\n"
+            "  .venv/bin/python scripts/vvvquery.py states BTC-USDT 4h 20  "
+            "# 状态+审计特征历史\n"
+            "  .venv/bin/python scripts/vvvquery.py sql \"SELECT ...\"  "
+            "# 只读 SQL（表：ohlcv/regime_history/deriv/vol1h/usvol/dvol）\n"
+            "跨品种对比、历史回看类问题，先跑接口再回答，不要凭横截面猜细节。")
         lines.append("</all_symbols_snapshot>")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001
