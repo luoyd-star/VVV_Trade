@@ -9,9 +9,12 @@
 """
 from __future__ import annotations
 
+import glob
 import json
 import math
 import os
+import subprocess
+import time
 
 import requests
 
@@ -219,11 +222,75 @@ def render_context(p: dict) -> str:
     return "\n".join(lines)
 
 
+def system_brief() -> str:
+    """自动生成的系统能力简报——Hermes 的系统认知随升级自动更新。
+
+    设计原则：**不做手工能力清单**（会漂移——README 三处过时的教训）。
+    每段都取自权威源：版本号=代码常量、品种与数据深度=库、最近升级=git log、
+    文档=目录实际列表。任何一段失败都静默省略，简报绝不拖垮对话。
+    hermes_system.md 仍完全归用户掌控，本简报独立注入、明确标注机器生成。
+    """
+    parts = ["<system_brief>（机器生成，每问装配，随升级自动更新）"]
+    try:
+        from .classify import AUDIT_VERSION, RULES_VERSION
+        line = f"版本: 规则 {RULES_VERSION} / 审计快照 {AUDIT_VERSION}"
+        try:
+            from .backtest import LOCKBOX_START
+            line += f"；回测框架已建（锁箱 {LOCKBOX_START} 起前向累积，账本 data/backtest_ledger.sqlite3）"
+        except Exception:  # noqa: BLE001
+            pass
+        parts.append(line)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import storage
+        conn = storage.connect_ro()
+        try:
+            syms = sorted(storage.symbols(conn))
+            n_states, = conn.execute("SELECT COUNT(*) FROM regime_history").fetchone()
+            spans = conn.execute(
+                "SELECT tf, COUNT(*), MIN(ts) FROM ohlcv GROUP BY tf ORDER BY tf"
+            ).fetchall()
+            span_txt = " ".join(
+                f"{tf}:{n}根(最早{time.strftime('%Y-%m', time.gmtime(lo / 1000))})"
+                for tf, n, lo in spans)
+            n_vol, = conn.execute("SELECT COUNT(*) FROM vol1h").fetchone()
+            parts.append(f"品种({len(syms)}): {', '.join(syms)}")
+            parts.append(f"数据: {span_txt}；状态行 {n_states}；"
+                         f"VWAP量流(币安1h) {n_vol} 行")
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        docs = sorted(f for f in os.listdir(os.path.join(ROOT, "docs"))
+                      if f.endswith(".md"))
+        logs = sorted(os.path.basename(p)
+                      for p in glob.glob(os.path.join(ROOT, "SYSTEM_LOG_*.md")))
+        parts.append("权威文档: " + ", ".join(logs[-2:]) + "（系统全量审计）；"
+                     "docs/: " + ", ".join(docs[-10:]))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        log = subprocess.check_output(
+            ["git", "log", "--oneline", "-8"], text=True, cwd=ROOT, timeout=5)
+        parts.append("最近升级（git log 标题行）:\n" + log.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    parts.append(
+        "以上及仓库代码/文档才是系统能力的权威描述。你运行在本项目目录的只读沙箱内，"
+        "可以直接查阅上述文件（含 SYSTEM_LOG、docs/ 下的回测/实验/预研报告）获取细节；"
+        "回答涉及系统能力、版本、数据范围的问题时以此为准，不要凭旧印象。")
+    parts.append("</system_brief>")
+    return "\n".join(parts)
+
+
 def chat(payload: dict, messages: list) -> dict:
     cfg = load_config()
     context = render_context(payload)
     system = (
-        load_system() + "\n\n" + PANEL_LEGEND + "\n<panel>\n" + context + "\n</panel>"
+        load_system() + "\n\n" + system_brief() + "\n\n"
+        + PANEL_LEGEND + "\n<panel>\n" + context + "\n</panel>"
     )
     msgs = [
         {"role": m["role"], "content": str(m.get("content", ""))[:8000]}
