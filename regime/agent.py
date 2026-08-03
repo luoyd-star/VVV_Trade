@@ -158,6 +158,12 @@ def render_context(p: dict) -> str:
             f"摆动高/低={s['swing_high']}/{s['swing_low']}",
             f"cRSI={c.get('crsi')} 带位={c.get('pos')}% {c.get('zone') or ''}",
         ]
+        vw = t.get("vwap") or {}
+        if vw.get("dev") is not None:
+            parts.append(
+                f"VWAP偏离={vw['dev']:+.2f}ATR(币安量{vw.get('win_hours')}h窗"
+                + (f",分位{vw['dev_rank']:.2f}" if vw.get("dev_rank") is not None else "")
+                + ")——展示层指标,未进规则")
         if b:
             parts.append(f"突破{'↑' if b['dir'] == 'up' else '↓'}量分位{b['vol_rank']}")
         lines.append(" ".join(parts))

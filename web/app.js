@@ -228,6 +228,7 @@ function renderStateCards() {
         <div class="m"><b>${fmtN(f.volatility.bbw_rank, 2)}</b><span>BBW%</span></div>
         <div class="m"><b>${fmtN(f.volume.updown_tilt_20, 2, true)}</b><span>tilt</span></div>
         <div class="m"><b>${fmtN(cl.crsi, 1)}</b><span>cRSI</span></div>
+        <div class="m"><b>${t.vwap && t.vwap.dev != null ? fmtN(t.vwap.dev, 2, true) : '—'}</b><span>VWAPd</span></div>
       </div>
       <div class="flagline">${flags.slice(0, 4).map((x) => `<span class="chip">${x}</span>`).join('') || '<span class="chip">无标记</span>'}</div>`;
     host.appendChild(el);
@@ -262,7 +263,8 @@ function renderPriceChart() {
     `<span class="li"><span class="sw" style="background:${m.color};opacity:.5"></span>${m.label}</span>`
   ).join('') + `<span class="li"><span class="sw" style="background:${COL.blue}"></span>EMA50 / cRSI</span>
     <span class="li"><span class="sw" style="background:${COL.azure}"></span>cRSI 自适应带</span>
-    <span class="li"><span class="sw" style="background:${COL.muted}"></span>H/L 摆动点 · ●背离</span>`;
+    <span class="li"><span class="sw" style="background:${COL.muted}"></span>H/L 摆动点 · ●背离</span>
+    <span class="li"><span class="sw" style="background:#a87c05"></span>VWAP（币安量）/ 偏离</span>`;
   const c = chart('priceChart');
   if (!c) return;
 
@@ -285,6 +287,10 @@ function renderPriceChart() {
   const cr = t.crsi || { crsi: [], db: [], ub: [], divs: [] };
   const divBull = cr.divs.filter((d) => d.kind === 'bull').map((d) => [d.i, cr.crsi[d.i]]);
   const divBear = cr.divs.filter((d) => d.kind === 'bear').map((d) => [d.i, cr.crsi[d.i]]);
+  // VWAP（币安量源，显示层）：主图画 VWAP 线；cRSI 格副轴画偏离度（ATR 单位）
+  const vw = t.vwap || null;
+  const vwSeries = vw ? vw.series : [];
+  const vwDev = vw ? vw.dev_series : [];
 
   const axisCommon = {
     type: 'category', data: labels, boundaryGap: true,
@@ -314,6 +320,9 @@ function renderPriceChart() {
           `开 ${fmtPrice(r[1])} 高 ${fmtPrice(r[2])}`,
           `低 ${fmtPrice(r[3])} 收 ${fmtPrice(r[4])}（${fmtN(chg, 2, true)}%）`,
           `量 ${r[5] >= 1000 ? Math.round(r[5]).toLocaleString('en-US') : fmtN(r[5], 1)} · EMA50 ${fmtPrice(t.ema50[i])}`,
+          vw && vwSeries[i] != null
+            ? `VWAP ${fmtPrice(vwSeries[i])}（偏离 ${fmtN(vwDev[i], 2, true)} ATR，币安量 ${vw.win_hours}h窗）`
+            : 'VWAP —（量流未就绪）',
           `cRSI ${fmtN(cv, 1)}（带 ${fmtN(cr.db[i], 1)}~${fmtN(cr.ub[i], 1)}${zone}）`,
           m ? `状态 <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${m.color}"></span> ${m.label}` : '状态 —',
         ].join('<br>');
@@ -335,6 +344,9 @@ function renderPriceChart() {
       { gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false } },
       { scale: true, gridIndex: 2, splitLine: { lineStyle: { color: COL.grid } },
         axisLabel: { color: COL.muted, fontSize: 9.5 } },
+      // VWAP 偏离（ATR 单位）副轴：与 cRSI 同格，右侧
+      { scale: true, gridIndex: 2, position: 'right', splitLine: { show: false },
+        axisLabel: { color: '#a87c05', fontSize: 9 } },
     ],
     dataZoom: [
       { type: 'inside', xAxisIndex: [0, 1, 2], start: Math.max(0, 100 - 11000 / N), end: 100 },
@@ -372,6 +384,15 @@ function renderPriceChart() {
         itemStyle: { color: COL.up }, xAxisIndex: 2, yAxisIndex: 2 },
       { name: '看跌背离', type: 'scatter', data: divBear, symbolSize: 8, z: 5,
         itemStyle: { color: COL.down }, xAxisIndex: 2, yAxisIndex: 2 },
+      { name: 'VWAP', type: 'line', data: vwSeries, symbol: 'none', z: 2,
+        lineStyle: { width: 1.5, color: '#a87c05', type: 'dashed' },
+        xAxisIndex: 0, yAxisIndex: 0 },
+      { name: 'VWAP偏离', type: 'line', data: vwDev, symbol: 'none', z: 2,
+        lineStyle: { width: 1.5, color: '#a87c05' },
+        xAxisIndex: 2, yAxisIndex: 3,
+        markLine: { silent: true, symbol: 'none',
+          lineStyle: { type: 'dotted', color: '#d8c58a' },
+          label: { show: false }, data: [{ yAxis: 0 }] } },
     ],
   }, true);
 }

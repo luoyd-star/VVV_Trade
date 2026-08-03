@@ -31,6 +31,8 @@ from regime.features.crsi import crsi_features
 from regime.features.structure import ema, swing_pivots
 from regime.features.utils import pct_rank, rolling_pct_rank
 from regime.features.volatility import atr, bb_width, realized_vol
+from regime.features.vwap import WIN_HOURS as VWAP_WIN_HOURS
+from regime.features.vwap import rolling_vwap, vwap_payload
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
@@ -121,6 +123,30 @@ def _tf_payload(conn, symbol: str, tf: str):
         else:
             segments.append({"s": i, "e": i, "state": srow["state"]})
 
+    # VWAP 偏离（币安 1h 量流，显示/上下文层）：在全量 df 上算（分位要参照期），
+    # 序列切到显示窗对齐。量流缺失/覆盖不足 → None/NaN，宁缺毋滥。
+    vwap_block = None
+    try:
+        w_h = VWAP_WIN_HOURS[tf]
+        all_ts = storage.ts_to_ms(df["ts"])
+        vol = storage.get_vol1h(conn, symbol,
+                                since_ms=int(all_ts[0]) - w_h * 3_600_000)
+        if len(vol) >= 48:
+            closes_ms = [int(t) + TF_SEC[tf] * 1000 for t in all_ts]
+            vw = rolling_vwap(closes_ms, vol["ts"].astype("int64"),
+                              vol["volume"], vol["quote_vol"], w_h)
+            atr_full = atr(df).to_numpy()
+            dev, dev_last, dev_rank = vwap_payload(df["close"], atr_full, vw)
+            vwap_block = {
+                "series": _series(vw[offset:]),
+                "dev_series": _series(dev[offset:]),
+                "dev": round(dev_last, 2) if dev_last is not None else None,
+                "dev_rank": dev_rank,
+                "win_hours": w_h,
+            }
+    except Exception:  # noqa: BLE001  展示层指标绝不拖垮面板主体
+        vwap_block = None
+
     crsi = crsi_features(df)
     crsi_payload = {
         "crsi": _series(crsi["series"]["crsi"][offset:]),
@@ -184,6 +210,7 @@ def _tf_payload(conn, symbol: str, tf: str):
         "bbw_rank_series": bbw_ranks,
         "segments": segments,
         "crsi": crsi_payload,
+        "vwap": vwap_block,
         "state": confirmed_now,
         "state_label": STATES.get(confirmed_now, confirmed_now),
         "raw_state": raw_now,

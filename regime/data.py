@@ -241,6 +241,30 @@ def fetch_binance_futures(symbol: str, timeframe: str, limit: int = 300) -> pd.D
     raise RuntimeError(f"binance_futures: {last_err}")
 
 
+def fetch_binance_vol1h(symbol: str, end_ms: int | None = None, limit: int = 1000):
+    """币安 fapi 1h 量流（VWAP 专用）：[(ts, volume, quoteVolume), ...] 仅已收线。
+
+    quoteVolume/volume 即该小时精确 VWAP。与 OHLCV 主源解耦——加密价格主源
+    是 Deribit，但 VWAP 的量按决策统一取币安（量最大）；任意周期任意日界锚
+    的滚动 VWAP 都从这条 1h 流按时间窗聚合，不受 4h/1d 网格相位影响。
+    """
+    params = {"symbol": _binance_symbol(symbol), "interval": "1h",
+              "limit": min(limit, 1000)}
+    if end_ms is not None:
+        params["endTime"] = int(end_ms)
+    r = requests.get("https://fapi.binance.com/fapi/v1/klines",
+                     params=params, timeout=15)
+    r.raise_for_status()
+    now = int(time.time() * 1000)
+    out = []
+    for row in r.json():
+        ts = int(row[0])
+        if ts + 3_600_000 > now:  # 未收线的当前小时不入库
+            continue
+        out.append((ts, float(row[5]), float(row[7])))
+    return out
+
+
 _HL_INTERVALS = {"1h": "1h", "4h": "4h", "1d": "1d"}
 
 

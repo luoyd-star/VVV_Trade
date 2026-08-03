@@ -107,7 +107,7 @@ main { flex: 1; min-width: 0; padding: 10px 16px 24px; }
 .scard .conf { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--sub); }
 .meter { height: 3px; background: var(--grid); border-radius: 2px; margin: 8px 0; overflow: hidden; }
 .meter i { display: block; height: 100%; border-radius: 2px; }
-.scard .metrics { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+.scard .metrics { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .scard .m { text-align: center; }
 .scard .m b { display: block; font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--ink); }
 .scard .m span { font-size: 9.5px; color: var(--muted); }

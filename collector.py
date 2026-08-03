@@ -29,7 +29,7 @@ from regime.classify import (
     confirm_states,
     rolling_states_missing,
 )
-from regime.data import fetch_dvol, fetch_ohlcv
+from regime.data import fetch_binance_vol1h, fetch_dvol, fetch_ohlcv
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
 from regime.deriv import fetch_funding_history as deriv_funding_history
@@ -139,6 +139,37 @@ def sync_vol_index(
     return msg, errors
 
 
+# VWAP 量流深度：480h（1d 窗）+ 250×24h（1d 偏离的分位参照期）≈ 6480，取整。
+# 上市不足该深度的品种自然到头（分页返回空即止）。
+VOL1H_TARGET = 7000
+
+
+def sync_vol1h(conn, symbol: str) -> int:
+    """币安 1h 量流同步：冷启动向后分页回填至目标深度，日常按水位增量。"""
+    wm = storage.vol1h_watermark(conn, symbol)
+    total = 0
+    if wm is None:
+        end = None
+        need = VOL1H_TARGET
+        while need > 0:
+            rows = fetch_binance_vol1h(symbol, end_ms=end, limit=min(need, 1000))
+            if not rows:
+                break  # 上市日到头
+            total += storage.upsert_vol1h(conn, symbol, rows)
+            need -= len(rows)
+            end = rows[0][0] - 1  # 继续向更早翻页
+            if len(rows) < 50:
+                break
+            time.sleep(0.25)
+        return total
+    gap_h = max(0, int((time.time() * 1000 - wm) // 3_600_000))
+    if gap_h < 1:
+        return 0
+    rows = [r for r in fetch_binance_vol1h(symbol, limit=min(gap_h + 3, 1000))
+            if r[0] > wm]
+    return storage.upsert_vol1h(conn, symbol, rows)
+
+
 def cycle(conn, symbols, timeframes, source_order) -> list:
     errors = []
     for sym in symbols:
@@ -202,6 +233,18 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{sym} {tf}: {e}")
                 log.warning("%s %s 失败: %s", sym, tf, e)
+
+    # 币安 1h 量流（VWAP 专用量源，全品种统一取币安——量最大；与 OHLCV 主源解耦）。
+    # 冷启动回填 VOL1H_TARGET 根（覆盖 1d 的 480h 窗 + 250 根分位参照期），
+    # 之后按水位增量。失败不拖累其他采集。
+    for sym in symbols:
+        try:
+            added = sync_vol1h(conn, sym)
+            if added:
+                log.info("VWAP量流 %s: +%d 行", sym, added)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"vol1h {sym}: {e}")
+            log.warning("vol1h %s 失败: %s", sym, e)
 
     # 衍生品持仓（Binance 永续）：首轮回填历史（OI/taker 仅约 30 天保留期，先到先得），
     # 之后每轮采一次快照。失败不拖累 K 线与 DVOL。

@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS live_bars(
   fetched_at INTEGER,
   PRIMARY KEY(symbol, tf)
 );
+CREATE TABLE IF NOT EXISTS vol1h(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL,
+  volume REAL, quote_vol REAL,
+  PRIMARY KEY(symbol, ts)
+);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -344,6 +349,35 @@ def get_states(conn, symbol: str, tf: str, limit: int = 600):
         {"ts": r[0], "state": r[1], "confidence": r[2], "raw_state": r[3] or r[1]}
         for r in reversed(rows)
     ]
+
+
+def upsert_vol1h(conn, symbol: str, rows) -> int:
+    """币安 1h 量流（VWAP 专用量源，与 OHLCV 主源解耦）。
+
+    rows: [(ts_ms, volume, quote_vol), ...]。quote_vol/volume 即该小时的
+    精确 VWAP（币安 klines 原生字段，非典型价近似）。ts 为开盘时刻（口径同 ohlcv）。
+    """
+    if not rows:
+        return 0
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO vol1h(symbol,ts,volume,quote_vol) VALUES (?,?,?,?)",
+            [(symbol, int(t), float(v), float(q)) for t, v, q in rows],
+        )
+    return len(rows)
+
+
+def get_vol1h(conn, symbol: str, since_ms: int = 0) -> pd.DataFrame:
+    rows = conn.execute(
+        "SELECT ts, volume, quote_vol FROM vol1h WHERE symbol=? AND ts>=? ORDER BY ts",
+        (symbol, int(since_ms)),
+    ).fetchall()
+    return pd.DataFrame(rows, columns=["ts", "volume", "quote_vol"])
+
+
+def vol1h_watermark(conn, symbol: str):
+    row = conn.execute("SELECT MAX(ts) FROM vol1h WHERE symbol=?", (symbol,)).fetchone()
+    return row[0]
 
 
 def get_states_audit(conn, symbol: str, tf: str):
