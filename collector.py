@@ -43,10 +43,18 @@ from regime.usvol import (
 
 log = logging.getLogger("collector")
 
+# X1 扩容（2026-08-04，docs/PRERESEARCH_XASSET_20260803.md）：37 品种。
+# 核心池 29 + 观察池 8（观察池同样全量采集与判态；"不进核心相关矩阵"由
+# 消费层按 instruments.pool 过滤——采集层不做区别，保证数据自始完整）。
 DEFAULT_SYMBOLS = (
     "BTC-USDT,ETH-USDT,SOL-USDT,HYPE-USDT,"
-    "NVDA-USDT,TSLA-USDT,AAPL-USDT,MU-USDT,SOXL-USDT,SPY-USDT,QQQ-USDT,"
-    "AMD-USDT,MSFT-USDT"
+    "NVDA-USDT,AMD-USDT,MU-USDT,SNDK-USDT,MRVL-USDT,INTC-USDT,TSM-USDT,"
+    "ARM-USDT,NBIS-USDT,SKHY-USDT,"
+    "GOOGL-USDT,META-USDT,AMZN-USDT,ORCL-USDT,PLTR-USDT,MSFT-USDT,"
+    "AAPL-USDT,TSLA-USDT,COIN-USDT,MSTR-USDT,"
+    "QQQ-USDT,SPY-USDT,SOXL-USDT,XAU-USDT,CL-USDT,"
+    "NOW-USDT,SNOW-USDT,CRM-USDT,ADBE-USDT,CRWD-USDT,PANW-USDT,APP-USDT,"
+    "CRWV-USDT"
 )
 DEFAULT_TFS = "1d,4h,1h"
 DVOL_CURRENCIES = ("BTC", "ETH")
@@ -139,6 +147,54 @@ def sync_vol_index(
     return msg, errors
 
 
+def snapshot_universe(conn, symbols) -> None:
+    """point-in-time 成员快照（append-only）：instruments 配置变化时记一版。
+
+    回测/相关矩阵按 snapped_at 取当时成员，杜绝"用今天的名单回填历史"
+    （Shumway 幸存者偏差；预研 X1 治理件）。对账靠内容哈希，改 pool/theme
+    即触发新版；绝不 UPDATE 旧行。
+    """
+    import hashlib
+    rows = []
+    for sym in sorted(symbols):
+        cfg = instruments.get(sym)
+        rows.append((sym, cfg.get("pool") or "core",
+                     json.dumps(cfg.get("theme") or [], ensure_ascii=False),
+                     cfg.get("class"), cfg.get("valid_from")))
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()[:16]
+    if storage.get_meta(conn, "universe_hash") == digest:
+        return
+    now = int(time.time() * 1000)
+    with conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO universe_snapshot VALUES (?,?,?,?,?,?)",
+            [(now, s, p, t, c, v) for s, p, t, c, v in rows])
+    storage.set_meta(conn, "universe_hash", digest)
+    log.info("宇宙快照已记录：%d 品种（hash %s）", len(rows), digest)
+
+
+def sync_bbo(conn, symbols) -> int:
+    """BBO 快照：一次 bookTicker 全量请求，落所有已注册品种的最优买卖价量。
+
+    报价质量门槛（价差/深度）的原料——SEC 闪崩报告的教训是 ADV 不能替代
+    报价质量（预研 X1）。每轮一行/品种，5 分钟粒度足够月度评审用。
+    """
+    import requests as _rq
+    r = _rq.get("https://fapi.binance.com/fapi/v1/ticker/bookTicker", timeout=15)
+    r.raise_for_status()
+    keep = {s.replace("-", ""): s for s in symbols}
+    now = int(time.time() * 1000)
+    rows = []
+    for t in r.json():
+        sym = keep.get(t.get("symbol"))
+        if sym:
+            rows.append((sym, now, float(t["bidPrice"]), float(t["bidQty"]),
+                         float(t["askPrice"]), float(t["askQty"])))
+    with conn:
+        conn.executemany("INSERT OR IGNORE INTO bbo VALUES (?,?,?,?,?,?)", rows)
+    return len(rows)
+
+
 # VWAP 量流深度：480h（1d 窗）+ 250×24h（1d 偏离的分位参照期）≈ 6480，取整。
 # 上市不足该深度的品种自然到头（分页返回空即止）。
 VOL1H_TARGET = 7000
@@ -172,6 +228,15 @@ def sync_vol1h(conn, symbol: str) -> int:
 
 def cycle(conn, symbols, timeframes, source_order) -> list:
     errors = []
+    # 治理件：宇宙快照（配置变化才写）+ BBO 报价质量快照（每轮一批）
+    try:
+        snapshot_universe(conn, symbols)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"universe_snapshot: {e}")
+    try:
+        sync_bbo(conn, symbols)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"bbo: {e}")
     for sym in symbols:
         session_aware = instruments.get(sym)["class"] == "us_stock_perp"
         for tf in timeframes:

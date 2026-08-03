@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS vol1h(
   volume REAL, quote_vol REAL,
   PRIMARY KEY(symbol, ts)
 );
+CREATE TABLE IF NOT EXISTS universe_snapshot(
+  snapped_at INTEGER NOT NULL, symbol TEXT NOT NULL,
+  pool TEXT, theme TEXT, class TEXT, valid_from TEXT,
+  PRIMARY KEY(snapped_at, symbol)
+);
+CREATE TABLE IF NOT EXISTS bbo(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL,
+  bid REAL, bid_qty REAL, ask REAL, ask_qty REAL,
+  PRIMARY KEY(symbol, ts)
+);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
