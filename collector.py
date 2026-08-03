@@ -29,7 +29,10 @@ from regime.classify import (
     confirm_states,
     rolling_states_missing,
 )
-from regime.data import fetch_binance_vol1h, fetch_dvol, fetch_ohlcv
+from regime.data import (
+    fetch_binance_spot_daily, fetch_binance_vol1h, fetch_dvol, fetch_ohlcv,
+    fetch_yahoo_daily,
+)
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
 from regime.deriv import fetch_funding_history as deriv_funding_history
@@ -226,6 +229,37 @@ def sync_vol1h(conn, symbol: str) -> int:
     return storage.upsert_vol1h(conn, symbol, rows)
 
 
+REF_YAHOO = {"NDX": "^NDX", "QQQ": "QQQ", "MSTR": "MSTR", "COIN": "COIN",
+             "GLD": "GLD", "GC": "GC=F", "CL": "CL=F", "VIX": "^VIX"}
+
+
+def sync_reference(conn) -> None:
+    """底层参考日线（耦合历史层）的日更：每 UTC 日一次，拉近 10 天补尾。
+
+    全量回填走 scripts/backfill_reference.py；这里只维持新鲜。
+    FRED 当前网络持续超时，日更仅覆盖价格层（BTC + Yahoo 八序列）。
+    """
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if storage.get_meta(conn, "ref_last_sync") == today:
+        return
+    p1 = int(time.time() * 1000) - 10 * 86_400_000
+    n = 0
+    try:
+        n += storage.upsert_ref_daily(
+            conn, "BTC", fetch_binance_spot_daily(start_ms=p1), "binance_spot")
+    except Exception as e:  # noqa: BLE001
+        log.warning("ref BTC 日更失败: %s", e)
+    for name, tk in REF_YAHOO.items():
+        try:
+            n += storage.upsert_ref_daily(
+                conn, name, fetch_yahoo_daily(tk, p1_ms=p1), "yahoo")
+            time.sleep(0.3)
+        except Exception as e:  # noqa: BLE001
+            log.warning("ref %s 日更失败: %s", name, e)
+    storage.set_meta(conn, "ref_last_sync", today)
+    log.info("参考日线日更完成：+%d 行", n)
+
+
 def cycle(conn, symbols, timeframes, source_order) -> list:
     errors = []
     # 治理件：宇宙快照（配置变化才写）+ BBO 报价质量快照（每轮一批）
@@ -237,6 +271,10 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
         sync_bbo(conn, symbols)
     except Exception as e:  # noqa: BLE001
         errors.append(f"bbo: {e}")
+    try:
+        sync_reference(conn)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"ref_daily: {e}")
     for sym in symbols:
         session_aware = instruments.get(sym)["class"] == "us_stock_perp"
         for tf in timeframes:

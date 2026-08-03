@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS universe_snapshot(
   pool TEXT, theme TEXT, class TEXT, valid_from TEXT,
   PRIMARY KEY(snapped_at, symbol)
 );
+CREATE TABLE IF NOT EXISTS ref_daily(
+  series TEXT NOT NULL, ts INTEGER NOT NULL,
+  close REAL, source TEXT,
+  PRIMARY KEY(series, ts)
+);
 CREATE TABLE IF NOT EXISTS bbo(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL,
   bid REAL, bid_qty REAL, ask REAL, ask_qty REAL,
@@ -388,6 +393,31 @@ def get_vol1h(conn, symbol: str, since_ms: int = 0) -> pd.DataFrame:
 def vol1h_watermark(conn, symbol: str):
     row = conn.execute("SELECT MAX(ts) FROM vol1h WHERE symbol=?", (symbol,)).fetchone()
     return row[0]
+
+
+def upsert_ref_daily(conn, series: str, rows, source: str) -> int:
+    """底层参考日线（耦合研究历史层，2020-2026 回填 + 日更）。
+
+    ts = 交易日 00:00 UTC 毫秒（日期键）。时点语义因源而异（美股类 close 是
+    该日 16:00 ET，BTC 是该日 UTC 日线收盘）——对齐留给研究层按 C8 协议做，
+    存储层只存原生语义，source 字段留痕。
+    """
+    if not rows:
+        return 0
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO ref_daily(series,ts,close,source) VALUES (?,?,?,?)",
+            [(series, int(t), float(c), source) for t, c in rows if c is not None],
+        )
+    return len(rows)
+
+
+def get_ref_daily(conn, series: str, since_ms: int = 0) -> pd.DataFrame:
+    rows = conn.execute(
+        "SELECT ts, close FROM ref_daily WHERE series=? AND ts>=? ORDER BY ts",
+        (series, int(since_ms)),
+    ).fetchall()
+    return pd.DataFrame(rows, columns=["ts", "close"])
 
 
 def get_states_audit(conn, symbol: str, tf: str):

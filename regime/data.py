@@ -241,6 +241,53 @@ def fetch_binance_futures(symbol: str, timeframe: str, limit: int = 300) -> pd.D
     raise RuntimeError(f"binance_futures: {last_err}")
 
 
+REF_UA = {"User-Agent": "Mozilla/5.0"}
+REF_P1_2020_MS = 1_577_836_800_000  # 2020-01-01 UTC
+
+
+def fetch_yahoo_daily(ticker: str, p1_ms: int = REF_P1_2020_MS):
+    """Yahoo chart 日线 [(day_ms, close), ...]。必须用 period1/period2 显式区间
+    ——range=max 会被 Yahoo 降采样成月线（2026-08-04 实测）。"""
+    r = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+        params={"period1": p1_ms // 1000, "period2": int(time.time()),
+                "interval": "1d"},
+        headers=REF_UA, timeout=30)
+    r.raise_for_status()
+    res = (r.json().get("chart") or {}).get("result")
+    if not res:
+        raise RuntimeError("yahoo: chart.result 为空")
+    out = []
+    for t, c in zip(res[0]["timestamp"],
+                    res[0]["indicators"]["quote"][0]["close"]):
+        if c is not None:
+            out.append(((t // 86400) * 86_400_000, float(c)))
+    return out
+
+
+def fetch_binance_spot_daily(symbol: str = "BTCUSDT",
+                             start_ms: int = REF_P1_2020_MS):
+    """币安现货 1d 收盘 [(open_day_ms, close), ...]，分页到最新已收线日。"""
+    out, cur = [], start_ms
+    while True:
+        r = requests.get("https://api.binance.com/api/v3/klines",
+                         params={"symbol": symbol, "interval": "1d",
+                                 "startTime": int(cur), "limit": 1000},
+                         timeout=30)
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            break
+        now = int(time.time() * 1000)
+        out.extend((int(x[0]), float(x[4])) for x in rows
+                   if int(x[0]) + 86_400_000 <= now)
+        if len(rows) < 1000:
+            break
+        cur = int(rows[-1][0]) + 86_400_000
+        time.sleep(0.25)
+    return out
+
+
 def fetch_binance_vol1h(symbol: str, end_ms: int | None = None, limit: int = 1000):
     """币安 fapi 1h 量流（VWAP 专用）：[(ts, volume, quoteVolume), ...] 仅已收线。
 
