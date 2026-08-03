@@ -47,10 +47,15 @@ RULES_VERSION = "v2"
 # 两个版本都进入 state_ts_set 的跳过谓词：任一不匹配的行视为"缺失"、
 # 下一轮被 upsert 原地重算——升版自动重算，不再需要全表 DELETE。
 # 代际史：v2 补四列 / v3 pathgeom+margin / v4 atr_ds / v5 时间对齐批 /
-#         a6 加 src 键 / a7 direction 重归一改了 dir 口径 + src→src_round 改名
+#         a6 加 src 键 / a7 direction 重归一改了 dir 口径 + src→src_round 改名 /
+#         a8 健康位入库（win/warmup）——回测按数据质量分层的前置
 # 契约：features 的**键集或任一字段口径**变化都必须升这里（口径变了不升版，
 #       同一个 a6 会同时标识两种语义的 dir——回测按版本分桶就失效了）
-AUDIT_VERSION = "a7"
+AUDIT_VERSION = "a8"
+
+# 分位窗口 250 + 指标暖机 ~30：可用历史少于此，250 根分位的参照期缩水，
+# 分位读数系统性偏移。面板的整序列 warmup 角标与逐行审计的 warmup 位共用此值。
+WARMUP_BARS = 280
 
 THRESHOLDS = {
     "er_rank_trend": 0.60,    # ER 分位高于此才算"有趋势效率"
@@ -269,6 +274,13 @@ def rolling_states_missing(
             # 时窗口里可能混着旧源的行。作为取证线索够用（ohlcv.source 会被
             # 换源 last-write-wins 覆盖，快照不留就彻底没了），但别当成逐根 provenance。
             "src_round": source,
+            # a8 健康位：win = 本行计算窗实际根数（min(i, window)，<250+14 时各
+            # 分位的参照期缩水）；warmup = 该行时点可用历史 < WARMUP_BARS。
+            # i 以库内序列首根起算——采集端取窗 10000+399 根远超现有任何序列，
+            # 所以 i 就是该 ts 时点的真实可用历史；若未来历史超过取窗上限，
+            # 最老的行会看到被截断的 i（届时 warmup 恒 False，win 恒满，无害）。
+            "win": len(sub),
+            "warmup": bool(i < WARMUP_BARS),
         }
         out.append(
             (

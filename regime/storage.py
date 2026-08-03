@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 
@@ -343,6 +344,32 @@ def get_states(conn, symbol: str, tf: str, limit: int = 600):
         {"ts": r[0], "state": r[1], "confidence": r[2], "raw_state": r[3] or r[1]}
         for r in reversed(rows)
     ]
+
+
+def get_states_audit(conn, symbol: str, tf: str):
+    """回测用全量状态行（含审计快照）。按 ts 升序；features 解析为 dict。
+
+    与 get_states 分开：面板只要末端窗口的轻量列，回测要全历史 + 健康位
+    （a8 起 features 里有 win/warmup）。版本过滤交给调用方——回测按
+    (version, audit_version) 分桶是硬纪律，这里原样带出。
+    """
+    rows = conn.execute(
+        "SELECT ts,state,raw_state,confidence,features,version,audit_version"
+        " FROM regime_history WHERE symbol=? AND tf=? ORDER BY ts",
+        (symbol, tf),
+    ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            feats = json.loads(r[4]) if r[4] else {}
+        except (TypeError, ValueError):
+            feats = {}
+        out.append({
+            "ts": r[0], "state": r[1], "raw_state": r[2] or r[1],
+            "confidence": r[3], "features": feats,
+            "version": r[5], "audit_version": r[6],
+        })
+    return out
 
 
 def set_live_bar(conn, symbol: str, tf: str, row: dict) -> None:

@@ -24,7 +24,9 @@ from regime import instruments, storage
 from regime.agent import chat as agent_chat
 from regime.agent import load_config as agent_config
 from regime.agent import system_is_custom
-from regime.classify import FEATURE_WINDOW, STATES, analyze_timeframe, confirm_states
+from regime.classify import (
+    FEATURE_WINDOW, STATES, WARMUP_BARS, analyze_timeframe, confirm_states,
+)
 from regime.features.crsi import crsi_features
 from regime.features.structure import ema, swing_pivots
 from regime.features.utils import pct_rank, rolling_pct_rank
@@ -35,7 +37,7 @@ WEB_DIR = os.path.join(ROOT, "web")
 CANDLES = 240
 TIMEFRAMES = ("1d", "4h", "1h")
 TF_SEC = {"1h": 3600, "4h": 14_400, "1d": 86_400}
-WARMUP_BARS = 280  # 分位窗口 250 + 指标暖机 ~30；不足则分位参照期缩水，标记 warmup
+# WARMUP_BARS 移入 regime/classify.py——a8 起逐行审计与面板角标共用同一定义
 
 MIME = {
     ".html": "text/html; charset=utf-8",
