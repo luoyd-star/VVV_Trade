@@ -150,6 +150,31 @@ def sync_breadth(conn) -> tuple:
             pass
 
 
+def sync_binance_opt_iv(conn) -> tuple:
+    """币安期权近端 IV（XAU/XAG，24/7）→ opt_iv_near。30 分钟节流。
+
+    这是 GLD/SLV 代理（美股 RTH 才更新）给不了的：夜间与周末的贵金属隐波。
+    仅参考展示，不算分位（期限逐日漂移，tenor_days 随值落库）。
+    """
+    import time as _t
+
+    from regime import binance_opt_iv
+
+    if not _should(conn, "binance_opt_iv_last", 1800):
+        return None, []
+    errors, parts = [], []
+    now = int(_t.time() * 1000)
+    for sym in binance_opt_iv.UNDERLYINGS:
+        try:
+            row = binance_opt_iv.snapshot(sym, now_ms=now)
+            if row:
+                storage.upsert_opt_iv_near(conn, row)
+                parts.append(f"{sym.split('-')[0]}={row['iv']:.1f}(~{row['tenor_days']}d)")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"binance_opt {sym}: {e}")
+    return (f"币安近端IV: {' '.join(parts)}" if parts else None), errors
+
+
 def sync_moomoo_iv_live(conn, symbols) -> tuple:
     """盘中实时 IV 快照 → stock_vol_live（**每轮都跑，不节流**）。
 
@@ -167,7 +192,7 @@ def sync_moomoo_iv_live(conn, symbols) -> tuple:
         return None, []
     if not moomoo_iv.opend_alive():
         return None, []
-    us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
+    us = moomoo_iv.iv_symbols(symbols)   # 美股永续 + 配了 vol_proxy 的商品（XAU→GLD/XAG→SLV）
     if not us:
         return None, []
     try:
@@ -204,7 +229,7 @@ def sync_moomoo_iv(conn, symbols) -> tuple:
 
     if not moomoo_iv.opend_alive():
         return None, []
-    us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
+    us = moomoo_iv.iv_symbols(symbols)   # 美股永续 + 配了 vol_proxy 的商品（XAU→GLD/XAG→SLV）
     if not us:
         return None, []
     errors, today = [], date.today()
@@ -608,6 +633,12 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
         if msg:
             log.info("%s", msg)
         errors.extend(errs)
+
+    # 币安期权近端 IV（XAU/XAG，24/7）：30 分钟节流
+    msg, errs = sync_binance_opt_iv(conn)
+    if msg:
+        log.info("%s", msg)
+    errors.extend(errs)
 
     # 盘中实时 IV：每轮都采（不节流），只在 RTH 内——一次批量调用取全部美股
     msg, errs = sync_moomoo_iv_live(conn, symbols)

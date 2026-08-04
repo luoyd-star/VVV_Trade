@@ -695,15 +695,21 @@ function renderUsvol(uv, meta, c) {
     `实时 ${fmtN(lv.iv, 1)}`
     + (lv.chg == null ? '' : `（${fmtN(lv.chg, 1, true)} / ${fmtN(lv.chg_pct, 1, true)}%）`)
     + (lv.rank_preview == null ? '' : `·预览分位 ${fmtN(lv.rank_preview, 2)}`);
+  // 商品（XAU/XAG）：iv 来自代理标的（GLD/SLV），必须标注；xopt 是币安期权近端 IV
+  //（24/7 更新但期限仅 1-3 天，与 30 天口径不是同一个量，期限随值展示）
+  const ivLabel = uv.proxy ? `IV(代理${uv.proxy})` : (lv ? '结算' : '个股IV');
   const bits = [
     lv ? liveTxt : null,
-    iv ? `${lv ? '结算' : '个股IV'} ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
+    iv ? `${ivLabel} ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
+    uv.xopt
+      ? `币安近端IV ${fmtN(uv.xopt.iv, 1)}（~${fmtN(uv.xopt.tenor_days, 1)}d·24/7）` : null,
     iv && iv.vrp != null
       ? `VRP ${fmtN(iv.vrp, 1, true)}pt（分位 ${fmtN(iv.vrp_rank, 2)}）` : null,
     `RV30 ${fmtN(uv.rv_last, 1)}`,
     uv.spread == null ? null
       : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,
-    `${uv.index} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
+    uv.index == null ? null
+      : `${uv.index} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
     t.fast && t.slow
       ? `期限 9D/30D ${fmtN(t.fast.ratio, 2)}·${fmtN(t.fast.rank, 2)} / 30D/3M `
         + `${fmtN(t.slow.ratio, 2)}·${fmtN(t.slow.rank, 2)}${inv}`
@@ -735,8 +741,9 @@ function renderUsvol(uv, meta, c) {
       { name: 'RV30 已实现', type: 'line', data: uv.rv, symbol: 'none',
         lineStyle: { width: 2 },
         endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 } },
-      { name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none',
-        lineStyle: { width: 1, type: 'dashed', opacity: 0.55 } },
+      // 商品无指数锚（uv.index 为空即不画）
+      ...(uv.index ? [{ name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none',
+        lineStyle: { width: 1, type: 'dashed', opacity: 0.55 } }] : []),
     ],
   }, true);
 }

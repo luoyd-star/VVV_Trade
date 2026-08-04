@@ -403,6 +403,79 @@ def test_live_preview_rank_uses_settled_reference():
     assert pr is not None and 0.2 < pr < 0.35, f"预览分位应≈0.27，实得 {pr}"
 
 
+def test_vol_proxy_mapping():
+    """XAU→GLD / XAG→SLV 代理映射；美股不受影响。"""
+    assert moomoo_iv.to_moomoo("XAU-USDT") == "US.GLD"
+    assert moomoo_iv.to_moomoo("XAG-USDT") == "US.SLV"
+    assert moomoo_iv.to_moomoo("NVDA-USDT") == "US.NVDA"
+    syms = moomoo_iv.iv_symbols(["XAU-USDT", "BTC-USDT", "NVDA-USDT", "CL-USDT"])
+    assert syms == ["XAU-USDT", "NVDA-USDT"], "商品仅 vol_proxy 者入列，加密/原油不入"
+
+
+def _mk_chain(specs, now_ms=0):
+    """specs: [(tenor_days, strike, side, markIV)] → (contracts, marks)。"""
+    contracts, marks = [], {}
+    for i, (td, k, side, iv) in enumerate(specs):
+        sym = f"T-{i}"
+        contracts.append({"symbol": sym, "expiryDate": int(now_ms + td * 86_400_000),
+                          "strikePrice": str(k), "side": side})
+        marks[sym] = {"markIV": str(iv)}
+    return contracts, marks
+
+
+def test_binance_opt_synth_interp_and_atm():
+    """两到期夹住目标期限 → 总方差插值；ATM 取行权价最贴指数者；C/P 取均值。"""
+    from regime import binance_opt_iv as b
+
+    # 到期 1d 与 5d，指数 100：ATM=100（95 与 105 都更远）
+    contracts, marks = _mk_chain([
+        (1.0, 100, "CALL", 0.20), (1.0, 100, "PUT", 0.22), (1.0, 95, "CALL", 0.40),
+        (5.0, 100, "CALL", 0.30), (5.0, 100, "PUT", 0.32), (5.0, 105, "PUT", 0.50),
+    ])
+    out = b.synth_near_iv(contracts, marks, 100.0, 0)
+    assert out["method"] == "interp" and out["tenor_days"] == b.TARGET_DAYS
+    # 手工复算：σ1=0.21@1d, σ2=0.31@5d, t*=3 → w=(5-3)/(5-1)=0.5
+    var = (0.5 * 0.21**2 * 1 + 0.5 * 0.31**2 * 5) / 3.0
+    assert abs(out["iv"] - round(var**0.5 * 100, 2)) < 1e-9, out
+
+
+def test_binance_opt_synth_nearest_and_tenor_recorded():
+    """夹不住（全部短于目标）→ 取最近到期，**期限如实记录**而非谎称目标期限。"""
+    from regime import binance_opt_iv as b
+
+    contracts, marks = _mk_chain([
+        (0.5, 100, "CALL", 0.25), (1.5, 100, "CALL", 0.28),
+    ])
+    out = b.synth_near_iv(contracts, marks, 100.0, 0)
+    assert out["method"] == "nearest"
+    assert out["tenor_days"] == 1.5, "必须记实际期限"
+    assert out["iv"] == 28.0
+
+
+def test_binance_opt_synth_skips_expiring_and_bad_iv():
+    """距到期 <MIN_TENOR 的合约剔除；markIV<=0 剔除；全无效返回 None。"""
+    from regime import binance_opt_iv as b
+
+    contracts, marks = _mk_chain([
+        (0.05, 100, "CALL", 0.99),     # 临近结算，须剔除
+        (2.0, 100, "CALL", 0.0),       # 无效 IV
+    ])
+    assert b.synth_near_iv(contracts, marks, 100.0, 0) is None
+    contracts2, marks2 = _mk_chain([(0.05, 100, "CALL", 0.99), (2.0, 100, "CALL", 0.30)])
+    out = b.synth_near_iv(contracts2, marks2, 100.0, 0)
+    assert out is not None and out["tenor_days"] == 2.0
+
+
+def test_opt_iv_near_storage_roundtrip():
+    conn = _mem_conn()
+    storage.upsert_opt_iv_near(conn, {"symbol": "XAU-USDT", "ts": 1785900000000,
+                                      "iv": 21.5, "tenor_days": 3.0, "method": "interp",
+                                      "n_expiries": 2, "index_price": 4089.6})
+    df = storage.get_opt_iv_near(conn, "XAU-USDT")
+    assert len(df) == 1 and df["iv"].iloc[0] == 21.5 and df["tenor_days"].iloc[0] == 3.0
+    assert storage.get_opt_iv_near(conn, "XAG-USDT").empty
+
+
 if __name__ == "__main__":
     import pytest
 

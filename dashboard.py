@@ -477,17 +477,25 @@ def _usvol_payload(conn, symbol: str):
     绝对值有系统性偏差。CBOE 自采值保留为影子字段（iv30_last）供口径对比。
     """
     inst = instruments.get(symbol)
-    if inst["class"] != "us_stock_perp":
+    is_us = inst["class"] == "us_stock_perp"
+    proxy = inst.get("vol_proxy")   # 商品：XAU→GLD / XAG→SLV（30 天口径代理）
+    if not (is_us or proxy):
         return None
-    idx = inst.get("vol_index") or "VIX"
-    dfv = storage.get_usvol(conn, idx, limit=800)
-    if not len(dfv):
+    idx = inst.get("vol_index") or ("VIX" if is_us else None)
+    idx_last = idx_rank = None
+    series = []
+    if idx:
+        dfv = storage.get_usvol(conn, idx, limit=800)
+        if len(dfv):
+            idx_last = float(dfv["close"].iloc[-1])
+            # usvol 只存交易日（约 252/年），分位窗口取 252 行才真是"一年"；
+            # 图上多画一些（365 行 ≈ 1.4 年）看趋势，但分位不跟着放宽。
+            tail = dfv["close"].tail(252)
+            idx_rank = round(float((tail < idx_last).mean()), 3)
+            series = [[int(t), round(float(c), 2)]
+                      for t, c in zip(dfv["ts"], dfv["close"])][-365:]
+    if is_us and idx_last is None:
         return None
-    idx_last = float(dfv["close"].iloc[-1])
-    # usvol 只存交易日（约 252/年），分位窗口取 252 行才真是"一年"；
-    # 图上多画一些（365 行 ≈ 1.4 年）看趋势，但分位不跟着放宽。
-    tail = dfv["close"].tail(252)
-    series = [[int(t), round(float(c), 2)] for t, c in zip(dfv["ts"], dfv["close"])][-365:]
 
     # RV30 与加密 DVOL 卡同口径（1d 收盘年化），同图对照 IV-RV 剪刀差
     rv_pairs, rv_last = [], None
@@ -511,21 +519,35 @@ def _usvol_payload(conn, symbol: str):
                 (int(s["ts"].iloc[-1]) - int(s["ts"].iloc[0])) / 86_400_000, 1
             )
 
-    ts_ratio, term = _term_structure(conn)
+    # VIX 期限结构是美股波动率环境的量——对贵金属无意义，商品不给
+    ts_ratio, term = _term_structure(conn) if is_us else (None, None)
 
     iv = _stock_iv_block(conn, symbol)
+    # 币安期权近端 IV（仅配了 vol_proxy 的商品）：24/7 的独有信息，期限随值展示
+    xopt = None
+    if proxy:
+        xdf = storage.get_opt_iv_near(conn, symbol, limit=1)
+        if len(xdf) and xdf["iv"].iloc[-1] == xdf["iv"].iloc[-1]:
+            r = xdf.iloc[-1]
+            xopt = {"iv": round(float(r["iv"]), 2),
+                    "tenor_days": float(r["tenor_days"]),
+                    "method": r["method"], "captured_at": int(r["ts"])}
+    base_iv = iv["last"] if iv else idx_last
     return {
         "index": idx,
-        "index_last": round(idx_last, 2),
-        "index_rank": round(float((tail < idx_last).mean()), 3),
+        "index_last": round(idx_last, 2) if idx_last is not None else None,
+        "index_rank": idx_rank,
         "series": series,
         "rv": rv_pairs,
         "rv_last": rv_last,
         # 剪刀差改用个股自身 IV（有则用），退化到指数只是兜底
-        "spread": (round((iv["last"] if iv else idx_last) - rv_last, 1)
-                   if rv_last is not None else None),
-        "spread_src": ("stock" if iv else "index") if rv_last is not None else None,
+        "spread": (round(base_iv - rv_last, 1)
+                   if rv_last is not None and base_iv is not None else None),
+        "spread_src": (("stock" if iv else "index")
+                       if rv_last is not None and base_iv is not None else None),
         "iv": iv,                 # 个股 IV 主线（moomoo 口径，含自有分位）
+        "proxy": proxy,           # 非空表示 iv 来自代理标的（GLD/SLV），前端须标注
+        "xopt": xopt,             # 币安期权近端 IV（24/7；期限 1-3 天，非 30 天口径）
         "iv30_last": iv30_last,   # CBOE 自采影子值：口径对比用，不算分位
         "iv30_days": iv30_days,
         "ts_ratio": ts_ratio,

@@ -237,12 +237,18 @@ def render_context(p: dict) -> str:
             ts_txt = ""
         ts_txt = _vrp + ts_txt
         lines.append(
-            f"美股波动率: {uv['index']}={uv['index_last']}(一年分位{uv['index_rank']}) "
-            f"RV30={uv['rv_last']}"
+            ("商品波动率" if uv.get("proxy") else "美股波动率") + ": "
+            # 商品无指数锚；iv 来自代理标的（GLD/SLV）须标明
+            + (f"{uv['index']}={uv['index_last']}(一年分位{uv['index_rank']}) "
+               if uv.get("index") else "")
+            + f"RV30={uv['rv_last']}"
             # 标签须跟着 spread_src 走：值来自个股 IV 却标"指数IV−RV"会误导读者
             + (f" {'个股' if uv.get('spread_src') == 'stock' else '指数'}IV−RV="
                f"{uv['spread']:+.1f}pt" if uv.get("spread") is not None else "")
+            + (f" [IV为代理{uv['proxy']}期权口径(30天)]" if uv.get("proxy") else "")
             + f" {iv30_txt}{ts_txt}"
+            + (f" 币安近端IV={uv['xopt']['iv']}(期限~{uv['xopt']['tenor_days']}天,"
+               f"24/7报价,与30天口径不可比)" if uv.get("xopt") else "")
         )
     dr = p.get("deriv")
     if dr:

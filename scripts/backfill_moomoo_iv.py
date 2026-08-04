@@ -24,7 +24,7 @@ def us_symbols() -> list[str]:
     cfg = json.loads((ROOT / "instruments.json").read_text())
     return sorted(
         s for s, v in cfg.items()
-        if isinstance(v, dict) and v.get("class") == "us_stock_perp"
+        if isinstance(v, dict) and (v.get("class") == "us_stock_perp" or v.get("vol_proxy"))
     )
 
 

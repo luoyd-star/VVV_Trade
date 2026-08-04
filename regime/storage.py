@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS stock_option_stat(
   option_oi REAL, call_oi REAL, put_oi REAL, pc_oi_ratio REAL,
   PRIMARY KEY(symbol, ts, source)
 );
+CREATE TABLE IF NOT EXISTS opt_iv_near(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL,
+  iv REAL, tenor_days REAL, method TEXT, n_expiries INTEGER, index_price REAL,
+  PRIMARY KEY(symbol, ts)
+);
 CREATE TABLE IF NOT EXISTS stock_vol_live(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
   iv REAL, pre_iv REAL, hv_30d REAL,
@@ -680,6 +685,28 @@ def get_breadth(conn, slot: str, source: str, limit: int = 800) -> pd.DataFrame:
         f"SELECT ts,{','.join(_BREADTH_COLS)} FROM breadth"
         " WHERE slot=? AND source=? ORDER BY ts DESC LIMIT ?",
         conn, params=(slot, source, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+def upsert_opt_iv_near(conn, row: dict) -> None:
+    """币安期权近端 IV 快照。tenor_days 必须随值落库——不同期限的 IV 不是同一个量。"""
+    conn.execute(
+        "INSERT INTO opt_iv_near(symbol,ts,iv,tenor_days,method,n_expiries,index_price)"
+        " VALUES(?,?,?,?,?,?,?) ON CONFLICT(symbol,ts) DO UPDATE SET"
+        " iv=excluded.iv, tenor_days=excluded.tenor_days, method=excluded.method,"
+        " n_expiries=excluded.n_expiries, index_price=excluded.index_price",
+        (row["symbol"], int(row["ts"]), _f(row.get("iv")), _f(row.get("tenor_days")),
+         row.get("method"), row.get("n_expiries"), _f(row.get("index_price"))),
+    )
+    conn.commit()
+
+
+def get_opt_iv_near(conn, symbol: str, limit: int = 500) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        "SELECT ts,iv,tenor_days,method,n_expiries,index_price FROM opt_iv_near"
+        " WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+        conn, params=(symbol, limit),
     )
     return df.iloc[::-1].reset_index(drop=True)
 

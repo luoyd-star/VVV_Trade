@@ -28,8 +28,29 @@ def day_ms(d: date) -> int:
 
 
 def to_moomoo(symbol: str) -> str:
-    """内部符号（NVDA-USDT，币安永续命名）→ moomoo 代码（US.NVDA）。"""
-    return "US." + symbol.split("-")[0]
+    """内部符号（NVDA-USDT）→ moomoo 代码（US.NVDA）。
+
+    支持 vol_proxy 映射：XAU-USDT→US.GLD、XAG-USDT→US.SLV——币安贵金属期权
+    最远只有 3 天到期，合成不出诚实的 30 天 IV；黄金/白银 ETF 期权的 IV
+    是标准的 30 天口径代理，且 moomoo 有其 3.1 年历史。数据仍落在
+    XAU-USDT 名下（source='moomoo'），代理关系由 instruments.json 声明。
+    """
+    from . import instruments
+
+    proxy = instruments.get(symbol).get("vol_proxy")
+    return "US." + (proxy or symbol.split("-")[0])
+
+
+def iv_symbols(symbols) -> list:
+    """哪些品种走 moomoo IV 管线：美股永续 + 配了 vol_proxy 的商品。"""
+    from . import instruments
+
+    out = []
+    for s in symbols:
+        cfg = instruments.get(s)
+        if cfg.get("class") == "us_stock_perp" or cfg.get("vol_proxy"):
+            out.append(s)
+    return out
 
 
 def opend_alive(host: str = HOST, port: int = PORT) -> bool:

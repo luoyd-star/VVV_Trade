@@ -386,7 +386,8 @@
       "safe_haven"
     ],
     "valid_from": "2026-08-04",
-    "display": "黄金"
+    "display": "黄金",
+    "vol_proxy": "GLD"
   },
   "CL-USDT": {
     "class": "commodity",
@@ -520,7 +521,8 @@
       "precious_metal"
     ],
     "valid_from": "2026-08-05",
-    "display": "白银"
+    "display": "白银",
+    "vol_proxy": "SLV"
   },
   "XPT-USDT": {
     "class": "commodity",
