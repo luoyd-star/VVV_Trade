@@ -99,7 +99,7 @@ def breadth_slot(now=None) -> str | None:
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    from regime.calendar_nyse import is_trading_day
+    from regime.calendar_nyse import is_trading_day, session_close_et
 
     now = now or _dt.now(ZoneInfo("America/New_York"))
     if not is_trading_day(now.date()):
@@ -107,7 +107,11 @@ def breadth_slot(now=None) -> str | None:
     hm = now.hour * 60 + now.minute
     if 9 * 60 + 40 <= hm < 10 * 60 + 10:      # 09:40-10:10 ET
         return "0945"
-    if 15 * 60 + 45 <= hm < 16 * 60 + 5:      # 15:45-16:05 ET（半日市由日历兜底）
+    # 近收盘槽位相对**真实收盘**取窗（半日市 13:00）——codex 抓到硬编码 15:45-16:05
+    # 会在半日市把盘后 3 小时的陈旧快照标成"近收盘"口径
+    close = session_close_et(now.date())
+    close_m = close.hour * 60 + close.minute
+    if close_m - 15 <= hm < close_m + 5:
         return "1559"
     return None
 
@@ -270,13 +274,21 @@ def sync_moomoo_iv(conn, symbols) -> tuple:
                              storage.upsert_stock_option_stat, "pc")
             except Exception as e:  # noqa: BLE001
                 errors.append(f"moomoo_optstat {sym}: {e}")
-        # 财报日历：只补未来 90 天，日频节流已够（日历本身变动罕见）
+        # 财报日历：只补未来 90 天。**未来窗内以最新日历为权威**——改期后的旧日期
+        # 会被清掉（否则旧行永久残留，继续污染邻近度与条件分位）；历史行不动。
         try:
             rows = moomoo_iv.fetch_earnings(
                 ctx, us, today.isoformat(), (today + timedelta(days=90)).isoformat()
             )
             if rows:
                 storage.upsert_earnings(conn, moomoo_iv.SOURCE, rows)
+            t0 = moomoo_iv.day_ms(today)
+            t1 = moomoo_iv.day_ms(today + timedelta(days=90))
+            n_stale = storage.prune_stale_future_earnings(
+                conn, moomoo_iv.SOURCE, us, t0, t1, rows or []
+            )
+            if n_stale:
+                log.info("财报改期清理：删除 %d 条过期未来行", n_stale)
         except Exception as e:  # noqa: BLE001
             errors.append(f"moomoo_earnings: {e}")
     finally:

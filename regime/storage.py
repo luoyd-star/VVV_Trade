@@ -619,7 +619,16 @@ def upsert_stock_vol(conn, symbol: str, source: str, rows) -> None:
 
 
 def _f(v):
-    return None if v is None or (isinstance(v, float) and v != v) else float(v)
+    """数值清洗：None/NaN/±inf 一律 None——inf 进分位分母会吞掉整个分布。"""
+    import math
+
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def get_stock_vol(conn, symbol: str, source: str, limit: int = 1500) -> pd.DataFrame:
@@ -777,6 +786,31 @@ def upsert_earnings(conn, source: str, rows) -> None:
     conn.commit()
 
 
+def prune_stale_future_earnings(conn, source: str, symbols, start_ts: int,
+                                end_ts: int, fresh_rows) -> int:
+    """未来窗口内以最新日历为权威：删掉本批品种在窗内、但不在最新日历里的行。
+
+    codex 审计：财报从 8-20 改到 8-21 时旧行永久残留，继续参与邻近度与条件分位。
+    只清**未来**（start_ts 应 ≥ 今天）——历史行是既成事实永不触碰；
+    对未改动的行不做删+插（保住 known_at 的 point-in-time 语义）。
+    """
+    keep = {(r["symbol"], int(r["ts"])) for r in fresh_rows}
+    stale = [
+        (s, t) for s, t in conn.execute(
+            f"SELECT symbol, ts FROM earnings WHERE source=? AND ts BETWEEN ? AND ?"
+            f" AND symbol IN ({','.join('?' * len(symbols))})",
+            (source, int(start_ts), int(end_ts), *symbols),
+        ).fetchall()
+        if (s, int(t)) not in keep
+    ]
+    for s, t in stale:
+        conn.execute("DELETE FROM earnings WHERE symbol=? AND ts=? AND source=?",
+                     (s, int(t), source))
+    if stale:
+        conn.commit()
+    return len(stale)
+
+
 def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10,
                        source: str = "moomoo") -> dict | None:
     """距最近财报的**日历天数**：{"days": ±N, "ts": ...}，超出 horizon 返回 None。
@@ -792,40 +826,72 @@ def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10,
     from datetime import timezone as _tz
     from zoneinfo import ZoneInfo
 
-    row = conn.execute(
-        "SELECT ts FROM earnings WHERE symbol=? AND source=?"
-        " ORDER BY ABS(ts-?) LIMIT 1", (symbol, source, now_ms),
-    ).fetchone()
-    if not row:
+    # 必须按 **ET 日历差**选最近事件，不能按 UTC 毫秒距离选——codex 抓到的边界：
+    # ET 23:30（=UTC 次日 03:30）时按毫秒距离会选中明天的财报（days=+1），
+    # 而今天的财报（days=0）才是最近的。行数每品种 ≤ 二十来条，全取内存算。
+    rows = conn.execute(
+        "SELECT ts FROM earnings WHERE symbol=? AND source=?", (symbol, source),
+    ).fetchall()
+    if not rows:
         return None
-    e_date = _dt.fromtimestamp(row[0] / 1000, tz=_tz.utc).date()
     today = _dt.fromtimestamp(now_ms / 1000, tz=ZoneInfo("America/New_York")).date()
-    days = (e_date - today).days
-    if abs(days) > horizon:
+    cands = [
+        ((_dt.fromtimestamp(r[0] / 1000, tz=_tz.utc).date() - today).days, int(r[0]))
+        for r in rows
+    ]
+    best = min(cands, key=lambda x: (abs(x[0]), x[0]))
+    if abs(best[0]) > horizon:
         return None
-    return {"days": int(days), "ts": int(row[0])}
+    return {"days": int(best[0]), "ts": best[1]}
 
 
-def stock_vol_latest_ranks(conn, source: str, win: int = 252, min_n: int = 120) -> dict:
-    """全品种最新 IV 与其自身分位：{symbol: (iv, rank|None, n)}。一次查询算完。
+def stock_vol_latest_ranks(conn, source: str, win: int = 252, min_n: int = 120,
+                           cond_win: int = 504, earn_window_d: int = 30,
+                           cond_min: int = 60) -> dict:
+    """全品种最新 IV 与分位：{symbol: (iv, rank|None, n, kind)}。两次查询算完。
 
-    给 Hermes 横截面用——逐品种查会是 31 次往返。样本不足 min_n 的不给分位
-    （与面板 _stock_iv_block 同一纪律：新股宁可空着也不给假统计量）。
+    给 Hermes 横截面用。**分位与面板同口径**：有财报记录且同状态样本足够时用
+    财报条件分位（2 年窗、同 in30 状态比），否则退回普通 win 日分位——
+    codex 审计抓到横截面绕过条件化，NVDA 面板 0.12 而横截面 0.66，
+    把刚消除的财报污染重新端给 Hermes 做跨品种比较。kind 标注口径。
     """
+    import numpy as np
+
     df = pd.read_sql_query(
         "SELECT symbol, ts, iv FROM stock_vol WHERE source=? AND iv IS NOT NULL"
         " ORDER BY symbol, ts",
         conn,
         params=(source,),
     )
+    ea = pd.read_sql_query(
+        "SELECT symbol, ts FROM earnings WHERE source=? ORDER BY symbol, ts",
+        conn, params=(source,),
+    )
+    emap = {sym: g["ts"].to_numpy(dtype="int64") for sym, g in ea.groupby("symbol")}
     out = {}
     for sym, g in df.groupby("symbol"):
         n = len(g)
         last = float(g["iv"].iloc[-1])
-        w = g["iv"].tail(win)
-        out[sym] = (round(last, 2),
-                    round(float((w < last).mean()), 3) if n >= min_n else None,
-                    n)
+        if n < min_n:
+            out[sym] = (round(last, 2), None, n, "raw")
+            continue
+        rank = None
+        kind = "raw"
+        ed = emap.get(sym)
+        if ed is not None and len(ed):
+            sw = g.tail(cond_win)
+            ts = sw["ts"].to_numpy(dtype="int64")[:, None]
+            ahead = (ed[None, :] - ts) / 86_400_000.0
+            days_to = np.where(ahead >= 0, ahead, np.inf).min(axis=1)
+            in30 = days_to <= earn_window_d
+            peer = sw["iv"].to_numpy()[:-1][in30[:-1] == bool(in30[-1])]
+            if len(peer) >= cond_min:
+                rank = round(float((peer < last).mean()), 3)
+                kind = "cond"
+        if rank is None:
+            w = g["iv"].tail(win)
+            rank = round(float((w < last).mean()), 3)
+        out[sym] = (round(last, 2), rank, n, kind)
     return out
 
 

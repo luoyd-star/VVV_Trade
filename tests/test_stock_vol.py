@@ -480,6 +480,87 @@ def test_opt_iv_near_storage_roundtrip():
     assert storage.get_opt_iv_near(conn, "XAG-USDT").empty
 
 
+def test_proximity_et_late_night_picks_today_not_tomorrow():
+    """ET 深夜（=UTC 次日凌晨）须选今天的财报（0）而非明天的（+1）——按毫秒距离会选错。"""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    conn = _mem_conn()
+    for d in (date(2026, 8, 4), date(2026, 8, 5)):
+        storage.upsert_earnings(conn, "moomoo", [
+            {"symbol": "NVDA-USDT", "ts": moomoo_iv.day_ms(d), "pub_type": None, "period": None}])
+    late = int(datetime.combine(date(2026, 8, 4), dtime(23, 30),
+                                tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000)
+    p = storage.earnings_proximity(conn, "NVDA-USDT", late)
+    assert p["days"] == 0, f"ET 23:30 应选今天(0)，实得 {p}"
+
+
+def test_prune_stale_future_earnings():
+    """财报改期：未来窗内旧日期被清、新日期保留、known_at 不被刷新、历史行不动。"""
+    import time as _t
+
+    conn = _mem_conn()
+    hist = moomoo_iv.day_ms(date(2026, 5, 20))     # 历史行
+    old = moomoo_iv.day_ms(date(2026, 8, 20))      # 将被改期的未来行
+    new = moomoo_iv.day_ms(date(2026, 8, 21))
+    storage.upsert_earnings(conn, "moomoo", [
+        {"symbol": "NVDA-USDT", "ts": hist, "pub_type": None, "period": "2026Q1"},
+        {"symbol": "NVDA-USDT", "ts": old, "pub_type": None, "period": "2026Q2"}])
+    ka0 = conn.execute("SELECT known_at FROM earnings WHERE ts=?", (old,)).fetchone()[0]
+    _t.sleep(0.01)
+    fresh = [{"symbol": "NVDA-USDT", "ts": new, "pub_type": None, "period": "2026Q2"}]
+    storage.upsert_earnings(conn, "moomoo", fresh)
+    n = storage.prune_stale_future_earnings(
+        conn, "moomoo", ["NVDA-USDT"],
+        moomoo_iv.day_ms(date(2026, 8, 1)), moomoo_iv.day_ms(date(2026, 11, 1)), fresh)
+    assert n == 1, f"应清掉 1 条旧日期，实清 {n}"
+    left = {r[0] for r in conn.execute("SELECT ts FROM earnings").fetchall()}
+    assert left == {hist, new}, "历史行保留、旧未来行删除、新行保留"
+    assert ka0 is not None
+
+
+def test_settled_only_drops_weekend_rows():
+    """厂商异常给出的周末行必须被防御性丢弃。"""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    rows = [{"ts": moomoo_iv.day_ms(date(2026, 8, 8)), "iv": 20.0},   # 周六
+            {"ts": moomoo_iv.day_ms(date(2026, 8, 7)), "iv": 21.0}]   # 周五
+    now = datetime.combine(date(2026, 8, 9), dtime(12, 0),
+                           tzinfo=ZoneInfo("America/New_York"))
+    kept = moomoo_iv.settled_only(rows, now=now)
+    assert [r["iv"] for r in kept] == [21.0], "周六行应被丢弃"
+
+
+def test_numeric_cleaners_reject_inf():
+    """±inf 必须落 None——inf 进分位分母会吞掉整个分布。"""
+    assert storage._f(float("inf")) is None
+    assert storage._f(float("-inf")) is None
+    assert moomoo_iv._num("inf") is None
+    assert moomoo_iv._num("-inf") is None
+    assert storage._f(1.5) == 1.5
+
+
+def test_breadth_slot_respects_half_day_close():
+    """半日市（收 13:00）：12:50 是近收盘槽、15:50 不是。"""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    import collector
+    from regime.calendar_nyse import session_close_et
+
+    et = ZoneInfo("America/New_York")
+    half = None
+    for cand in (date(2026, 11, 27), date(2026, 7, 2), date(2026, 12, 24)):
+        if session_close_et(cand) < dtime(16, 0):
+            half = cand
+            break
+    if half is None:
+        return
+    assert collector.breadth_slot(datetime.combine(half, dtime(12, 50), tzinfo=et)) == "1559"
+    assert collector.breadth_slot(datetime.combine(half, dtime(15, 50), tzinfo=et)) is None
+
+
 if __name__ == "__main__":
     import pytest
 

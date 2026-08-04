@@ -275,8 +275,11 @@ def _stock_iv_block(conn, symbol: str):
     n = int(len(s))
     rank_raw = round(float((win < last).mean()), 3) if n >= IV_RANK_MIN else None
     rank, in30 = _earn_conditioned_rank(conn, symbol, s, last, n)
+    # rank_kind 让消费方知道 rank 到底是什么：cond=同财报状态内(2年窗)，raw=普通252日
+    #（codex 审计：回退时若仍标"同财报状态内"就是谎称口径）
+    rank_kind = "cond" if rank is not None else "raw"
     if rank is None:
-        rank = rank_raw          # 财报样本不足时退回原始分位，并由前端标注
+        rank = rank_raw          # 财报样本不足时退回原始分位，由 rank_kind 标注
     hv = df[["ts", "hv"]].dropna()
     # 方差风险溢价（VRP = IV − HV）：把"贵"与"波动大"分开，ATR/BBW 分位做不到。
     # 低 ATR 分位 + 高 VRP = 安静但市场在买保险（脆弱的安静，低波挤压态会误判为健康）；
@@ -305,6 +308,7 @@ def _stock_iv_block(conn, symbol: str):
         "earnings_days": earn["days"] if earn else None,
         # rank 已是财报条件分位（同状态内比同状态）；rank_raw 保留供审计与对照
         "rank_raw": rank_raw,
+        "rank_kind": rank_kind,   # cond=同财报状态内(2年窗) / raw=普通252日（回退）
         "earn_in30": in30,
         "vrp": vrp_last,
         "vrp_rank": vrp_rank,
@@ -326,6 +330,10 @@ def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
     if df.empty:
         return None
     row = df.iloc[-1]
+    # 新鲜度闸：陈旧快照（采集停摆/隔夜残留）不得冒充"实时"——codex 审计：
+    # 七月的旧行也会被当成当前实时值显示。RTH 内采集节奏 5 分钟，30 分钟即为陈旧。
+    if int(time.time() * 1000) - int(row["ts"]) > 30 * 60_000:
+        return None
     iv = row.get("iv")
     if iv is None or iv != iv:
         return None
@@ -346,10 +354,11 @@ def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
         now_ms = int(time.time() * 1000)
         fut = ed[ed >= now_ms - 86_400_000]   # 今天（含）以后的财报
         in30_now = bool(len(fut) and (fut[0] - now_ms) / 86_400_000.0 <= EARN_WINDOW_D)
-        ts = settled_s["ts"].to_numpy(dtype="int64")[:, None]
+        sw = settled_s.tail(EARN_COND_WIN)    # 与正式条件分位同一 2 年窗
+        ts = sw["ts"].to_numpy(dtype="int64")[:, None]
         ahead = (ed[None, :] - ts) / 86_400_000.0
         days_to = np.where(ahead >= 0, ahead, np.inf).min(axis=1)
-        peer = settled_s["iv"].to_numpy()[(days_to <= EARN_WINDOW_D) == in30_now]
+        peer = sw["iv"].to_numpy()[(days_to <= EARN_WINDOW_D) == in30_now]
         if len(peer) >= EARN_COND_MIN:
             prev_rank = round(float((peer < iv).mean()), 3)
     elif len(settled_s) >= IV_RANK_MIN:
@@ -375,6 +384,11 @@ def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
 
 EARN_WINDOW_D = 30    # IV30 的计价窗口——财报落在未来 30 天内即已被计价
 EARN_COND_MIN = 60    # 同状态历史样本下限，不足则不给条件分位
+# 条件分位的参照窗：504 交易日（约 2 年 = 8 个财报周期）。codex 审计指出原实现
+# 用全历史（最多 1500 日）与 rank_raw 的 252 日窗口不一致；252 只含 4 个周期、
+# 窗内(in30)样本 ~80 个贴着 EARN_COND_MIN，条件分位会抖；全历史则跨波动率制度。
+# 504 是两者的折中，属版本化先验。
+EARN_COND_WIN = 504
 
 
 def _earn_conditioned_rank(conn, symbol: str, s, last: float, n: int):
@@ -401,13 +415,14 @@ def _earn_conditioned_rank(conn, symbol: str, s, last: float, n: int):
     if not rows or n < IV_RANK_MIN:
         return None, None
     ed = np.array([r[0] for r in rows], dtype="int64")
-    ts = s["ts"].to_numpy(dtype="int64")[:, None]
+    sw = s.tail(EARN_COND_WIN)                          # 2 年窗，与 rank_raw 的窗口哲学一致
+    ts = sw["ts"].to_numpy(dtype="int64")[:, None]
     ahead = (ed[None, :] - ts) / 86_400_000.0
     ahead = np.where(ahead >= 0, ahead, np.inf)
     days_to = ahead.min(axis=1)
     in30 = days_to <= EARN_WINDOW_D
     cur = bool(in30[-1])
-    peer = s["iv"].to_numpy()[:-1][in30[:-1] == cur]   # 同状态的历史（不含当日）
+    peer = sw["iv"].to_numpy()[:-1][in30[:-1] == cur]   # 同状态的历史（不含当日）
     if len(peer) < EARN_COND_MIN:
         return None, cur
     return round(float((peer < last).mean()), 3), cur
@@ -449,9 +464,11 @@ def _term_structure(conn):
         ref = r[m["ts"] <= csv_max] if csv_max else r
         if not len(ref):
             ref = r
+        # 倒挂是罕见事件（占 7.6%），分位参照须够长——不足 252 不给（宁缺毋滥）
+        rank = round(float((ref < cur).mean()), 3) if len(ref) >= 252 else None
         return {
             "ratio": round(cur, 3),
-            "rank": round(float((ref < cur).mean()), 3),
+            "rank": rank,
             "inverted": bool(cur > 1.0),
             "settled": settled,   # False = 当前比值来自盘中延迟报价（未确权）
             "n": int(len(ref)),
@@ -508,15 +525,21 @@ def _usvol_payload(conn, symbol: str):
         return None
     idx = inst.get("vol_index") or ("VIX" if is_us else None)
     idx_last = idx_rank = None
+    idx_settled = None
     series = []
     if idx:
         dfv = storage.get_usvol(conn, idx, limit=800)
         if len(dfv):
             idx_last = float(dfv["close"].iloc[-1])
-            # usvol 只存交易日（约 252/年），分位窗口取 252 行才真是"一年"；
-            # 图上多画一些（365 行 ≈ 1.4 年）看趋势，但分位不跟着放宽。
-            tail = dfv["close"].tail(252)
-            idx_rank = round(float((tail < idx_last).mean()), 3)
+            # 当日行可能是未经 CSV 确权的延迟报价（usvol 两级权威）。显示值用最新
+            #（活读数），但**分位参照只用已确权行** + ≥60 样本闸——codex 审计：
+            # 临时值进正式分位分母与"未结算不进分位"纪律相悖；单行也能算出 rank=0。
+            csv_max = int(storage.get_meta(conn, f"usvol_csv_max_{idx}", 0) or 0)
+            idx_settled = bool(csv_max) and int(dfv["ts"].iloc[-1]) <= csv_max
+            ref_df = dfv[dfv["ts"] <= csv_max] if csv_max else dfv
+            tail = ref_df["close"].tail(252)
+            if len(tail) >= 60:
+                idx_rank = round(float((tail < idx_last).mean()), 3)
             series = [[int(t), round(float(c), 2)]
                       for t, c in zip(dfv["ts"], dfv["close"])][-365:]
     if is_us and idx_last is None:
@@ -562,6 +585,7 @@ def _usvol_payload(conn, symbol: str):
         "index": idx,
         "index_last": round(idx_last, 2) if idx_last is not None else None,
         "index_rank": idx_rank,
+        "index_settled": idx_settled,   # False = 显示值来自盘中延迟报价（未确权）
         "series": series,
         "rv": rv_pairs,
         "rv_last": rv_last,

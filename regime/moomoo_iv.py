@@ -186,13 +186,17 @@ def settled_only(rows: list, now=None) -> list:
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    from .calendar_nyse import session_close_et
+    from .calendar_nyse import is_trading_day, session_close_et
 
     et = ZoneInfo("America/New_York")
-    now = now or _dt.now(et)
+    # 传入的 now 必须统一转 ET——调用方若传 UTC 时刻，now.time() 会拿 UTC 钟点
+    # 与 ET 收盘时刻比（19:45Z 会被当成"已过 16:00 收盘"提前放行当日行）
+    now = (now.astimezone(et) if now is not None else _dt.now(et))
     out = []
     for r in rows:
         d = _dt.fromtimestamp(r["ts"] / 1000, tz=timezone.utc).date()
+        if not is_trading_day(d):
+            continue   # 周末/休市日的行属厂商异常，防御性丢弃（codex 审计）
         if d < now.date():
             out.append(r)
             continue
@@ -284,9 +288,12 @@ def fetch_earnings(ctx, symbols, begin: str, end: str) -> list:
 
 
 def _num(v):
-    """数值化；'N/A'、None、NaN 一律 None——绝不让占位字符串变成 0。"""
+    """数值化；'N/A'、None、NaN、±inf 一律 None——绝不让占位字符串变成 0，
+    也绝不让 inf 进分位分母（codex 审计：'inf' 字符串可被 float() 接受）。"""
+    import math
+
     try:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return None if f != f else f
+    return f if math.isfinite(f) else None

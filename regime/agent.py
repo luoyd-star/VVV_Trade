@@ -206,9 +206,9 @@ def render_context(p: dict) -> str:
                          + (f",预览分位{_lv['rank_preview']}"
                             if _lv.get("rank_preview") is not None else "")
                          + ",未结算仅供盘中参考】")
-            # 有财报记录才是"同财报状态内"分位；ETF/商品代理无财报，是普通 252 日分位
-            #（codex 审计点出：无差别标"同财报状态内"会让 ETF 的原始分位被误读为已条件化）
-            _rlabel = ("同财报状态内分位" if _iv.get("earn_in30") is not None
+            # 标签跟着 rank_kind 走：cond=同财报状态内(2年窗)，raw=普通252日
+            #（条件样本不足回退原始时也不得谎称"同财报状态内"——codex 审计）
+            _rlabel = ("同财报状态内分位(2年窗)" if _iv.get("rank_kind") == "cond"
                        else "自身252日分位")
             iv30_txt = (
                 f"个股IV(昨结算)={_iv['last']}"
@@ -406,11 +406,14 @@ def overview_brief() -> str:
             finally:
                 conn2.close()
             if ivs:
+                # kind: cond=财报条件分位(与面板同口径)，raw(°标)=普通252日
                 seg = " ".join(
                     f"{s.split('-')[0]}:{v:.0f}"
-                    + (f"%{r:.2f}" if r is not None else f"(n{n})")
-                    for s, (v, r, n) in sorted(ivs.items()))
-                lines.append(f"个股隐波(IV，%后为自身252日分位；moomoo口径不与VIX混比): {seg}")
+                    + (f"%{r:.2f}{'°' if k == 'raw' else ''}" if r is not None
+                       else f"(n{n})")
+                    for s, (v, r, n, k) in sorted(ivs.items()))
+                lines.append("个股隐波(IV，%后为财报条件分位[2年窗,与面板同口径]，"
+                             f"°=无财报品种的252日原始分位；moomoo口径不与VIX混比): {seg}")
         except Exception:  # noqa: BLE001
             pass
         try:
