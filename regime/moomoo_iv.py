@@ -112,6 +112,34 @@ def fetch_history(ctx, symbol: str, begin: str, end: str) -> list:
     return [rows[k] for k in sorted(rows)]
 
 
+def settled_only(rows: list, now=None) -> list:
+    """滤掉尚未结算的当日行——**与"未收盘 K 线双轨制"同一条纪律**。
+
+    实测（2026-08-04 盘中 ET 09:45）：3304 会返回当日行且其 iv 随盘滚动
+    （47.238 vs 3303 实时 47.152），若照写入库，分位分母里就混进了一个还会变的值，
+    同一天算两次分位得数不同——这正是 collector.py 对 K 线做 `iloc[:-1]` 要防的事。
+
+    判据：某交易日 D 的行，仅当"当前 ET 时刻已过 D 的收盘"才算结算。
+    用 NYSE 日历的真实收盘时刻（半日市 13:00），不硬编码 16:00。
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    from .calendar_nyse import session_close_et
+
+    et = ZoneInfo("America/New_York")
+    now = now or _dt.now(et)
+    out = []
+    for r in rows:
+        d = _dt.fromtimestamp(r["ts"] / 1000, tz=timezone.utc).date()
+        if d < now.date():
+            out.append(r)
+            continue
+        if d == now.date() and now.time() >= session_close_et(d):
+            out.append(r)   # 已收盘，当日值已定
+    return out
+
+
 def fetch_option_stat(ctx, symbol: str, begin: str, end: str) -> list:
     """期权流日频历史（get_option_underlying_his_statistic）→ put/call 成交比与持仓比。
 

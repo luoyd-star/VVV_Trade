@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS earnings(
   pub_type TEXT, period TEXT,
   PRIMARY KEY(symbol, ts, source)
 );
+CREATE TABLE IF NOT EXISTS breadth(
+  ts INTEGER NOT NULL, slot TEXT NOT NULL, source TEXT NOT NULL,
+  denom INTEGER,
+  up_1d INTEGER, up_20d INTEGER, up_60d INTEGER, up_250d INTEGER, up_ytd INTEGER,
+  tail_up INTEGER, tail_dn INTEGER, flat INTEGER, total INTEGER,
+  captured_at INTEGER,
+  PRIMARY KEY(ts, slot, source)
+);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -635,6 +643,36 @@ def get_stock_option_stat(conn, symbol: str, source: str, limit: int = 1500) -> 
         " WHERE symbol=? AND source=? ORDER BY ts DESC LIMIT ?",
         conn,
         params=(symbol, source, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+_BREADTH_COLS = ("denom", "up_1d", "up_20d", "up_60d", "up_250d", "up_ytd",
+                 "tail_up", "tail_dn", "flat", "total", "captured_at")
+
+
+def upsert_breadth(conn, ts: int, slot: str, source: str, row: dict) -> None:
+    """市场宽度快照（**影子字段**，只采不消费，攒够约 2 年再评审转正）。
+
+    slot 进主键：09:45 与 15:59 的采样口径不同（隔夜跳空后的盘中 vs 近收盘），
+    混入同一序列会让分位失去意义。
+    """
+    cols = ",".join(_BREADTH_COLS)
+    ph = ",".join("?" * len(_BREADTH_COLS))
+    sets = ",".join(f"{c}=COALESCE(excluded.{c},{c})" for c in _BREADTH_COLS)
+    conn.execute(
+        f"INSERT INTO breadth(ts,slot,source,{cols}) VALUES(?,?,?,{ph})"
+        f" ON CONFLICT(ts,slot,source) DO UPDATE SET {sets}",
+        (int(ts), slot, source, *(row.get(c) for c in _BREADTH_COLS)),
+    )
+    conn.commit()
+
+
+def get_breadth(conn, slot: str, source: str, limit: int = 800) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        f"SELECT ts,{','.join(_BREADTH_COLS)} FROM breadth"
+        " WHERE slot=? AND source=? ORDER BY ts DESC LIMIT ?",
+        conn, params=(slot, source, limit),
     )
     return df.iloc[::-1].reset_index(drop=True)
 

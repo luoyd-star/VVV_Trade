@@ -66,7 +66,7 @@ def main() -> int:
                     print(f"  [{i:>2}/{len(symbols)}] {sym:<11} 已最新（{last}），跳过")
                     continue
             try:
-                rows = fetch(ctx, sym, begin, today.isoformat())
+                rows = moomoo_iv.settled_only(fetch(ctx, sym, begin, today.isoformat()))
             except RuntimeError as e:
                 print(f"  [{i:>2}/{len(symbols)}] {sym:<11} ✗ {str(e)[:70]}")
                 failed.append(sym)

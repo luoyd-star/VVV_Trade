@@ -227,6 +227,58 @@ def test_term_structure_inversion_flags():
     assert abs(term["fast"]["ratio"] - 1.2) < 1e-6
 
 
+def test_settled_only_drops_unsettled_today():
+    """当日未收盘的行必须滤掉——与 K 线 iloc[:-1] 同一条纪律。
+
+    实测 3304 会返回当日行且其 iv 随盘滚动（盘中 47.238 vs 3303 实时 47.152）。
+    写进去会让分位分母含一个还会变的值：同一天算两次分位得数不同。
+    """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    d_today = date(2026, 8, 4)      # 周二，正常交易日
+    d_yest = date(2026, 8, 3)
+    rows = [
+        {"ts": moomoo_iv.day_ms(d_yest), "iv": 48.0},
+        {"ts": moomoo_iv.day_ms(d_today), "iv": 47.2},
+    ]
+    # 盘中 09:45：当日行未结算，必须丢弃
+    mid = datetime.combine(d_today, dtime(9, 45), tzinfo=et)
+    kept = moomoo_iv.settled_only(rows, now=mid)
+    assert len(kept) == 1 and kept[0]["iv"] == 48.0, "盘中不得写入当日行"
+
+    # 收盘后 16:30：当日已定，应保留
+    after = datetime.combine(d_today, dtime(16, 30), tzinfo=et)
+    kept2 = moomoo_iv.settled_only(rows, now=after)
+    assert len(kept2) == 2, "收盘后当日行应保留"
+
+    # 次日任意时刻：两行都是历史
+    nxt = datetime.combine(date(2026, 8, 5), dtime(6, 0), tzinfo=et)
+    assert len(moomoo_iv.settled_only(rows, now=nxt)) == 2
+
+
+def test_settled_only_uses_real_close_not_hardcoded_1600():
+    """半日市（收 13:00）的当日行在 13:30 就该算结算，不能等到 16:00。"""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    from regime.calendar_nyse import session_close_et
+
+    et = ZoneInfo("America/New_York")
+    half = None
+    for cand in (date(2026, 11, 27), date(2026, 7, 3), date(2026, 12, 24)):
+        if session_close_et(cand) < dtime(16, 0):
+            half = cand
+            break
+    if half is None:
+        return  # 该年无半日市表则跳过
+    rows = [{"ts": moomoo_iv.day_ms(half), "iv": 20.0}]
+    at1330 = datetime.combine(half, dtime(13, 30), tzinfo=et)
+    assert len(moomoo_iv.settled_only(rows, now=at1330)) == 1, \
+        f"半日市 {half} 收 {session_close_et(half)}，13:30 应已结算"
+
+
 if __name__ == "__main__":
     import pytest
 

@@ -86,6 +86,67 @@ def _should(conn, key: str, interval_s: int) -> bool:
     return True
 
 
+def breadth_slot(now=None) -> str | None:
+    """当前时刻属于哪个宽度采样槽位；不在窗内返回 None。
+
+    两个槽位刻意分开存：09:45 采到的是隔夜跳空后的开盘初（大量票尚未成交，
+    实测零变动股占 44%），15:59 采到的是近收盘（实测约 25%）——两者的"宽度"
+    根本不是同一个统计量，混入同一序列会让分位失去意义。
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    from regime.calendar_nyse import is_trading_day
+
+    now = now or _dt.now(ZoneInfo("America/New_York"))
+    if not is_trading_day(now.date()):
+        return None
+    hm = now.hour * 60 + now.minute
+    if 9 * 60 + 40 <= hm < 10 * 60 + 10:      # 09:40-10:10 ET
+        return "0945"
+    if 15 * 60 + 45 <= hm < 16 * 60 + 5:      # 15:45-16:05 ET（半日市由日历兜底）
+        return "1559"
+    return None
+
+
+def sync_breadth(conn) -> tuple:
+    """市场宽度快照 → breadth 表（**影子字段，只采不消费**）。
+
+    每个槽位每交易日只采一次（主键幂等 + meta 节流双保险）。
+    OpenD 不在就静默跳过，与个股 IV 同一纪律。
+    """
+    from regime import breadth as _b
+
+    slot = breadth_slot()
+    if slot is None:
+        return None, []
+    from regime import moomoo_iv
+    if not moomoo_iv.opend_alive():
+        return None, []
+    ts = _b.day_ms()
+    key = f"breadth_{slot}_{ts}"
+    if storage.get_meta(conn, key, ""):
+        return None, []
+    try:
+        ctx = moomoo_iv.open_ctx()
+    except Exception as e:  # noqa: BLE001
+        return None, [f"breadth 连接: {e}"]
+    try:
+        row = _b.fetch_breadth(ctx)
+        storage.upsert_breadth(conn, ts, slot, _b.SOURCE, row)
+        storage.set_meta(conn, key, "1")
+        eff = max((row["total"] or 0) - (row["flat"] or 0), 1)
+        return (f"宽度[{slot}] 1D {row['up_1d']}/{row['denom']} "
+                f"尾部 +{row['tail_up']}/-{row['tail_dn']} (有效 {eff})"), []
+    except Exception as e:  # noqa: BLE001
+        return None, [f"breadth {slot}: {e}"]
+    finally:
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
 def sync_moomoo_iv(conn, symbols) -> tuple:
     """个股 IV 日频增量（moomoo 口径）→ stock_vol。返回 (日志串或 None, 错误列表)。
 
@@ -120,7 +181,7 @@ def sync_moomoo_iv(conn, symbols) -> tuple:
             if last >= today:
                 return 0
             begin = (last - timedelta(days=1)).isoformat()
-        rows = fetch(ctx, sym, begin, today.isoformat())
+        rows = moomoo_iv.settled_only(fetch(ctx, sym, begin, today.isoformat()))
         if rows:
             put(conn, sym, moomoo_iv.SOURCE, rows)
         return len(rows)
@@ -503,6 +564,12 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
         if msg:
             log.info("%s", msg)
         errors.extend(errs)
+
+    # 市场宽度影子字段：零历史，须自攒约 2 年才够评审——每天不采都是永久损失
+    msg, errs = sync_breadth(conn)
+    if msg:
+        log.info("%s", msg)
+    errors.extend(errs)
 
     bases = {s.upper().replace("/", "-").split("-")[0] for s in symbols}
     for currency in sorted(bases & set(DVOL_CURRENCIES)):
