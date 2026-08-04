@@ -387,7 +387,11 @@ def overview_brief() -> str:
             "  .venv/bin/python scripts/vvvquery.py states BTC-USDT 4h 20  "
             "# 状态+审计特征历史\n"
             "  .venv/bin/python scripts/vvvquery.py sql \"SELECT ...\"  "
-            "# 只读 SQL（表：ohlcv/regime_history/deriv/vol1h/usvol/dvol）\n"
+            "# 只读 SQL（表：ohlcv/regime_history/deriv/vol1h/usvol/dvol/"
+            "stock_vol/ref_daily）\n"
+            "  个股隐波历史查 stock_vol，**必须带 source 条件**（口径不同源不可混算）：\n"
+            "    SELECT ts,iv,hv FROM stock_vol WHERE symbol='NVDA-USDT' "
+            "AND source='moomoo' ORDER BY ts DESC LIMIT 60\n"
             "跨品种对比、历史回看类问题，先跑接口再回答，不要凭横截面猜细节。")
         lines.append("</all_symbols_snapshot>")
         return "\n".join(lines)
