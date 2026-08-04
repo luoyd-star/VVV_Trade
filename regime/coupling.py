@@ -160,6 +160,7 @@ def pair_table(r: pd.DataFrame) -> pd.DataFrame:
     slow = pairwise_ewma_corr(z, HL_SLOW)
     sign_rate = rolling_sign_rate(z)
     n_rows = len(r)
+    valid_rows = r.notna().sum()  # 每列有效行数
     rows = []
     cols = list(r.columns)
     for i, a_ in enumerate(cols):
@@ -167,7 +168,9 @@ def pair_table(r: pd.DataFrame) -> pd.DataFrame:
             n_joint = fast["n_joint"].loc[a_, b_]
             rho_f = fast["corr"].loc[a_, b_]
             rho_s = slow["corr"].loc[a_, b_]
-            cover = n_joint / max(1, n_rows)
+            # coverage 按两腿联合窗计（min 有效行），不按面板并集行数——
+            # 否则错峰上市的老对会被并集长度机械压低（M1 首轮实测的精修项）
+            cover = n_joint / max(1, min(valid_rows[a_], valid_rows[b_]))
             sr = (sign_rate.loc[a_, b_]
                   if sign_rate is not None and np.isfinite(sign_rate.loc[a_, b_])
                   else np.nan)
