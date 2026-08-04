@@ -392,7 +392,11 @@ def test_live_preview_rank_uses_settled_reference():
     storage.upsert_stock_vol_live(conn, "moomoo", [
         {"symbol": "QQQ-USDT", "ts": 1785900000000, "iv": 100.0, "pre_iv": 319.0}])
     blk = dashboard._stock_iv_block(conn, "QQQ-USDT")
-    assert blk["live"]["rank_preview"] is None, "无财报状态时不给预览分位"
+    # 无财报记录（ETF）：退回全集参照（tail 252，与结算侧 rank_raw 同口径）——
+    # 序列 20..319 的 tail(252)=68..319，iv=100 → (100−68)/252 ≈ 0.127
+    pr0 = blk["live"]["rank_preview"]
+    assert pr0 is not None and 0.10 < pr0 < 0.15, f"应回退全集参照≈0.127，实得 {pr0}"
+    assert blk["live"]["in30_now"] is None, "无财报记录时今日状态应为 None"
 
     # 有财报记录后：100.0 在 20~319 里应落在约 (100-20)/300 ≈ 0.27
     storage.upsert_earnings(conn, "moomoo", [

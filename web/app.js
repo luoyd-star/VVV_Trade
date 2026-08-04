@@ -182,8 +182,17 @@ async function loadCoupling() {
 // 38×38 复合相关矩阵：每格用应有时钟（加密24/7 / 美股RTH / 跨类共同RTH），
 // 慢线 EWMA；样本不足（n<400）淡显；观察池符号打 ° 标；轴按主题块排序。
 function renderCoupMatrix(m) {
+  const host = document.getElementById('coupMatrix');
+  if (!host || !m || !(m.symbols || []).length) return;
+  // 高度随品种数自适应：74 品种在固定 720px 里每格只剩 ~8px，标签全部挤没
+  const want = Math.max(720, m.symbols.length * 13 + 160);
+  if (Math.abs(host.clientHeight - want) > 8) {
+    host.style.height = want + 'px';
+    const old = echarts.getInstanceByDom(host);
+    if (old) old.resize();
+  }
   const c = chart('coupMatrix');
-  if (!c || !m || !(m.symbols || []).length) return;
+  if (!c) return;
   const short = (s) => s.split('-')[0] + (m.pools[s] === 'observation' ? '°' : '');
   const labels = m.symbols.map(short);
   const data = [];
@@ -692,7 +701,7 @@ function renderUsvol(uv, meta, c) {
   // 必须显式标注"实时"——同"预览(未收线)"的既有约定
   const lv = iv && iv.live;
   const liveTxt = !lv ? '' :
-    `实时 ${fmtN(lv.iv, 1)}`
+    `实时(未结算) ${fmtN(lv.iv, 1)}`
     + (lv.chg == null ? '' : `（${fmtN(lv.chg, 1, true)} / ${fmtN(lv.chg_pct, 1, true)}%）`)
     + (lv.rank_preview == null ? '' : `·预览分位 ${fmtN(lv.rank_preview, 2)}`);
   // 商品（XAU/XAG）：iv 来自代理标的（GLD/SLV），必须标注；xopt 是币安期权近端 IV
@@ -774,7 +783,7 @@ function renderDeriv() {
     [dr.funding_annual_pct == null ? '—' : `${fmtN(dr.funding_annual_pct, 1)}%`, 'Funding 年化'],
     [dr.premium_pct == null ? '—' : `${fmtN(dr.premium_pct * 100, 1)}bp`, `Premium${rk(dr.premium_rank)}`],
     dr.iv30 != null
-      ? [fmtN(dr.iv30, 1), `个股 iv30${rk(dr.iv30_rank)}`]
+      ? [fmtN(dr.iv30, 1), `个股 iv30${dr.iv30_src === 'cboe' ? '(CBOE影子·短史)' : ''}${rk(dr.iv30_rank)}`]
       : [`${dr.span_days}d`, '样本跨度'],
   ].map(([v, k]) => `<div class="m"><span>${k}</span><b>${v}</b></div>`).join('');
   if (!c) return;

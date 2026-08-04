@@ -206,9 +206,13 @@ def render_context(p: dict) -> str:
                          + (f",预览分位{_lv['rank_preview']}"
                             if _lv.get("rank_preview") is not None else "")
                          + ",未结算仅供盘中参考】")
+            # 有财报记录才是"同财报状态内"分位；ETF/商品代理无财报，是普通 252 日分位
+            #（codex 审计点出：无差别标"同财报状态内"会让 ETF 的原始分位被误读为已条件化）
+            _rlabel = ("同财报状态内分位" if _iv.get("earn_in30") is not None
+                       else "自身252日分位")
             iv30_txt = (
                 f"个股IV(昨结算)={_iv['last']}"
-                + (f"(同财报状态内分位{_iv['rank']}{_dv}{_w30}{_etxt})"
+                + (f"({_rlabel}{_iv['rank']}{_dv}{_w30}{_etxt})"
                    if _iv.get("rank") is not None
                    else f"(样本仅{_iv['n']}日,分位不足{_etxt})")
                 + _ltxt

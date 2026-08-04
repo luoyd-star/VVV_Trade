@@ -332,20 +332,30 @@ def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
     iv = float(iv)
     pre = row.get("pre_iv")
     pre = float(pre) if pre is not None and pre == pre else None
-    # 预览分位：与正式分位同一参照集（同财报状态），只是把今日实时值代入
+    # 预览分位的财报状态必须按**今天**算，不能沿用最后结算日的状态——
+    # codex 审计抓到的真 P0：PLTR 结算日(8-03)是财报日(窗内)、今天(8-04)财报已过(窗外)，
+    # 沿用昨天的状态把预览分位错报 0.026（对高IV财报日比），正确是 0.513（对窗外日比）。
     prev_rank = None
-    if in30 is not None:
-        rows = conn.execute(
-            "SELECT ts FROM earnings WHERE symbol=? ORDER BY ts", (symbol,)
-        ).fetchall()
-        if rows:
-            ed = np.array([r[0] for r in rows], dtype="int64")
-            ts = settled_s["ts"].to_numpy(dtype="int64")[:, None]
-            ahead = (ed[None, :] - ts) / 86_400_000.0
-            days_to = np.where(ahead >= 0, ahead, np.inf).min(axis=1)
-            peer = settled_s["iv"].to_numpy()[(days_to <= EARN_WINDOW_D) == in30]
-            if len(peer) >= EARN_COND_MIN:
-                prev_rank = round(float((peer < iv).mean()), 3)
+    in30_now = None
+    rows = conn.execute(
+        "SELECT ts FROM earnings WHERE symbol=? AND source=? ORDER BY ts",
+        (symbol, moomoo_iv.SOURCE),
+    ).fetchall()
+    if rows:
+        ed = np.array([r[0] for r in rows], dtype="int64")
+        now_ms = int(time.time() * 1000)
+        fut = ed[ed >= now_ms - 86_400_000]   # 今天（含）以后的财报
+        in30_now = bool(len(fut) and (fut[0] - now_ms) / 86_400_000.0 <= EARN_WINDOW_D)
+        ts = settled_s["ts"].to_numpy(dtype="int64")[:, None]
+        ahead = (ed[None, :] - ts) / 86_400_000.0
+        days_to = np.where(ahead >= 0, ahead, np.inf).min(axis=1)
+        peer = settled_s["iv"].to_numpy()[(days_to <= EARN_WINDOW_D) == in30_now]
+        if len(peer) >= EARN_COND_MIN:
+            prev_rank = round(float((peer < iv).mean()), 3)
+    elif len(settled_s) >= IV_RANK_MIN:
+        # 无财报记录（ETF/商品代理）：与结算全集比，同结算侧 rank_raw 的口径
+        ref = settled_s["iv"].tail(IV_RANK_WIN)
+        prev_rank = round(float((ref < iv).mean()), 3)
     return {
         "iv": round(iv, 2),
         "pre_iv": round(pre, 2) if pre is not None else None,
@@ -353,6 +363,7 @@ def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
         "chg_pct": round((iv / pre - 1) * 100, 2) if pre else None,
         "captured_at": int(row["ts"]),
         "rank_preview": prev_rank,
+        "in30_now": in30_now,     # 预览分位所用的**今天**的财报状态（与结算日状态可能不同）
         "preview": True,          # 前端必须据此标注"未结算"
         "pc_volume_ratio": (round(float(row["pc_volume_ratio"]), 3)
                             if row.get("pc_volume_ratio") is not None
@@ -382,8 +393,10 @@ def _earn_conditioned_rank(conn, symbol: str, s, last: float, n: int):
     """
     import numpy as np
 
+    # source 过滤：earnings 的 source 在主键里，不过滤则第二来源接入时会污染参照集
     rows = conn.execute(
-        "SELECT ts FROM earnings WHERE symbol=? ORDER BY ts", (symbol,)
+        "SELECT ts FROM earnings WHERE symbol=? AND source=? ORDER BY ts",
+        (symbol, moomoo_iv.SOURCE),
     ).fetchall()
     if not rows or n < IV_RANK_MIN:
         return None, None
@@ -416,6 +429,13 @@ def _term_structure(conn):
            for k in ("VIX9D", "VIX", "VIX3M")}
     if any(s.empty for s in ser.values()):
         return None, None
+    # 当日行可能是尚未被 CSV 确权的延迟报价（usvol 两级权威设计的临时值）。
+    # 当前比值用最新值（活读数），但**分位的参照集只用已确权行**——
+    # codex 审计点出：把临时值混进正式分位的分母，与"未结算不进分位"纪律相悖。
+    csv_max = min(
+        int(storage.get_meta(conn, f"usvol_csv_max_{k}", 0) or 0)
+        for k in ("VIX9D", "VIX", "VIX3M")
+    )
 
     def slope(num, den):
         a, b = ser[num], ser[den]
@@ -425,11 +445,16 @@ def _term_structure(conn):
             return None
         r = m["close_a"] / m["close_b"]
         cur = float(r.iloc[-1])
+        settled = bool(csv_max) and int(m["ts"].iloc[-1]) <= csv_max
+        ref = r[m["ts"] <= csv_max] if csv_max else r
+        if not len(ref):
+            ref = r
         return {
             "ratio": round(cur, 3),
-            "rank": round(float((r < cur).mean()), 3),
+            "rank": round(float((ref < cur).mean()), 3),
             "inverted": bool(cur > 1.0),
-            "n": int(len(r)),
+            "settled": settled,   # False = 当前比值来自盘中延迟报价（未确权）
+            "n": int(len(ref)),
         }
 
     fast = slope("VIX9D", "VIX")     # 9 日 vs 30 日：最急的一端

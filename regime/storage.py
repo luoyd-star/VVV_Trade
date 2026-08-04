@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS stock_vol_live(
 );
 CREATE TABLE IF NOT EXISTS earnings(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
-  pub_type TEXT, period TEXT,
+  pub_type TEXT, period TEXT, known_at INTEGER,
   PRIMARY KEY(symbol, ts, source)
 );
 CREATE TABLE IF NOT EXISTS breadth(
@@ -163,6 +163,14 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE deriv ADD COLUMN iv30 REAL")
     if "kind" not in dcols:
         conn.execute("ALTER TABLE deriv ADD COLUMN kind TEXT")
+    # earnings 的 point-in-time 缺口（codex 审计）：无 known_at 则无法证明历史 in30
+    # 是当时可知的。此列只对**新写入**行有效；既有回填行 known_at 为 NULL，
+    # 语义=事后回填、非 point-in-time——将来 IV 进规则层（v2）时必须只用
+    # known_at 非空且早于判定时刻的行。显示层的条件分位维持现状（财报日期
+    # 提前数月公布、极少改动，可接受先验；见 EARNINGS_IV_CONTAMINATION 文档）。
+    ecols = {r[1] for r in conn.execute("PRAGMA table_info(earnings)")}
+    if "known_at" not in ecols:
+        conn.execute("ALTER TABLE earnings ADD COLUMN known_at INTEGER")
     conn.commit()
     # 历史上这里有一套"regime_audit_vN 键不存在就 DELETE FROM regime_history"的
     # 代际清空机制（v2 补列 / v3 pathgeom / v4 atr_ds / v5 时间对齐批），已被
@@ -752,18 +760,25 @@ def upsert_earnings(conn, source: str, rows) -> None:
     事前峰→事后谷崩塌 38%，占分位分母 9.9%（docs/EARNINGS_IV_CONTAMINATION_20260804.md）。
     分母不清洗（财报是该股 IV 分布的结构性部分），但当下读数须标注。
     """
+    import time as _time
+
+    now = int(_time.time() * 1000)
     conn.executemany(
-        "INSERT INTO earnings(symbol,ts,source,pub_type,period) VALUES(?,?,?,?,?)"
+        "INSERT INTO earnings(symbol,ts,source,pub_type,period,known_at)"
+        " VALUES(?,?,?,?,?,?)"
         " ON CONFLICT(symbol,ts,source) DO UPDATE SET"
         " pub_type=COALESCE(excluded.pub_type,pub_type),"
-        " period=COALESCE(excluded.period,period)",
-        [(r["symbol"], int(r["ts"]), source, r.get("pub_type"), r.get("period"))
+        " period=COALESCE(excluded.period,period),"
+        # known_at 取首见时刻，重写不得刷新——否则 point-in-time 语义被破坏
+        " known_at=COALESCE(known_at,excluded.known_at)",
+        [(r["symbol"], int(r["ts"]), source, r.get("pub_type"), r.get("period"), now)
          for r in rows],
     )
     conn.commit()
 
 
-def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10) -> dict | None:
+def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10,
+                       source: str = "moomoo") -> dict | None:
     """距最近财报的**日历天数**：{"days": ±N, "ts": ...}，超出 horizon 返回 None。
 
     正数=还有 N 天，负数=已过 N 天。
@@ -778,8 +793,8 @@ def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10) -> dic
     from zoneinfo import ZoneInfo
 
     row = conn.execute(
-        "SELECT ts FROM earnings WHERE symbol=?"
-        " ORDER BY ABS(ts-?) LIMIT 1", (symbol, now_ms),
+        "SELECT ts FROM earnings WHERE symbol=? AND source=?"
+        " ORDER BY ABS(ts-?) LIMIT 1", (symbol, source, now_ms),
     ).fetchone()
     if not row:
         return None
