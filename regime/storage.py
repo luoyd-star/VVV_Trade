@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS bbo(
   bid REAL, bid_qty REAL, ask REAL, ask_qty REAL,
   PRIMARY KEY(symbol, ts)
 );
+CREATE TABLE IF NOT EXISTS stock_vol(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
+  iv REAL, hv REAL, underlying_price REAL,
+  PRIMARY KEY(symbol, ts, source)
+);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -551,6 +556,52 @@ def get_usvol(conn, idx: str, limit: int = 800) -> pd.DataFrame:
         params=(idx, limit),
     )
     return df.iloc[::-1].reset_index(drop=True)
+
+
+def upsert_stock_vol(conn, symbol: str, source: str, rows) -> None:
+    """个股波动率日频序列。rows: dict(ts, iv, hv, underlying_price) 可迭代。
+
+    **source 进主键**是刻意的：不同源（moomoo 期权链聚合 / CBOE iv30 / ORATS iv30d）
+    算法不同，绝对值有系统性偏差。分列存放让"混拼历史算分位"在结构上不可能发生，
+    读取侧必须显式指定口径——见 get_stock_vol。
+    """
+    conn.executemany(
+        "INSERT INTO stock_vol(symbol,ts,source,iv,hv,underlying_price) VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(symbol,ts,source) DO UPDATE SET"
+        " iv=COALESCE(excluded.iv,iv), hv=COALESCE(excluded.hv,hv),"
+        " underlying_price=COALESCE(excluded.underlying_price,underlying_price)",
+        [
+            (symbol, int(r["ts"]), source,
+             _f(r.get("iv")), _f(r.get("hv")), _f(r.get("underlying_price")))
+            for r in rows
+        ],
+    )
+    conn.commit()
+
+
+def _f(v):
+    return None if v is None or (isinstance(v, float) and v != v) else float(v)
+
+
+def get_stock_vol(conn, symbol: str, source: str, limit: int = 1500) -> pd.DataFrame:
+    """单一口径内的日频序列（升序）。source 必填——不给默认值是为了逼调用方表态。"""
+    df = pd.read_sql_query(
+        "SELECT ts,iv,hv,underlying_price FROM stock_vol WHERE symbol=? AND source=?"
+        " ORDER BY ts DESC LIMIT ?",
+        conn,
+        params=(symbol, source, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+def stock_vol_coverage(conn, source: str) -> pd.DataFrame:
+    """每个品种在该口径下的覆盖情况（行数/起止），供面板与运维体检用。"""
+    return pd.read_sql_query(
+        "SELECT symbol, COUNT(iv) n, MIN(ts) t0, MAX(ts) t1 FROM stock_vol"
+        " WHERE source=? AND iv IS NOT NULL GROUP BY symbol ORDER BY symbol",
+        conn,
+        params=(source,),
+    )
 
 
 def add_chat(conn, role: str, content: str) -> None:

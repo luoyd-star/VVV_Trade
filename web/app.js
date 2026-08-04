@@ -666,14 +666,19 @@ function renderDvol() {
   }, true);
 }
 
-// 美股永续变体：CBOE 指数 IV（VXN/VIX，板块级）+ 本品种 RV30。
-// 个股 iv30 无免费历史，只在 meta 行展示最新值与自采天数（攒够才有分位意义）。
+// 美股永续变体：**个股自身 IV 为主线**（moomoo 口径，含自有分位）+ 指数 IV 作长历史锚
+// + 本品种 RV30。升级前 29/31 个品种拿 VXN 当自己的 IV，剪刀差因此是口径错配的假象。
 function renderUsvol(uv, meta, c) {
+  const iv = uv.iv;
+  const rankTxt = iv && iv.rank != null
+    ? `分位 ${fmtN(iv.rank, 2)}`
+    : `样本 ${iv ? iv.n : 0}d·分位不足`;
   const bits = [
-    `${uv.index} ${fmtN(uv.index_last, 1)}（一年分位 ${fmtN(uv.index_rank, 2)}）`,
+    iv ? `个股IV ${fmtN(iv.last, 1)}（${rankTxt}）` : '个股IV 未回填',
     `RV30 ${fmtN(uv.rv_last, 1)}`,
-    uv.spread == null ? null : `指数IV−RV ${fmtN(uv.spread, 1, true)}pt`,
-    uv.iv30_last == null ? '个股iv30 采集中' : `个股iv30 ${fmtN(uv.iv30_last, 1)}（自采 ${uv.iv30_days}d）`,
+    uv.spread == null ? null
+      : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,
+    `${uv.index} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
     uv.ts_ratio == null ? null : `9D/3M ${fmtN(uv.ts_ratio, 2)}${uv.ts_ratio > 1 ? '（倒挂）' : ''}`,
   ];
   meta.textContent = bits.filter(Boolean).join(' · ');
@@ -681,7 +686,7 @@ function renderUsvol(uv, meta, c) {
   c.setOption({
     animation: false,
     useUTC: true,
-    color: [COL.blue, COL.amber],
+    color: [COL.blue, COL.amber, COL.muted],
     tooltip: {
       trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
       textStyle: { color: COL.ink, fontSize: 11.5 },
@@ -695,12 +700,15 @@ function renderUsvol(uv, meta, c) {
     yAxis: { scale: true, splitLine: { lineStyle: { color: COL.grid } },
       axisLabel: { color: COL.muted, fontSize: 9.5, formatter: '{value}%' } },
     series: [
-      { name: `${uv.index} 指数IV`, type: 'line', data: uv.series, symbol: 'none',
+      // 个股 IV 与 RV30 是同一标的的同口径对照，实线；指数是跨标的的锚，虚线弱化
+      ...(iv ? [{ name: '个股IV', type: 'line', data: iv.series, symbol: 'none',
         lineStyle: { width: 2 },
-        endLabel: { show: true, formatter: uv.index, color: COL.sub, fontSize: 9.5 } },
+        endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 } }] : []),
       { name: 'RV30 已实现', type: 'line', data: uv.rv, symbol: 'none',
         lineStyle: { width: 2 },
         endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 } },
+      { name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none',
+        lineStyle: { width: 1, type: 'dashed', opacity: 0.55 } },
     ],
   }, true);
 }

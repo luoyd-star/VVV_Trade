@@ -86,6 +86,54 @@ def _should(conn, key: str, interval_s: int) -> bool:
     return True
 
 
+def sync_moomoo_iv(conn, symbols) -> tuple:
+    """个股 IV 日频增量（moomoo 口径）→ stock_vol。返回 (日志串或 None, 错误列表)。
+
+    需本机 OpenD 常驻。**OpenD 不在就静默跳过**——它是可选增强而非必需依赖，
+    不能因为用户没开网关就让整轮采集报错。日频数据每日只变一次，1h 节流足够；
+    每次自库内最后一日往前重叠一天拉，覆盖当日可能的未定值。
+    """
+    from datetime import date, datetime, timedelta, timezone
+
+    from regime import moomoo_iv
+
+    if not moomoo_iv.opend_alive():
+        return None, []
+    us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
+    if not us:
+        return None, []
+    errors, wrote, today = [], 0, date.today()
+    try:
+        ctx = moomoo_iv.open_ctx()
+    except Exception as e:  # noqa: BLE001
+        return None, [f"moomoo_iv 连接: {e}"]
+    try:
+        for sym in us:
+            try:
+                have = storage.get_stock_vol(conn, sym, moomoo_iv.SOURCE, limit=5)
+                if have.empty:
+                    begin = moomoo_iv.DATA_FLOOR
+                else:
+                    last = datetime.fromtimestamp(
+                        int(have["ts"].iloc[-1]) / 1000, tz=timezone.utc
+                    ).date()
+                    if last >= today:
+                        continue
+                    begin = (last - timedelta(days=1)).isoformat()
+                rows = moomoo_iv.fetch_history(ctx, sym, begin, today.isoformat())
+                if rows:
+                    storage.upsert_stock_vol(conn, sym, moomoo_iv.SOURCE, rows)
+                    wrote += len(rows)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"moomoo_iv {sym}: {e}")
+    finally:
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+    return (f"个股 IV(moomoo): {wrote} 行 / {len(us)} 品种" if wrote else None), errors
+
+
 def sync_vol_index(
     conn,
     name: str,
@@ -419,7 +467,14 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
             except Exception as e:  # noqa: BLE001
                 errors.append(f"iv30 {sym}: {e}")
         if iv_line:
-            log.info("个股 iv30: %s", " ".join(iv_line))
+            log.info("个股 iv30(CBOE影子): %s", " ".join(iv_line))
+
+    # 个股 IV 主线（moomoo 口径，日频）——OpenD 不在就静默跳过，不拖累整轮
+    if _should(conn, "moomoo_iv_last_fetch", 3600):
+        msg, errs = sync_moomoo_iv(conn, symbols)
+        if msg:
+            log.info("%s", msg)
+        errors.extend(errs)
 
     bases = {s.upper().replace("/", "-").split("-")[0] for s in symbols}
     for currency in sorted(bases & set(DVOL_CURRENCIES)):

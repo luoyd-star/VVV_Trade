@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from regime import instruments, storage
+from regime import instruments, moomoo_iv, storage
 from regime.agent import chat as agent_chat
 from regime.agent import load_config as agent_config
 from regime.agent import system_is_custom
@@ -251,11 +251,51 @@ def _dvol_payload(conn, symbol: str):
     }
 
 
-def _usvol_payload(conn, symbol: str):
-    """美股波动率维度：CBOE 指数 IV（VXN/VIX）+ 自算 RV30 + 自采个股 iv30 + 期限结构。
+IV_RANK_WIN = 252   # 交易日≈1 年，与指数分位同窗
+IV_RANK_MIN = 120   # 少于此不给分位——新股样本短，宁可空着也不给假分位
 
-    个股 iv30 无免费历史源，只能自采积累——iv30_days 告诉前端攒了多久，
-    攒够约 20 个观测后 deriv 卡的 iv30 分位才开始有意义。
+
+def _stock_iv_block(conn, symbol: str):
+    """个股自身 IV（moomoo 口径）+ 其分位。取代"拿 VXN 当个股 IV"的代理做法。
+
+    分位窗自适应：满 252 交易日按年算；不足 IV_RANK_MIN 一律不给分位（新股如
+    CRCL/CRWV 只有十几个月历史，硬给分位是拿噪音冒充统计量）。n 与 win 一并回传，
+    前端据此显示"样本 N 日"而不是让用户以为分位同样可靠。
+
+    **仅显示层**：个股 IV 进规则层需并入 RULES_VERSION v2 并过回测，此处不参与判定。
+    """
+    df = storage.get_stock_vol(conn, symbol, moomoo_iv.SOURCE, limit=1500)
+    if df.empty:
+        return None
+    s = df[["ts", "iv"]].dropna()
+    if s.empty:
+        return None
+    last = float(s["iv"].iloc[-1])
+    win = s["iv"].tail(IV_RANK_WIN)
+    n = int(len(s))
+    rank = round(float((win < last).mean()), 3) if n >= IV_RANK_MIN else None
+    hv = df[["ts", "hv"]].dropna()
+    return {
+        "source": moomoo_iv.SOURCE,
+        "last": round(last, 2),
+        "rank": rank,
+        "n": n,
+        "win": int(len(win)),
+        "days": round((int(s["ts"].iloc[-1]) - int(s["ts"].iloc[0])) / 86_400_000, 0),
+        "series": [[int(t), round(float(v), 2)] for t, v in zip(s["ts"], s["iv"])][-365:],
+        "hv_last": round(float(hv["hv"].iloc[-1]), 2) if len(hv) else None,
+    }
+
+
+def _usvol_payload(conn, symbol: str):
+    """美股波动率维度：**个股自身 IV 为主线** + CBOE 指数 IV 作长历史锚 + 自算 RV30 + 期限结构。
+
+    升级前的问题：31 个美股品种里 29 个把 VXN（纳指100 隐波≈QQQ 的 IV）当自己的 IV，
+    个股 iv30 只有 CBOE 自采的 3.75 天、分位恒空。现在个股 IV 有 moomoo 的 3.1 年历史，
+    分位可算，指数降为长周期锚（VIX/VXN 有 17-37 年史，个股比不了）。
+
+    口径纪律：moomoo / CBOE / 指数三条线**各自独立算分位**，绝不混拼——算法不同源，
+    绝对值有系统性偏差。CBOE 自采值保留为影子字段（iv30_last）供口径对比。
     """
     inst = instruments.get(symbol)
     if inst["class"] != "us_stock_perp":
@@ -299,6 +339,7 @@ def _usvol_payload(conn, symbol: str):
     if len(d9) and len(d3) and float(d3["close"].iloc[-1]) > 0:
         ts_ratio = round(float(d9["close"].iloc[-1]) / float(d3["close"].iloc[-1]), 3)
 
+    iv = _stock_iv_block(conn, symbol)
     return {
         "index": idx,
         "index_last": round(idx_last, 2),
@@ -306,8 +347,12 @@ def _usvol_payload(conn, symbol: str):
         "series": series,
         "rv": rv_pairs,
         "rv_last": rv_last,
-        "spread": round(idx_last - rv_last, 1) if rv_last is not None else None,
-        "iv30_last": iv30_last,
+        # 剪刀差改用个股自身 IV（有则用），退化到指数只是兜底
+        "spread": (round((iv["last"] if iv else idx_last) - rv_last, 1)
+                   if rv_last is not None else None),
+        "spread_src": ("stock" if iv else "index") if rv_last is not None else None,
+        "iv": iv,                 # 个股 IV 主线（moomoo 口径，含自有分位）
+        "iv30_last": iv30_last,   # CBOE 自采影子值：口径对比用，不算分位
         "iv30_days": iv30_days,
         "ts_ratio": ts_ratio,
     }
