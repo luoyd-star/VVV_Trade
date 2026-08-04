@@ -65,7 +65,27 @@ VolVue（AlphaQuery 母公司，最长 20 年史，疑为已下架 Quantcha VOL 
 | ③ IBKR | $11.50+入金$500 | 多年（须探测） | 最重（周 2FA/互踢） | 已调研，排后 |
 | CBOE 免费 | $0 | 只能向前攒 | 零 | 保底增量源，继续跑 |
 
-**建议决策树**：愿意开 moomoo 户（入金任意金额）→ 先实测 3304 回溯深度：
+## moomoo 接入清单（用户侧动作 + 已就绪件）
+
+**已就绪（本仓库）**：`moomoo-api` 10.9.6908 装入 .venv（含 3303/3304，源码签名已核对）；
+探测脚本 `scripts/probe_moomoo_iv.py`（验权限 → 逐年回退量深度 → 全品种覆盖 → 判决）。
+
+**用户侧三步**（凭据只进 OpenD，采集侧只连 127.0.0.1:11111，代码不接触账号密码）：
+
+1. **账户**：港美股总资产 >$0 或持有美股持仓 → 免费 OPRA 期权 LV1（官方原文
+   "Total assets greater than $0" or "Have US positions"）。未达门槛需买行情卡。
+2. **装 OpenD**：https://www.moomoo.com/download/OpenAPI 下 macOS 版（可视化或命令行版）。
+   首次登录须完成问卷评估与协议确认；新设备首登需输一次手机验证码
+   （命令行版经 telnet：`input_phone_verify_code -code=123456`）。
+3. **配端口**：API 监听端口设为 **11111**（脚本默认）。命令行版编辑 OpenD.xml 的
+   `login_account` / `login_pwd`(或 `login_pwd_md5`) / `api_port`，`nohup ./OpenD &` 后台跑。
+
+就绪后跑：`.venv/bin/python scripts/probe_moomoo_iv.py`（约 3-5 分钟，自律限频 0.6s/次）。
+判决 ≥3 年 → moomoo 主路线，进回填实施；<3 年 → ORATS $49 单月补长历史。
+
+## 建议
+
+**决策树**：愿意用 moomoo（资产 >$0）→ 先实测 3304 回溯深度：
 ≥3 年 → moomoo 主路线（$0）；不足 → ORATS $49 单月回填 2007+ 历史（退订留用）
 + moomoo 3303 做免费增量。不想开户 → 直接 ORATS $49。
 任何组合下：VIX/VXN 留长历史锚；分位单口径内算；换源按版本谓词 + source 标注入库。
