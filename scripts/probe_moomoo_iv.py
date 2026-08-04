@@ -45,25 +45,29 @@ def us_symbols() -> list[str]:
     return sorted(out)
 
 
-def year_rows(ctx, code: str, yr: int) -> int:
-    """某标的某年的 IV 行数（0 = 该年无数据）。单次跨度上限 364 天，一年一请求。"""
-    total, key = 0, None
+def year_rows(ctx, code: str, yr: int):
+    """某标的某年的 (IV 行数, 最早日期)。行数 0 = 该年无数据，-1 = 请求失败。
+
+    单次跨度上限 364 天，一年一请求（01-01→12-30 恰好 363 天）。返回值按时间倒序，
+    最早日期须取 min 而非首行——踩过这个坑。
+    """
+    total, key, earliest = 0, None, None
     while True:
         ret, data, key = ctx.get_option_underlying_his_volatility(
-            f"US.{code}",
-            begin_time=f"{yr}-01-01",
-            end_time=f"{yr}-12-30",  # 364 天上限：01-01→12-30 恰好 363 天
-            page_req_key=key,
+            f"US.{code}", begin_time=f"{yr}-01-01", end_time=f"{yr}-12-30", page_req_key=key,
         )
         time.sleep(PACE)
         if ret != RET_OK:
             msg = str(data)
             if "无权限" in msg or "permission" in msg.lower() or "quota" in msg.lower():
                 raise PermissionError(msg)
-            return -1  # 其它错误：记为不可用
+            return -1, None
         total += len(data)
+        if len(data):
+            lo = min(data["time"])
+            earliest = lo if earliest is None else min(earliest, lo)
         if key is None:
-            return total
+            return total, earliest
 
 
 def opend_alive() -> bool:
@@ -99,37 +103,43 @@ def main() -> int:
 
         # ② 历史深度：深探样本逐年回退，连续两年空即判定见底
         print(f"\n② 历史深度 get_option_underlying_his_volatility（协议 3304）· 探至 {PROBE_FLOOR}")
-        this_year = date.today().year
-        depth = {}
+        today = date.today()
+        this_year = today.year
+        depth = {}  # code -> (最早年, 最早日期字符串)
         for c in DEEP:
             if c not in codes:
                 continue
-            earliest, blanks = None, 0
+            best_yr, best_day, blanks = None, None, 0
             for yr in range(this_year, PROBE_FLOOR - 1, -1):
-                n = year_rows(ctx, c, yr)
+                n, lo = year_rows(ctx, c, yr)
                 if n > 0:
-                    earliest, blanks = yr, 0
+                    best_yr, best_day, blanks = yr, lo, 0
                 else:
                     blanks += 1
-                    if earliest is not None and blanks >= 2:
+                    if best_yr is not None and blanks >= 2:
                         break
-            depth[c] = earliest
-            span = f"{this_year - earliest + 1} 年（{earliest} 起）" if earliest else "无数据"
-            print(f"  {c:<6} {span}")
+            depth[c] = (best_yr, best_day)
+            if best_day:
+                yrs = (today - date.fromisoformat(str(best_day)[:10])).days / 365.25
+                print(f"  {c:<6} {yrs:.2f} 年（{best_day} 起）")
+            else:
+                print(f"  {c:<6} 无数据")
 
         # ③ 全品种：用深探得到的最早年份抽样确认覆盖面
-        base = min([y for y in depth.values() if y] or [this_year])
+        years = [y for y, _ in depth.values() if y]
+        base = min(years or [this_year])
         print(f"\n③ 全品种 {base} 年数据可得性")
         for c in codes:
-            n = year_rows(ctx, c, base)
+            n, _ = year_rows(ctx, c, base)
             flag = "✓" if n > 0 else ("—" if n == 0 else "✗")
             print(f"  {flag} {c:<6} {base} 年 {max(n, 0):>4} 行")
 
-        # 判决
-        best = max([y for y in depth.values() if y] or [this_year])
-        yrs = this_year - min([y for y in depth.values() if y] or [this_year]) + 1
-        print(f"\n{'='*60}\n判决：最深回溯 {yrs} 年")
-        print("→ ≥3 年：moomoo 可作零成本主路线，进入回填实施" if yrs >= 3
+        # 判决：按**真实跨度**判，不按日历年份数（数年份会把 3.1 年说成 4 年）
+        days = [d for _, d in depth.values() if d]
+        floor_day = min(str(d)[:10] for d in days) if days else None
+        span_yrs = ((today - date.fromisoformat(floor_day)).days / 365.25) if floor_day else 0.0
+        print(f"\n{'='*60}\n判决：最深回溯 {span_yrs:.2f} 年（自 {floor_day}）")
+        print("→ ≥3 年：moomoo 可作零成本主路线，进入回填实施" if span_yrs >= 3
               else "→ <3 年：历史不足，ORATS $49 单月回填 + moomoo 免费增量")
         return 0
     except PermissionError as e:
