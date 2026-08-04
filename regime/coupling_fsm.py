@@ -19,16 +19,28 @@ import pandas as pd
 
 from .coupling import _hl_alpha, HL_FAST, HL_SLOW
 
-THRESHOLD_VERSION = "prior-1"   # 先验参数代；校准平台产出新代时递增
+THRESHOLD_VERSION = "prior-2"   # 参数代际：prior-1 → prior-2（M2b 止血）→ calibrated-1（网格搜索）
 
 
 @dataclass
 class FSMParams:
-    """C6 参数表（pair 级先验）。"""
+    """C6 参数表（pair 级先验，prior-2 修订）。
+
+    prior-2 变更（依据 M2b 满额校准，docs/COUPLING_M2B_20260804.md）：
+    - FSM 资格线 0.25→0.35（退出 0.30）：定罪的误报对全落在 ρ∈0.27-0.38；
+    - 按锚定时 |ρ_slow| 分层：强对（≥0.6，实测误报为零有余量）降门提速；
+    - δ* 锚定冻结逐对化：max(层地板, 该对自身快慢背离的因果 q95)——
+      对高背离噪声的对（如 ETH×XAU）自动抬门。
+    数字血统：方向全部数据导出，具体数值仍是圆整先验——calibrated-1 由
+    网格搜索给出推导链。
+    """
     q_low: float = 0.10          # L = 因果分位 q10%(x)
     q_high: float = 0.30         # H = q30%(x)
-    delta_star: float = 0.29     # 绝对效应门（ρ 尺度）——地板取自实测 P90|Δρ|
-    d_enter: float = 2.0         # 进入 decoupling 的标准化幅度
+    delta_floor_std: float = 0.29    # 标准层效应门地板（实测 P90|Δρ|）
+    delta_floor_strong: float = 0.25  # 强层（|ρ_s|≥0.6）地板
+    tier_strong: float = 0.60
+    d_enter_std: float = 2.0     # 标准层进入 decoupling 的标准化幅度
+    d_enter_strong: float = 1.5  # 强层（M2b：强对误报为零，有提速余量）
     d_retrace: float = 0.75      # recoupling 需自峰值回落比例
     k_enter: int = 2             # coupled→decoupling 连续确认
     k_decouple: int = 3          # decoupling→decoupled 连续确认
@@ -40,11 +52,11 @@ class FSMParams:
     # C6：活动期超过 2·T_F 挂起。T_F 是**有效样本数**（半衰期 140 → T_eff≈404），
     # 不是半衰期本身——错用 140 会让慢速衰减的真实脱耦被提前打成技术态
     rebase_age: int = 808
-    # 运行时资格：|ρ_slow| 跌破退出线 → NOT_APPLICABLE（关系死亡的诚实终态，
-    # 硬断裂的完整生命周期是 coupled→decoupling→decoupled→NOT_APPLICABLE）；
-    # 回到 0.25 以上才重新入场。0.20/0.25 双线是防抖迟滞。
-    elig_exit: float = 0.20
-    elig_enter: float = 0.25
+    # 运行时资格（prior-2：0.20/0.25 → 0.30/0.35）：|ρ_slow| 跌破退出线 →
+    # NOT_APPLICABLE（关系死亡的诚实终态）；回到入场线以上才重新入场。
+    # 测量层展示口径仍是 coupling.ELIG_ABS_RHO=0.25——只有状态机收紧。
+    elig_exit: float = 0.30
+    elig_enter: float = 0.35
 
 
 def pair_rho_series(ra: pd.Series, rb: pd.Series,
@@ -89,11 +101,16 @@ def run_pair_fsm(rho: pd.DataFrame, p: FSMParams = FSMParams()):
     L = x_raw.rolling(p.quant_win, min_periods=100).quantile(p.q_low).shift(1)
     H = x_raw.rolling(p.quant_win, min_periods=100).quantile(p.q_high).shift(1)
     sd = x_raw.rolling(p.quant_win, min_periods=100).std().shift(1)
+    # 该对自身快慢背离的因果 q95（δ* 逐对化的原料；锚定时冻结防自我消音）
+    div95 = pd.Series(np.abs(rf - rs), index=rho.index).rolling(
+        p.quant_win, min_periods=100).quantile(0.95).shift(1)
 
     states = np.array(["WARMUP"] * n, dtype=object)
     events = []
     st = "WARMUP"
     anchor_z = anchor_sd = np.nan
+    ep_d_enter = p.d_enter_std
+    ep_delta_gate = p.delta_floor_std
     ep_sign = 0.0
     ep_peak_d = 0.0
     ep_age = 0          # 当前非 coupled episode 已持续根数
@@ -116,8 +133,17 @@ def run_pair_fsm(rho: pd.DataFrame, p: FSMParams = FSMParams()):
             states[i] = st if st != "WARMUP" else "WARMUP"
             continue
         if st == "WARMUP":
+            if not (np.isfinite(rs[i]) and abs(rs[i]) >= p.elig_enter):
+                st = "NOT_APPLICABLE"   # prior-2：初始资格检查（此前缺失）
+                states[i] = st
+                continue
             st = "coupled"
             anchor_z, anchor_sd, ep_sign = xi, max(sd.iloc[i], 1e-6), s_series[i]
+            ep_tier_strong = abs(rs[i]) >= p.tier_strong
+            ep_d_enter = p.d_enter_strong if ep_tier_strong else p.d_enter_std
+            floor = p.delta_floor_strong if ep_tier_strong else p.delta_floor_std
+            dv = div95.iloc[i]
+            ep_delta_gate = max(floor, float(dv)) if np.isfinite(dv) else floor
             emit(i, "WARMUP", "coupled", "init_anchor", 0.0)
         # 运行时资格：慢线跌破退出线 → NOT_APPLICABLE（关系死亡终态）；
         # 回到入场线以上重新初始化。资格检查先于一切转移逻辑。
@@ -126,6 +152,11 @@ def run_pair_fsm(rho: pd.DataFrame, p: FSMParams = FSMParams()):
                 st = "coupled"
                 anchor_z, anchor_sd, ep_sign = xi, max(sd.iloc[i], 1e-6), s_series[i]
                 ep_peak_d, ep_age, dwell, pending, streak = 0.0, 0, 0, None, 0
+                ep_tier_strong = abs(rs[i]) >= p.tier_strong
+                ep_d_enter = p.d_enter_strong if ep_tier_strong else p.d_enter_std
+                floor = p.delta_floor_strong if ep_tier_strong else p.delta_floor_std
+                dv = div95.iloc[i]
+                ep_delta_gate = max(floor, float(dv)) if np.isfinite(dv) else floor
                 emit(i, "NOT_APPLICABLE", "coupled", "eligibility_regained", 0.0)
             states[i] = st
             continue
@@ -140,6 +171,11 @@ def run_pair_fsm(rho: pd.DataFrame, p: FSMParams = FSMParams()):
             st, pending, streak, dwell = "coupled", None, 0, 0
             anchor_z, anchor_sd, ep_sign = xi, max(sd.iloc[i], 1e-6), s_series[i]
             ep_peak_d, ep_age = 0.0, 0
+            ep_tier_strong = abs(rs[i]) >= p.tier_strong
+            ep_d_enter = p.d_enter_strong if ep_tier_strong else p.d_enter_std
+            floor = p.delta_floor_strong if ep_tier_strong else p.delta_floor_std
+            dv = div95.iloc[i]
+            ep_delta_gate = max(floor, float(dv)) if np.isfinite(dv) else floor
             states[i] = st
             continue
 
@@ -158,7 +194,7 @@ def run_pair_fsm(rho: pd.DataFrame, p: FSMParams = FSMParams()):
 
         want = None
         if st == "coupled":
-            if xi < Hi and d >= p.d_enter and drho >= p.delta_star:
+            if xi < Hi and d >= ep_d_enter and drho >= ep_delta_gate:
                 want = ("decoupling", p.k_enter)
         elif st == "decoupling":
             if xi <= Li:
@@ -197,6 +233,12 @@ def run_pair_fsm(rho: pd.DataFrame, p: FSMParams = FSMParams()):
                 anchor_sd = max(sd.iloc[i], 1e-6)
                 ep_sign = s_series[i]
                 ep_peak_d, ep_age = 0.0, 0
+                ep_tier_strong = abs(rs[i]) >= p.tier_strong
+                ep_d_enter = p.d_enter_strong if ep_tier_strong else p.d_enter_std
+                floor = p.delta_floor_strong if ep_tier_strong else p.delta_floor_std
+                dv = div95.iloc[i]
+                ep_delta_gate = max(floor, float(dv)) if np.isfinite(dv) else floor
+
             pending, streak = None, 0
         states[i] = st
     return pd.Series(states, index=rho.index), events

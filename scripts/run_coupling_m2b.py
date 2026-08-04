@@ -60,7 +60,11 @@ def power_test(z, pairs, deltas=(0.15, 0.29, 0.40), n_paths=500,
                 pa = path[a]
                 ser = pair_rho_series(pa, pd.Series(pb, index=path.index))
                 _, events = run_pair_fsm(ser)
-                hits = [e for e in events if e["to_state"] == "decoupling"
+                # 检出 = 走任一扇门：decoupling（关系变弱）或 eligibility_lost
+                # （关系死亡）——M2b 首轮只数了前者，中强度对的断裂多走后者
+                hits = [e for e in events
+                        if e["to_state"] in ("decoupling", "NOT_APPLICABLE")
+                        and e["reason"] != "init_na"
                         and e["ts"] >= int(path.index[t0])]
                 done += 1
                 if hits:
