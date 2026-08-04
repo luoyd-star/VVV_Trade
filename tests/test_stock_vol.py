@@ -303,6 +303,58 @@ def test_settled_only_uses_real_close_not_hardcoded_1600():
         f"半日市 {half} 收 {session_close_et(half)}，13:30 应已结算"
 
 
+def test_earn_conditioned_rank_compares_within_same_state():
+    """条件分位必须只与同一财报状态的历史比——这是全部价值所在。
+
+    构造：财报窗内的 IV 一律 80、窗外一律 20。若错误地混起来比，
+    今天(窗内, IV=80) 会得到接近 1.0 的分位（比所有窗外日子都高）；
+    正确做法只与窗内日子比，应落在中间。
+    """
+    import dashboard
+
+    conn = _mem_conn()
+    base = date(2026, 1, 1).toordinal()
+    # 财报日全集先定好，再据此生成 IV——两边必须用同一份日历，
+    # 否则测试自己制造出"窗内却给低 IV"的行，看起来像代码错
+    edays = [date.fromordinal(base + 60 + q * 90) for q in range(4)]
+    edays.append(date.fromordinal(base + 375))
+    rows = []
+    for i in range(360):
+        d = date.fromordinal(base + i)
+        near = any(0 <= (e - d).days <= 30 for e in edays)
+        rows.append({"ts": moomoo_iv.day_ms(d), "iv": 80.0 if near else 20.0, "hv": 15.0})
+    # 末日处于窗内（距 base+375 仅 15 天），IV 居中偏低，看它与谁比
+    rows.append({"ts": moomoo_iv.day_ms(date.fromordinal(base + 360)),
+                 "iv": 70.0, "hv": 15.0})
+    storage.upsert_stock_vol(conn, "NVDA-USDT", "moomoo", rows)
+    storage.upsert_earnings(conn, "moomoo", [
+        {"symbol": "NVDA-USDT", "ts": moomoo_iv.day_ms(e), "pub_type": None, "period": None}
+        for e in edays])
+
+    blk = dashboard._stock_iv_block(conn, "NVDA-USDT")
+    assert blk["earn_in30"] is True, "末日应处于财报窗内"
+    # 与同状态比：70 低于所有窗内日(80)，分位必须是 0
+    assert blk["rank"] == 0.0, f"条件分位应只与窗内(80)比而为 0，实得 {blk['rank']}"
+    # 与全体比：窗外的低值(20)把它抬起来——这正是被修掉的污染
+    assert blk["rank_raw"] > 0.4, f"原始分位应被窗外低值抬起，实得 {blk['rank_raw']}"
+    assert blk["rank_raw"] - blk["rank"] > 0.4, \
+        f"两者差距即污染幅度，实得 raw={blk['rank_raw']} cond={blk['rank']}"
+
+
+def test_earn_conditioned_rank_falls_back_when_no_earnings():
+    """无财报记录的品种（如 ETF）应退回原始分位而不是报错或给 None。"""
+    import dashboard
+
+    conn = _mem_conn()
+    base = date(2026, 1, 1).toordinal()
+    storage.upsert_stock_vol(conn, "QQQ-USDT", "moomoo", [
+        {"ts": moomoo_iv.day_ms(date.fromordinal(base + i)), "iv": 20.0 + i * 0.05}
+        for i in range(300)])
+    blk = dashboard._stock_iv_block(conn, "QQQ-USDT")
+    assert blk["rank"] is not None and blk["rank"] == blk["rank_raw"]
+    assert blk["earn_in30"] is None, "无财报记录时状态应为 None 而非 False"
+
+
 if __name__ == "__main__":
     import pytest
 

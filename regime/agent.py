@@ -191,9 +191,14 @@ def render_context(p: dict) -> str:
             _etxt = ("" if _ed is None else
                      f",⚑财报{'还有' if _ed > 0 else '已过'}{abs(_ed)}日"
                      f"(该分位含事件成分,非市场压力)" if _ed else ",⚑今日财报")
+            # 分位已按"未来30天内有无财报"条件化；与原始差距大时并列给出
+            _rr = _iv.get("rank_raw")
+            _dv = ("" if _rr is None or _iv.get("rank") is None
+                   or abs(_iv["rank"] - _rr) < 0.1 else f",未条件化时为{_rr}")
+            _w30 = ",当前处于财报计价窗内(未来30日有财报)" if _iv.get("earn_in30") else ""
             iv30_txt = (
                 f"个股IV={_iv['last']}"
-                + (f"(自身{_iv['win']}日分位{_iv['rank']}{_etxt})"
+                + (f"(同财报状态内分位{_iv['rank']}{_dv}{_w30}{_etxt})"
                    if _iv.get("rank") is not None
                    else f"(样本仅{_iv['n']}日,分位不足{_etxt})")
             )

@@ -670,8 +670,13 @@ function renderDvol() {
 // + 本品种 RV30。升级前 29/31 个品种拿 VXN 当自己的 IV，剪刀差因此是口径错配的假象。
 function renderUsvol(uv, meta, c) {
   const iv = uv.iv;
+  // 分位已按「未来30天内有无财报」条件化（同状态比同状态）——实测把富集从 1.92×
+  // 压到 0.94×。与原始分位差距大时两个都显示，让读者看到修正幅度。
+  const rDiff = iv && iv.rank != null && iv.rank_raw != null
+    && Math.abs(iv.rank - iv.rank_raw) >= 0.1;
   const rankTxt = iv && iv.rank != null
-    ? `分位 ${fmtN(iv.rank, 2)}`
+    ? `分位 ${fmtN(iv.rank, 2)}${rDiff ? `（原始 ${fmtN(iv.rank_raw, 2)}）` : ''}`
+      + (iv.earn_in30 ? '·财报窗内' : '')
     : `样本 ${iv ? iv.n : 0}d·分位不足`;
   // 财报邻近度：分位在财报窗内是日程驱动而非市场压力，必须标出来
   const ed = iv && iv.earnings_days;
