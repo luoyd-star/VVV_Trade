@@ -112,7 +112,53 @@ def fetch_history(ctx, symbol: str, begin: str, end: str) -> list:
     return [rows[k] for k in sorted(rows)]
 
 
+def fetch_option_stat(ctx, symbol: str, begin: str, end: str) -> list:
+    """期权流日频历史（get_option_underlying_his_statistic）→ put/call 成交比与持仓比。
+
+    **纯采集**：这份数据的样本外证据尚在调研，先留住易逝的历史，不进任何判定。
+    与 3304 同形态（≤364 天分段 + 分页 + 倒序），故复用同一套循环骨架。
+    注意当日 open_interest 为 0、比值为 'N/A'（T-1 延迟），故 OI 列会先空后补。
+    """
+    from moomoo import RET_OK
+
+    code = to_moomoo(symbol)
+    b, e = date.fromisoformat(begin), date.fromisoformat(end)
+    rows: dict[int, dict] = {}
+    seg_start = b
+    while seg_start <= e:
+        seg_end = min(seg_start + timedelta(days=MAX_SPAN_DAYS), e)
+        key = None
+        while True:
+            ret, data, key = ctx.get_option_underlying_his_statistic(
+                code,
+                begin_time=seg_start.isoformat(),
+                end_time=seg_end.isoformat(),
+                page_req_key=key,
+            )
+            time.sleep(PACE)
+            if ret != RET_OK:
+                raise RuntimeError(f"his_statistic {symbol} {seg_start}~{seg_end}: {data}")
+            for _, r in data.iterrows():
+                d = date.fromisoformat(str(r["time"])[:10])
+                rows[day_ms(d)] = {
+                    "ts": day_ms(d),
+                    "option_volume": _num(r.get("option_volume")),
+                    "call_volume": _num(r.get("call_volume")),
+                    "put_volume": _num(r.get("put_volume")),
+                    "pc_volume_ratio": _num(r.get("put_call_volume_ratio")),
+                    "option_oi": _num(r.get("option_open_interest")) or None,
+                    "call_oi": _num(r.get("call_open_interest")) or None,
+                    "put_oi": _num(r.get("put_open_interest")) or None,
+                    "pc_oi_ratio": _num(r.get("put_call_open_interest_ratio")),
+                }
+            if key is None:
+                break
+        seg_start = seg_end + timedelta(days=1)
+    return [rows[k] for k in sorted(rows)]
+
+
 def _num(v):
+    """数值化；'N/A'、None、NaN 一律 None——绝不让占位字符串变成 0。"""
     try:
         f = float(v)
     except (TypeError, ValueError):

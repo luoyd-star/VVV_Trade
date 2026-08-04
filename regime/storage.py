@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS stock_vol(
   iv REAL, hv REAL, underlying_price REAL,
   PRIMARY KEY(symbol, ts, source)
 );
+CREATE TABLE IF NOT EXISTS stock_option_stat(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
+  option_volume REAL, call_volume REAL, put_volume REAL, pc_volume_ratio REAL,
+  option_oi REAL, call_oi REAL, put_oi REAL, pc_oi_ratio REAL,
+  PRIMARY KEY(symbol, ts, source)
+);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -588,6 +594,40 @@ def get_stock_vol(conn, symbol: str, source: str, limit: int = 1500) -> pd.DataF
     df = pd.read_sql_query(
         "SELECT ts,iv,hv,underlying_price FROM stock_vol WHERE symbol=? AND source=?"
         " ORDER BY ts DESC LIMIT ?",
+        conn,
+        params=(symbol, source, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+_OPTSTAT_COLS = ("option_volume", "call_volume", "put_volume", "pc_volume_ratio",
+                 "option_oi", "call_oi", "put_oi", "pc_oi_ratio")
+
+
+def upsert_stock_option_stat(conn, symbol: str, source: str, rows) -> None:
+    """个股期权流日频序列（put/call 成交比与持仓比等）。
+
+    **纯采集，不参与任何判定**——put/call 是被过度使用的指标，其样本外证据
+    正在调研中；先把易逝的历史留下来，价值判断交给回测。与 stock_vol 同样
+    source 进主键、COALESCE 合并（当日 OI 为 T-1 延迟，先写成交后补持仓）。
+    """
+    cols = ",".join(_OPTSTAT_COLS)
+    ph = ",".join("?" * len(_OPTSTAT_COLS))
+    sets = ",".join(f"{c}=COALESCE(excluded.{c},{c})" for c in _OPTSTAT_COLS)
+    conn.executemany(
+        f"INSERT INTO stock_option_stat(symbol,ts,source,{cols}) VALUES(?,?,?,{ph})"
+        f" ON CONFLICT(symbol,ts,source) DO UPDATE SET {sets}",
+        [(symbol, int(r["ts"]), source, *(_f(r.get(c)) for c in _OPTSTAT_COLS))
+         for r in rows],
+    )
+    conn.commit()
+
+
+def get_stock_option_stat(conn, symbol: str, source: str, limit: int = 1500) -> pd.DataFrame:
+    """单一口径内的期权流序列（升序）。source 必填。"""
+    df = pd.read_sql_query(
+        f"SELECT ts,{','.join(_OPTSTAT_COLS)} FROM stock_option_stat"
+        " WHERE symbol=? AND source=? ORDER BY ts DESC LIMIT ?",
         conn,
         params=(symbol, source, limit),
     )

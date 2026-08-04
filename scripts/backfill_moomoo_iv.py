@@ -32,6 +32,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--full", action="store_true", help="从数据边界全量重拉")
     ap.add_argument("--symbol", help="只处理单个品种（调试用）")
+    ap.add_argument("--optstat", action="store_true",
+                    help="改抓期权流（put/call 比）而非 IV——纯采集，不进判定")
     args = ap.parse_args()
 
     if not moomoo_iv.opend_alive():
@@ -43,9 +45,15 @@ def main() -> int:
     conn = storage.connect()
     ctx = moomoo_iv.open_ctx()
     total, failed = 0, []
+    # 两条管线共用骨架，只换取数与落库函数
+    getter = storage.get_stock_option_stat if args.optstat else storage.get_stock_vol
+    fetch = moomoo_iv.fetch_option_stat if args.optstat else moomoo_iv.fetch_history
+    put = storage.upsert_stock_option_stat if args.optstat else storage.upsert_stock_vol
+    print(("期权流（put/call 比·纯采集不进判定）" if args.optstat else "个股 IV")
+          + f" · {len(symbols)} 品种\n")
     try:
         for i, sym in enumerate(symbols, 1):
-            have = storage.get_stock_vol(conn, sym, moomoo_iv.SOURCE)
+            have = getter(conn, sym, moomoo_iv.SOURCE)
             if args.full or have.empty:
                 begin = moomoo_iv.DATA_FLOOR
             else:
@@ -58,13 +66,13 @@ def main() -> int:
                     print(f"  [{i:>2}/{len(symbols)}] {sym:<11} 已最新（{last}），跳过")
                     continue
             try:
-                rows = moomoo_iv.fetch_history(ctx, sym, begin, today.isoformat())
+                rows = fetch(ctx, sym, begin, today.isoformat())
             except RuntimeError as e:
                 print(f"  [{i:>2}/{len(symbols)}] {sym:<11} ✗ {str(e)[:70]}")
                 failed.append(sym)
                 continue
             if rows:
-                storage.upsert_stock_vol(conn, sym, moomoo_iv.SOURCE, rows)
+                put(conn, sym, moomoo_iv.SOURCE, rows)
                 total += len(rows)
             d0 = datetime.fromtimestamp(rows[0]["ts"] / 1000, tz=timezone.utc).date() if rows else None
             d1 = datetime.fromtimestamp(rows[-1]["ts"] / 1000, tz=timezone.utc).date() if rows else None
@@ -72,6 +80,8 @@ def main() -> int:
                   + (f"  {d0} → {d1}" if rows else "  （无数据）"))
 
         print(f"\n写入 {total} 行；失败 {len(failed)}" + (f" {failed}" if failed else ""))
+        if args.optstat:
+            return 0 if not failed else 2
         cov = storage.stock_vol_coverage(conn, moomoo_iv.SOURCE)
         if len(cov):
             cov["days"] = ((cov.t1 - cov.t0) / 86_400_000).round(0).astype(int)

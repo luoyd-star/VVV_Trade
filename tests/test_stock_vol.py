@@ -103,6 +103,37 @@ def test_series_returned_ascending():
     assert df["iv"].iloc[-1] == 9.0, "末行应是最新的一天"
 
 
+def test_optstat_na_never_becomes_zero():
+    """'N/A'、None、NaN 必须落成 NULL 而非 0——put/call 比落成 0 会是灾难性的假信号。"""
+    assert moomoo_iv._num("N/A") is None
+    assert moomoo_iv._num(None) is None
+    assert moomoo_iv._num(float("nan")) is None
+    assert moomoo_iv._num("0.5504") == 0.5504
+    assert moomoo_iv._num(0) == 0.0  # 真实的 0 要留住（成交量可以为 0）
+
+
+def test_optstat_source_isolated_and_coalesced():
+    """期权流表同样 source 隔离；当日 OI 为 T-1 延迟先空后补，补时不得抹掉成交量。"""
+    conn = _mem_conn()
+    ts = moomoo_iv.day_ms(date(2026, 8, 3))
+    # 首写：只有成交量，持仓量当日尚未发布
+    storage.upsert_stock_option_stat(conn, "NVDA-USDT", "moomoo", [{
+        "ts": ts, "option_volume": 4495132.0, "call_volume": 3005949.0,
+        "put_volume": 1489183.0, "pc_volume_ratio": 0.495412,
+        "option_oi": None, "pc_oi_ratio": None,
+    }])
+    # 次日补 OI
+    storage.upsert_stock_option_stat(conn, "NVDA-USDT", "moomoo", [{
+        "ts": ts, "option_oi": 14686311.0, "pc_oi_ratio": 0.807885,
+    }])
+    df = storage.get_stock_option_stat(conn, "NVDA-USDT", "moomoo")
+    assert len(df) == 1
+    assert df["pc_volume_ratio"].iloc[0] == 0.495412, "补 OI 不得抹掉成交比"
+    assert df["option_volume"].iloc[0] == 4495132.0
+    assert df["pc_oi_ratio"].iloc[0] == 0.807885, "OI 应补上"
+    assert storage.get_stock_option_stat(conn, "NVDA-USDT", "cboe").empty
+
+
 if __name__ == "__main__":
     import pytest
 
