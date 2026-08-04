@@ -140,32 +140,56 @@ def test_earnings_proximity_sign_and_horizon():
     符号搞反会让"财报已过"被读成"财报将至"——对 IV 解释是相反的方向
     （事前隐波堆积 vs 事后崩塌）。
     """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+
+    def et_ms(d, hh, mm=0):
+        """真实的盘中时刻——**不能用 day_ms(午夜)**：那样测试与被测代码共享
+        "两端都锚在午夜"的假设，分数日四舍五入的 bug 永远不会暴露（实测漏掉过）。"""
+        return int(datetime.combine(d, dtime(hh, mm), tzinfo=et).timestamp() * 1000)
+
     conn = _mem_conn()
     t0 = moomoo_iv.day_ms(date(2026, 8, 20))
     storage.upsert_earnings(conn, "moomoo", [
         {"symbol": "NVDA-USDT", "ts": t0, "pub_type": "AFTER", "period": "2026Q2"},
     ])
-    now = moomoo_iv.day_ms(date(2026, 8, 17))
-    p = storage.earnings_proximity(conn, "NVDA-USDT", now)
-    assert p is not None and p["days"] == 3, "未来财报应为正数"
+    # 盘中 10:00 ET 查三天后的财报
+    p = storage.earnings_proximity(conn, "NVDA-USDT", et_ms(date(2026, 8, 17), 10))
+    assert p is not None and p["days"] == 3, f"未来财报应为 +3，实得 {p}"
 
-    after = moomoo_iv.day_ms(date(2026, 8, 24))
-    p2 = storage.earnings_proximity(conn, "NVDA-USDT", after)
-    assert p2 is not None and p2["days"] == -4, "已过财报应为负数"
+    # 当日盘中：必须是 0，不能因为 ts 锚在午夜就算成 -1
+    p0 = storage.earnings_proximity(conn, "NVDA-USDT", et_ms(date(2026, 8, 20), 10))
+    assert p0["days"] == 0, f"当日盘中应为 0，实得 {p0}"
+    # 当日盘后（收盘后 2 小时）同样是 0
+    p0b = storage.earnings_proximity(conn, "NVDA-USDT", et_ms(date(2026, 8, 20), 18))
+    assert p0b["days"] == 0, f"当日盘后应为 0，实得 {p0b}"
 
-    far = moomoo_iv.day_ms(date(2026, 9, 30))
+    p2 = storage.earnings_proximity(conn, "NVDA-USDT", et_ms(date(2026, 8, 24), 14))
+    assert p2 is not None and p2["days"] == -4, f"已过财报应为 -4，实得 {p2}"
+
+    far = et_ms(date(2026, 9, 30), 10)
     assert storage.earnings_proximity(conn, "NVDA-USDT", far) is None, "超出窗口应为 None"
-    assert storage.earnings_proximity(conn, "AAPL-USDT", now) is None, "无记录应为 None"
+    assert storage.earnings_proximity(conn, "AAPL-USDT", et_ms(date(2026, 8, 17), 10)) is None
 
 
 def test_earnings_picks_nearest_not_first():
-    """多个财报日时取**距今最近**的那个，不是最早或最晚的。"""
+    """多个财报日时取**距今最近**的那个，不是最早或最晚的。
+
+    now 用真实 ET 盘中时刻：day_ms(午夜 UTC) 换算到 ET 会退到前一天晚上，
+    日差就少算不了——这正是上一条测试暴露的同类陷阱。
+    """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
     conn = _mem_conn()
     for d in (date(2026, 2, 20), date(2026, 5, 20), date(2026, 8, 20)):
         storage.upsert_earnings(conn, "moomoo", [
             {"symbol": "NVDA-USDT", "ts": moomoo_iv.day_ms(d), "pub_type": None, "period": None},
         ])
-    now = moomoo_iv.day_ms(date(2026, 8, 18))
+    now = int(datetime.combine(date(2026, 8, 18), dtime(10, 0),
+                              tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000)
     p = storage.earnings_proximity(conn, "NVDA-USDT", now)
     assert p["days"] == 2, f"应取 8-20 那个（+2 天），实得 {p}"
 

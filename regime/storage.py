@@ -696,17 +696,28 @@ def upsert_earnings(conn, source: str, rows) -> None:
 
 
 def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10) -> dict | None:
-    """距最近财报的天数：{"days": ±N, "when": "前/后", "ts": ...}，超出 horizon 返回 None。
+    """距最近财报的**日历天数**：{"days": ±N, "ts": ...}，超出 horizon 返回 None。
 
-    负数=财报已过 N 天，正数=还有 N 天。给面板与 Hermes 在 IV 读数旁挂提示用。
+    正数=还有 N 天，负数=已过 N 天。
+
+    **必须比日期而不是比时间戳**：财报 ts 锚在其日期的 00:00 UTC，而 now_ms 是当下
+    时刻，两者相减再除 86400000 会得到分数日——当日 14:00 UTC 查今天的财报会算出
+    −0.58 并四舍五入成"已过 1 天"，整条标注系统性偏移一日（实测 AMD/APP/CRCL 三例全错）。
+    "今天"取 **ET 日历日**，因为财报日期本身是美东交易日历上的日期。
     """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
+
     row = conn.execute(
         "SELECT ts FROM earnings WHERE symbol=?"
         " ORDER BY ABS(ts-?) LIMIT 1", (symbol, now_ms),
     ).fetchone()
     if not row:
         return None
-    days = round((row[0] - now_ms) / 86_400_000)
+    e_date = _dt.fromtimestamp(row[0] / 1000, tz=_tz.utc).date()
+    today = _dt.fromtimestamp(now_ms / 1000, tz=ZoneInfo("America/New_York")).date()
+    days = (e_date - today).days
     if abs(days) > horizon:
         return None
     return {"days": int(days), "ts": int(row[0])}
