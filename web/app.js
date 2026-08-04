@@ -677,13 +677,24 @@ function renderUsvol(uv, meta, c) {
   const ed = iv && iv.earnings_days;
   const earnTxt = ed == null ? ''
     : ed > 0 ? ` ⚑财报还有${ed}日` : ed < 0 ? ` ⚑财报已过${-ed}日` : ' ⚑今日财报';
+  // VRP=IV−HV 同源同口径，把"贵"与"波动大"分开；期限结构双速分别给，
+  // 因为快端抓急性冲击、慢端抓制度切换，合成单一读数会丢掉这个区分
+  const t = uv.term || {};
+  const inv = t.both_inverted ? '（全曲线倒挂）'
+    : t.fast && t.fast.inverted ? '（快端倒挂）'
+    : t.slow && t.slow.inverted ? '（慢端倒挂）' : '';
   const bits = [
     iv ? `个股IV ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
+    iv && iv.vrp != null
+      ? `VRP ${fmtN(iv.vrp, 1, true)}pt（分位 ${fmtN(iv.vrp_rank, 2)}）` : null,
     `RV30 ${fmtN(uv.rv_last, 1)}`,
     uv.spread == null ? null
       : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,
     `${uv.index} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
-    uv.ts_ratio == null ? null : `9D/3M ${fmtN(uv.ts_ratio, 2)}${uv.ts_ratio > 1 ? '（倒挂）' : ''}`,
+    t.fast && t.slow
+      ? `期限 9D/30D ${fmtN(t.fast.ratio, 2)}·${fmtN(t.fast.rank, 2)} / 30D/3M `
+        + `${fmtN(t.slow.ratio, 2)}·${fmtN(t.slow.rank, 2)}${inv}`
+      : (uv.ts_ratio == null ? null : `9D/3M ${fmtN(uv.ts_ratio, 2)}`),
   ];
   meta.textContent = bits.filter(Boolean).join(' · ');
   if (!c) return;

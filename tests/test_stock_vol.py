@@ -170,6 +170,63 @@ def test_earnings_picks_nearest_not_first():
     assert p["days"] == 2, f"应取 8-20 那个（+2 天），实得 {p}"
 
 
+def test_vrp_uses_same_row_iv_and_hv():
+    """VRP 必须用同一行的 iv−hv（同源同口径），且分位遵守样本下限。
+
+    若错用"最新 iv 减最新 hv"而两者来自不同日期，在数据缺口处会算出无意义的差。
+    """
+    import dashboard
+
+    conn = _mem_conn()
+    base = date(2026, 1, 2).toordinal()
+    rows = []
+    for i in range(200):
+        rows.append({"ts": moomoo_iv.day_ms(date.fromordinal(base + i)),
+                     "iv": 30.0 + i * 0.1, "hv": 25.0 + i * 0.1})
+    # 末行 hv 缺失：VRP 应回退到最近一个 iv/hv 俱全的行，而非拿旧 hv 配新 iv
+    rows.append({"ts": moomoo_iv.day_ms(date.fromordinal(base + 200)),
+                 "iv": 99.0, "hv": None})
+    storage.upsert_stock_vol(conn, "NVDA-USDT", "moomoo", rows)
+    blk = dashboard._stock_iv_block(conn, "NVDA-USDT")
+    assert blk["last"] == 99.0, "IV 主线应取最新值"
+    # 最新完整行是第 200 个：iv=30+199*0.1=49.9, hv=25+199*0.1=44.9 → VRP=5.0
+    assert abs(blk["vrp"] - 5.0) < 1e-6, f"VRP 应来自同一行，实得 {blk['vrp']}"
+    assert blk["vrp_rank"] is not None
+
+
+def test_vrp_rank_withheld_when_short():
+    """VRP 分位与 IV 分位同一样本下限——不能一个给一个不给。"""
+    import dashboard
+
+    conn = _mem_conn()
+    base = date(2026, 1, 2).toordinal()
+    storage.upsert_stock_vol(conn, "CRCL-USDT", "moomoo", [
+        {"ts": moomoo_iv.day_ms(date.fromordinal(base + i)), "iv": 20.0 + i, "hv": 15.0 + i}
+        for i in range(50)
+    ])
+    blk = dashboard._stock_iv_block(conn, "CRCL-USDT")
+    assert blk["rank"] is None and blk["vrp_rank"] is None, "样本不足时两个分位都不给"
+    assert blk["vrp"] is not None, "但 VRP 数值本身可以给"
+
+
+def test_term_structure_inversion_flags():
+    """期限结构：比值 >1 判倒挂；两端同时倒挂另给 both_inverted。"""
+    import dashboard
+
+    conn = _mem_conn()
+    # 构造：快端倒挂（VIX9D > VIX），慢端正挂（VIX < VIX3M）
+    for i in range(30):
+        ts = moomoo_iv.day_ms(date.fromordinal(date(2026, 1, 2).toordinal() + i))
+        storage.upsert_usvol(conn, "VIX9D", [(ts, 30.0)])
+        storage.upsert_usvol(conn, "VIX", [(ts, 25.0)])
+        storage.upsert_usvol(conn, "VIX3M", [(ts, 28.0)])
+    _, term = dashboard._term_structure(conn)
+    assert term["fast"]["inverted"] is True, "VIX9D>VIX 应判快端倒挂"
+    assert term["slow"]["inverted"] is False, "VIX<VIX3M 慢端不倒挂"
+    assert term["both_inverted"] is False
+    assert abs(term["fast"]["ratio"] - 1.2) < 1e-6
+
+
 if __name__ == "__main__":
     import pytest
 

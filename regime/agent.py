@@ -61,7 +61,10 @@ margin=到最近可翻转状态边界的距离（<0.15 表示状态处于边界�
 个股IV=该标的自身的 30 天隐含波动率（moomoo 口径，2023-06 起约 3.1 年史），
 其分位是**与自己历史比**（252 交易日窗）——绝对值高低跨品种不可比，分位才可比；
 指数IV=CBOE 板块指数（VXN=纳指100 / VIX），仅作长周期锚，**不与个股IV混算分位**
-（两者口径不同源）；期限结构9D/3M>1 表示近端恐慌（倒挂）。
+（两者口径不同源）；VRP=IV−HV（同源同口径的方差风险溢价）分离"贵"与"波动大"——
+低ATR分位+高VRP=脆弱的安静（市场在买保险），高ATR分位+负VRP=已实现波动已超期权定价；
+期限结构双速：9D/30D 抓急性冲击、30D/3M 抓制度切换，>1 为倒挂（已知失败模式：
+能抓 2008/2020 式冲击、会错过 2022 式慢跌）；⚑财报标记表示该分位含日程驱动成分。
 </panel_legend>"""
 
 
@@ -198,10 +201,25 @@ def render_context(p: dict) -> str:
             iv30_txt = f"个股iv30={uv['iv30_last']}(CBOE自采{uv['iv30_days']}天,历史短勿看分位)"
         else:
             iv30_txt = "个股IV=未回填"
-        ts_txt = (
-            f" 期限结构9D/3M={uv['ts_ratio']}" + ("(倒挂,近端恐慌)" if uv["ts_ratio"] > 1 else "")
-            if uv.get("ts_ratio") is not None else ""
-        )
+        # VRP=IV−HV（同源同口径）：分离"贵"与"波动大"。低ATR分位+高VRP=脆弱的安静；
+        # 高ATR分位+负VRP=已实现波动超过期权定价
+        _vrp = ("" if not _iv or _iv.get("vrp") is None else
+                f" VRP={_iv['vrp']:+.1f}pt(分位{_iv['vrp_rank']})")
+        # 期限结构双速：快端抓急性冲击、慢端抓制度切换。文献已知失败模式——
+        # 倒挂能抓 2008/2020 式冲击、会错过 2022 式慢跌——本身即可用信息
+        _t = uv.get("term") or {}
+        if _t.get("fast") and _t.get("slow"):
+            _f, _s = _t["fast"], _t["slow"]
+            _inv = ("(全曲线倒挂:急性且已传导到制度端)" if _t.get("both_inverted")
+                    else "(快端倒挂:急性冲击)" if _f["inverted"]
+                    else "(慢端倒挂:制度端承压)" if _s["inverted"] else "")
+            ts_txt = (f" 期限结构 9D/30D={_f['ratio']}(分位{_f['rank']})"
+                      f" 30D/3M={_s['ratio']}(分位{_s['rank']}){_inv}")
+        elif uv.get("ts_ratio") is not None:
+            ts_txt = f" 期限结构9D/3M={uv['ts_ratio']}"
+        else:
+            ts_txt = ""
+        ts_txt = _vrp + ts_txt
         lines.append(
             f"美股波动率: {uv['index']}={uv['index_last']}(一年分位{uv['index_rank']}) "
             f"RV30={uv['rv_last']}"
