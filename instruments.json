@@ -2,49 +2,1008 @@
   "_说明": "品种注册表（热读）。未登记 symbol 走加密默认源。us_stock_perp 的 sources 首选 binance_futures（fapi K线），有 hl_coin 的以 hyperliquid 兜底；衍生品四件套统一走币安 fapi（接口与加密永续同构）。",
   "_对账": "品种上新/下架用 scripts/probe_stock_perps.py 复查；币安 EQUITY 区判别字段 underlyingType=EQUITY。",
   "_v2说明": "2026-08-04 X1 扩容（依据 docs/PRERESEARCH_XASSET_20260803.md）。新字段：pool=core|observation（观察池只采数据做影子研究，不进未来相关性核心矩阵；状态机照算但消费层按 pool 过滤）；theme=版本化多标签（禁止事后改判，改判须换 valid_from 并保留旧行于 git 历史）；valid_from=标签生效日。class 新增 intl_stock_perp（KRX 等非 NYSE 时段，无 ET 去季节化/无 iv30/无 VXN 映射）与 commodity（商品永续，24/7 但底层定价时段有粘滞，暂无时段处理）。SOXL 标签降格为半导体杠杆代理：篮子计算与成分股互斥，多日累计不得除以3。",
-
-  "BTC-USDT":  { "class": "crypto", "pool": "core", "theme": ["crypto_major"], "valid_from": "2026-08-04", "display": "比特币" },
-  "ETH-USDT":  { "class": "crypto", "pool": "core", "theme": ["crypto_major"], "valid_from": "2026-08-04", "display": "以太坊" },
-  "SOL-USDT":  { "class": "crypto", "pool": "core", "theme": ["crypto_major"], "valid_from": "2026-08-04", "display": "Solana" },
-  "HYPE-USDT": { "class": "crypto", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "HYPE", "pool": "core", "theme": ["crypto_major"], "valid_from": "2026-08-04", "display": "Hyperliquid" },
-
-  "NVDA-USDT": { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:NVDA", "pool": "core", "theme": ["ai_infra"], "valid_from": "2026-08-04", "display": "英伟达", "vol_index": "VXN" },
-  "AMD-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra"], "valid_from": "2026-08-04", "display": "超威半导体", "vol_index": "VXN" },
-  "MU-USDT":   { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:MU", "pool": "core", "theme": ["ai_infra", "memory"], "valid_from": "2026-08-04", "display": "美光", "vol_index": "VXN" },
-  "SNDK-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra", "memory"], "valid_from": "2026-08-04", "display": "闪迪", "vol_index": "VXN" },
-  "MRVL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra"], "valid_from": "2026-08-04", "display": "迈威尔", "vol_index": "VXN" },
-  "INTC-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra"], "valid_from": "2026-08-04", "display": "英特尔", "vol_index": "VXN" },
-  "TSM-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra"], "valid_from": "2026-08-04", "display": "台积电ADR", "vol_index": "VXN" },
-  "ARM-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra"], "valid_from": "2026-08-04", "display": "Arm", "vol_index": "VXN" },
-  "NBIS-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra", "ai_cloud"], "valid_from": "2026-08-04", "display": "Nebius", "vol_index": "VXN" },
-  "SKHY-USDT": { "class": "intl_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_infra", "memory"], "valid_from": "2026-08-04", "display": "SK海力士(KRX)" },
-
-  "GOOGL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_app", "platform"], "valid_from": "2026-08-04", "display": "谷歌", "vol_index": "VXN" },
-  "META-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_app", "platform"], "valid_from": "2026-08-04", "display": "Meta", "vol_index": "VXN" },
-  "AMZN-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_app", "platform"], "valid_from": "2026-08-04", "display": "亚马逊", "vol_index": "VXN" },
-  "ORCL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_app", "ai_cloud", "platform"], "valid_from": "2026-08-04", "display": "甲骨文", "vol_index": "VXN" },
-  "PLTR-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_app"], "valid_from": "2026-08-04", "display": "Palantir", "vol_index": "VXN" },
-  "MSFT-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["ai_app", "ai_infra", "platform"], "valid_from": "2026-08-04", "display": "微软", "vol_index": "VXN" },
-  "AAPL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:AAPL", "pool": "core", "theme": ["ai_app", "edge_device"], "valid_from": "2026-08-04", "display": "苹果", "vol_index": "VXN" },
-  "TSLA-USDT": { "class": "us_stock_perp", "sources": ["binance_futures", "hyperliquid"], "hl_coin": "xyz:TSLA", "pool": "core", "theme": ["edge_physical"], "valid_from": "2026-08-04", "display": "特斯拉", "vol_index": "VXN" },
-
-  "COIN-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["crypto_linked"], "valid_from": "2026-08-04", "display": "Coinbase", "vol_index": "VXN" },
-  "MSTR-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["crypto_linked"], "valid_from": "2026-08-04", "display": "Strategy", "vol_index": "VXN" },
-  "CRCL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["crypto_linked", "stablecoin"], "valid_from": "2026-08-04", "display": "Circle", "vol_index": "VIX" },
-
-  "QQQ-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["broad_index"], "valid_from": "2026-08-04", "display": "纳指100 ETF", "vol_index": "VXN" },
-  "SPY-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["broad_index"], "valid_from": "2026-08-04", "display": "标普500 ETF", "vol_index": "VIX" },
-  "SOXL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["semi_levered_proxy"], "valid_from": "2026-08-04", "display": "半导体3x ETF", "vol_index": "VXN" },
-
-  "XAU-USDT":  { "class": "commodity", "sources": ["binance_futures"], "pool": "core", "theme": ["macro_asset", "safe_haven"], "valid_from": "2026-08-04", "display": "黄金" },
-  "CL-USDT":   { "class": "commodity", "sources": ["binance_futures"], "pool": "core", "theme": ["macro_asset", "energy"], "valid_from": "2026-08-04", "display": "WTI原油" },
-
-  "NOW-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app"], "valid_from": "2026-08-04", "display": "ServiceNow", "vol_index": "VXN" },
-  "SNOW-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app", "ai_cloud"], "valid_from": "2026-08-04", "display": "Snowflake", "vol_index": "VXN" },
-  "CRM-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app"], "valid_from": "2026-08-04", "display": "Salesforce", "vol_index": "VXN" },
-  "ADBE-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app"], "valid_from": "2026-08-04", "display": "Adobe", "vol_index": "VXN" },
-  "CRWD-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app", "security"], "valid_from": "2026-08-04", "display": "CrowdStrike", "vol_index": "VXN" },
-  "PANW-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app", "security"], "valid_from": "2026-08-04", "display": "Palo Alto", "vol_index": "VXN" },
-  "APP-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_app"], "valid_from": "2026-08-04", "display": "AppLovin", "vol_index": "VXN" },
-  "CRWV-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "observation", "theme": ["ai_infra", "ai_cloud"], "valid_from": "2026-08-04", "display": "CoreWeave", "vol_index": "VXN" }
+  "BTC-USDT": {
+    "class": "crypto",
+    "pool": "core",
+    "theme": [
+      "crypto_major"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "比特币"
+  },
+  "ETH-USDT": {
+    "class": "crypto",
+    "pool": "core",
+    "theme": [
+      "crypto_major"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "以太坊"
+  },
+  "SOL-USDT": {
+    "class": "crypto",
+    "pool": "core",
+    "theme": [
+      "crypto_major"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Solana"
+  },
+  "HYPE-USDT": {
+    "class": "crypto",
+    "sources": [
+      "binance_futures",
+      "hyperliquid"
+    ],
+    "hl_coin": "HYPE",
+    "pool": "core",
+    "theme": [
+      "crypto_major"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Hyperliquid"
+  },
+  "NVDA-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures",
+      "hyperliquid"
+    ],
+    "hl_coin": "xyz:NVDA",
+    "pool": "core",
+    "theme": [
+      "ai_infra"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "英伟达",
+    "vol_index": "VXN"
+  },
+  "AMD-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "超威半导体",
+    "vol_index": "VXN"
+  },
+  "MU-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures",
+      "hyperliquid"
+    ],
+    "hl_coin": "xyz:MU",
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "memory"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "美光",
+    "vol_index": "VXN"
+  },
+  "SNDK-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "memory"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "闪迪",
+    "vol_index": "VXN"
+  },
+  "MRVL-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "迈威尔",
+    "vol_index": "VXN"
+  },
+  "INTC-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "英特尔",
+    "vol_index": "VXN"
+  },
+  "TSM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "台积电ADR",
+    "vol_index": "VXN"
+  },
+  "ARM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Arm",
+    "vol_index": "VXN"
+  },
+  "NBIS-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "ai_cloud"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Nebius",
+    "vol_index": "VXN"
+  },
+  "SKHY-USDT": {
+    "class": "intl_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "memory"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "SK海力士(KRX)"
+  },
+  "GOOGL-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_app",
+      "platform"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "谷歌",
+    "vol_index": "VXN"
+  },
+  "META-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_app",
+      "platform"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Meta",
+    "vol_index": "VXN"
+  },
+  "AMZN-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_app",
+      "platform"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "亚马逊",
+    "vol_index": "VXN"
+  },
+  "ORCL-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_app",
+      "ai_cloud",
+      "platform"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "甲骨文",
+    "vol_index": "VXN"
+  },
+  "PLTR-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_app"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Palantir",
+    "vol_index": "VXN"
+  },
+  "MSFT-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_app",
+      "ai_infra",
+      "platform"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "微软",
+    "vol_index": "VXN"
+  },
+  "AAPL-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures",
+      "hyperliquid"
+    ],
+    "hl_coin": "xyz:AAPL",
+    "pool": "core",
+    "theme": [
+      "ai_app",
+      "edge_device"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "苹果",
+    "vol_index": "VXN"
+  },
+  "TSLA-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures",
+      "hyperliquid"
+    ],
+    "hl_coin": "xyz:TSLA",
+    "pool": "core",
+    "theme": [
+      "edge_physical"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "特斯拉",
+    "vol_index": "VXN"
+  },
+  "COIN-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "crypto_linked"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Coinbase",
+    "vol_index": "VXN"
+  },
+  "MSTR-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "crypto_linked"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Strategy",
+    "vol_index": "VXN"
+  },
+  "CRCL-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "crypto_linked",
+      "stablecoin"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Circle",
+    "vol_index": "VIX"
+  },
+  "QQQ-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "broad_index"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "纳指100 ETF",
+    "vol_index": "VXN"
+  },
+  "SPY-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "broad_index"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "标普500 ETF",
+    "vol_index": "VIX"
+  },
+  "SOXL-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "semi_levered_proxy"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "半导体3x ETF",
+    "vol_index": "VXN"
+  },
+  "XAU-USDT": {
+    "class": "commodity",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "macro_asset",
+      "safe_haven"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "黄金"
+  },
+  "CL-USDT": {
+    "class": "commodity",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "macro_asset",
+      "energy"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "WTI原油"
+  },
+  "NOW-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "ServiceNow",
+    "vol_index": "VXN"
+  },
+  "SNOW-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app",
+      "ai_cloud"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Snowflake",
+    "vol_index": "VXN"
+  },
+  "CRM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Salesforce",
+    "vol_index": "VXN"
+  },
+  "ADBE-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Adobe",
+    "vol_index": "VXN"
+  },
+  "CRWD-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app",
+      "security"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "CrowdStrike",
+    "vol_index": "VXN"
+  },
+  "PANW-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app",
+      "security"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "Palo Alto",
+    "vol_index": "VXN"
+  },
+  "APP-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_app"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "AppLovin",
+    "vol_index": "VXN"
+  },
+  "CRWV-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_infra",
+      "ai_cloud"
+    ],
+    "valid_from": "2026-08-04",
+    "display": "CoreWeave",
+    "vol_index": "VXN"
+  },
+  "XAG-USDT": {
+    "class": "commodity",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "macro_asset",
+      "precious_metal"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "白银"
+  },
+  "XPT-USDT": {
+    "class": "commodity",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "macro_asset",
+      "precious_metal"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "铂金"
+  },
+  "XPD-USDT": {
+    "class": "commodity",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "macro_asset",
+      "precious_metal"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "钯金"
+  },
+  "BNB-USDT": {
+    "class": "crypto",
+    "pool": "core",
+    "theme": [
+      "crypto_major",
+      "exchange_token"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "币安币",
+    "sources": [
+      "binance_futures"
+    ]
+  },
+  "XRP-USDT": {
+    "class": "crypto",
+    "pool": "core",
+    "theme": [
+      "crypto_major",
+      "payment"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "瑞波币",
+    "sources": [
+      "binance_futures"
+    ]
+  },
+  "DOGE-USDT": {
+    "class": "crypto",
+    "pool": "observation",
+    "theme": [
+      "crypto_major",
+      "meme"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "狗狗币",
+    "sources": [
+      "binance_futures"
+    ]
+  },
+  "JPM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "financials",
+      "bank"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "摩根大通",
+    "vol_index": "VIX"
+  },
+  "GS-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "financials",
+      "bank"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "高盛",
+    "vol_index": "VIX"
+  },
+  "V-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "financials",
+      "payment"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "Visa",
+    "vol_index": "VIX"
+  },
+  "HOOD-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "financials",
+      "crypto_linked"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "Robinhood",
+    "vol_index": "VXN"
+  },
+  "LLY-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "healthcare",
+      "pharma"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "礼来",
+    "vol_index": "VIX"
+  },
+  "NVO-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "healthcare",
+      "pharma"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "诺和诺德",
+    "vol_index": "VIX"
+  },
+  "XBI-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "healthcare",
+      "broad_index"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "生物科技ETF",
+    "vol_index": "VIX"
+  },
+  "COST-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "staples",
+      "retail"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "好市多",
+    "vol_index": "VIX"
+  },
+  "WMT-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "staples",
+      "retail"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "沃尔玛",
+    "vol_index": "VIX"
+  },
+  "XLE-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "energy",
+      "broad_index"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "能源板块ETF",
+    "vol_index": "VIX"
+  },
+  "GEV-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "energy",
+      "ai_power"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "GE Vernova",
+    "vol_index": "VXN"
+  },
+  "VRT-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "energy",
+      "ai_power"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "Vertiv",
+    "vol_index": "VXN"
+  },
+  "CAT-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "industrials",
+      "machinery"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "卡特彼勒",
+    "vol_index": "VIX"
+  },
+  "ASTS-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "industrials",
+      "space"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "AST SpaceMobile",
+    "vol_index": "VXN"
+  },
+  "RKLB-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "industrials",
+      "space"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "Rocket Lab",
+    "vol_index": "VXN"
+  },
+  "NFLX-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "discretionary",
+      "media"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "奈飞",
+    "vol_index": "VXN"
+  },
+  "DIS-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "discretionary",
+      "media"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "迪士尼",
+    "vol_index": "VIX"
+  },
+  "UBER-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "discretionary",
+      "platform"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "优步",
+    "vol_index": "VXN"
+  },
+  "IWM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "broad_index",
+      "small_cap"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "罗素2000 ETF",
+    "vol_index": "RVX"
+  },
+  "SMH-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "broad_index",
+      "semi"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "半导体ETF",
+    "vol_index": "VXN"
+  },
+  "UVXY-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "volatility_vehicle"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "VIX期货2x ETF",
+    "vol_index": "VIX"
+  },
+  "EWJ-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "intl_index",
+      "japan"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "日本 ETF",
+    "vol_index": "VIX"
+  },
+  "EWY-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "intl_index",
+      "korea"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "韩国 ETF",
+    "vol_index": "VIX"
+  },
+  "EWZ-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "intl_index",
+      "brazil"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "巴西 ETF",
+    "vol_index": "VIX"
+  },
+  "BABA-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "intl_index",
+      "china"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "阿里巴巴",
+    "vol_index": "VXN"
+  },
+  "AVGO-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "semi"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "博通",
+    "vol_index": "VXN"
+  },
+  "ASML-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "semi_equipment"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "阿斯麦",
+    "vol_index": "VXN"
+  },
+  "AMAT-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_infra",
+      "semi_equipment"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "应用材料",
+    "vol_index": "VXN"
+  },
+  "CSCO-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "legacy_tech",
+      "networking"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "思科",
+    "vol_index": "VXN"
+  },
+  "IBM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "legacy_tech",
+      "enterprise"
+    ],
+    "valid_from": "2026-08-05",
+    "display": "IBM",
+    "vol_index": "VXN"
+  }
 }
