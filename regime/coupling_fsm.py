@@ -19,25 +19,28 @@ import pandas as pd
 
 from .coupling import _hl_alpha, HL_FAST, HL_SLOW
 
-THRESHOLD_VERSION = "prior-2"   # 参数代际：prior-1 → prior-2（M2b 止血）→ calibrated-1（网格搜索）
+THRESHOLD_VERSION = "calibrated-1"  # 代际：prior-1 → prior-2 → calibrated-1（27 组合网格，推导链 docs/COUPLING_CALIBRATED1_20260804.md，2026-08-04 用户批准）
 
 
 @dataclass
 class FSMParams:
     """C6 参数表（pair 级先验，prior-2 修订）。
 
-    prior-2 变更（依据 M2b 满额校准，docs/COUPLING_M2B_20260804.md）：
-    - FSM 资格线 0.25→0.35（退出 0.30）：定罪的误报对全落在 ρ∈0.27-0.38；
-    - 按锚定时 |ρ_slow| 分层：强对（≥0.6，实测误报为零有余量）降门提速；
-    - δ* 锚定冻结逐对化：max(层地板, 该对自身快慢背离的因果 q95)——
-      对高背离噪声的对（如 ETH×XAU）自动抬门。
-    数字血统：方向全部数据导出，具体数值仍是圆整先验——calibrated-1 由
-    网格搜索给出推导链。
+    calibrated-1（2026-08-04，27 组合 × 1000 路网格，推导链
+    docs/COUPLING_CALIBRATED1_20260804.md，用户批准）：
+    - 资格线 0.40/0.35：边缘对（如 ETH×XAU）诚实排除——16% 检出的覆盖
+      不如不覆盖（宁缺毋滥），换取误报 0.043→0.028/年、强对检出 0.86→0.96；
+    - δ 地板 0.35/0.31：网格铁律——全部过预算组合均为 0.35，效应门必须
+      明确高过噪声 P90(0.29)；
+    - d_enter 2.0/1.5：prior-2 的"强对提速到 1.5"被网格证伪（全线爆表），
+      维持 2.0 标准/1.5 强层；
+    - δ* 仍与逐对锚定冻结 q95 取 max；检测延迟 ~500 根是快线半衰期 140 的
+      结构性代价（改它是 calibrated-2 的网格轴）。
     """
     q_low: float = 0.10          # L = 因果分位 q10%(x)
     q_high: float = 0.30         # H = q30%(x)
-    delta_floor_std: float = 0.29    # 标准层效应门地板（实测 P90|Δρ|）
-    delta_floor_strong: float = 0.25  # 强层（|ρ_s|≥0.6）地板
+    delta_floor_std: float = 0.35    # calibrated-1：网格证明须明确高过噪声 P90(0.29)
+    delta_floor_strong: float = 0.31  # 强层地板（std − 0.04）
     tier_strong: float = 0.60
     d_enter_std: float = 2.0     # 标准层进入 decoupling 的标准化幅度
     d_enter_strong: float = 1.5  # 强层（M2b：强对误报为零，有提速余量）
@@ -55,8 +58,8 @@ class FSMParams:
     # 运行时资格（prior-2：0.20/0.25 → 0.30/0.35）：|ρ_slow| 跌破退出线 →
     # NOT_APPLICABLE（关系死亡的诚实终态）；回到入场线以上才重新入场。
     # 测量层展示口径仍是 coupling.ELIG_ABS_RHO=0.25——只有状态机收紧。
-    elig_exit: float = 0.30
-    elig_enter: float = 0.35
+    elig_exit: float = 0.35
+    elig_enter: float = 0.40
 
 
 def pair_rho_series(ra: pd.Series, rb: pd.Series,
