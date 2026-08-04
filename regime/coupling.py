@@ -36,25 +36,99 @@ def _hl_alpha(halflife: float) -> float:
     return 1.0 - 0.5 ** (1.0 / halflife)
 
 
-def panel_members(conn, panel: str):
-    """面板成员（仅核心池）。all247=加密+商品（24/7）；usrth=美股永续。
+def panel_members(conn, panel: str, include_observation: bool = False):
+    """面板成员（默认仅核心池——核心矩阵/全局统计的治理边界）。
 
-    intl_stock_perp（KRX 时段）归 all247——其永续 24/7 报价，但正股时段
-    不是 NYSE，进 RTH 面板会用错时钟；cross 面板同理只收 us+crypto+commodity。
+    include_observation=True 供**显示层**全矩阵用：观察池入图但打标，
+    不进 m/λ1/块能量等正式统计。intl_stock_perp（KRX 时段）归 all247；
+    cross 面板收全部（intl 的跨类格子有"NYSE 时段其标的休市"的粘滞注意项）。
     """
     out = []
     for sym in sorted(storage.symbols(conn)):
         cfg = instruments.get(sym)
-        if (cfg.get("pool") or "core") != "core":
+        if not include_observation and (cfg.get("pool") or "core") != "core":
             continue
         cls = cfg.get("class")
         if panel == "all247" and cls in ("crypto", "commodity", "intl_stock_perp"):
             out.append(sym)
         elif panel == "usrth" and cls == "us_stock_perp":
             out.append(sym)
-        elif panel == "cross" and cls in ("crypto", "commodity", "us_stock_perp"):
+        elif panel == "cross":
             out.append(sym)
     return out
+
+
+# 主题排序（矩阵轴序：块结构肉眼可见）；观察池排尾部
+_THEME_ORDER = ("crypto_major", "crypto_linked", "macro_asset", "ai_infra",
+                "semi_levered_proxy", "broad_index", "ai_app", "edge_physical")
+
+
+def composite_matrix(conn) -> dict:
+    """38×38 复合相关矩阵（显示层）：每格用其应有的时钟。
+
+    加密/商品/国际股×同类 → all247；美股×美股 → usrth；跨类 → cross
+    （共同完整 RTH 小时）。慢线 EWMA（T_eff≈1212）；n_joint<MIN_EFF 的格子
+    valid=False（前端淡显）。观察池成员入图打标，不参与任何正式统计。
+    """
+    members = panel_members(conn, "cross", include_observation=True)
+
+    def theme_key(s):
+        cfg = instruments.get(s)
+        th = (cfg.get("theme") or ["zz"])[0]
+        pool_rank = 0 if (cfg.get("pool") or "core") == "core" else 1
+        t_rank = _THEME_ORDER.index(th) if th in _THEME_ORDER else len(_THEME_ORDER)
+        return (pool_rank, t_rank, s)
+
+    symbols = sorted(members, key=theme_key)
+    cls = {s: instruments.get(s).get("class") for s in symbols}
+    pools = {s: instruments.get(s).get("pool") or "core" for s in symbols}
+
+    def clock_of(a, b):
+        g247 = ("crypto", "commodity", "intl_stock_perp")
+        if cls[a] in g247 and cls[b] in g247:
+            return "all247"
+        if cls[a] == "us_stock_perp" and cls[b] == "us_stock_perp":
+            return "usrth"
+        return "cross"
+
+    mats = {}
+    for panel in ("all247", "usrth", "cross"):
+        syms = [s for s in symbols
+                if panel == "cross"
+                or (panel == "all247" and cls[s] in ("crypto", "commodity", "intl_stock_perp"))
+                or (panel == "usrth" and cls[s] == "us_stock_perp")]
+        if len(syms) < 2:
+            continue
+        r = panel_returns(conn, syms, panel)
+        if r.empty:
+            continue
+        z, _ = ewma_vol_standardize(r)
+        mats[panel] = pairwise_ewma_corr(z, HL_SLOW)
+
+    cells = []
+    for i, a in enumerate(symbols):
+        for j, b in enumerate(symbols):
+            if j < i:
+                continue
+            if i == j:
+                cells.append([i, j, 1.0, 0, True])
+                continue
+            pk = clock_of(a, b)
+            m = mats.get(pk)
+            rho, n = None, 0
+            if m is not None and a in m["corr"].index and b in m["corr"].index:
+                v = m["corr"].loc[a, b]
+                n = int(m["n_joint"].loc[a, b])
+                if np.isfinite(v):
+                    rho = round(float(v), 3)
+            cells.append([i, j, rho, n, bool(rho is not None and n >= MIN_EFF)])
+    return {
+        "symbols": symbols,
+        "pools": pools,
+        "themes": {s: (instruments.get(s).get("theme") or [""])[0] for s in symbols},
+        "cells": cells,
+        "min_eff": MIN_EFF,
+    }
 
 
 def panel_returns(conn, symbols, panel: str, limit: int = 6000) -> pd.DataFrame:

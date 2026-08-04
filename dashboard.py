@@ -578,6 +578,8 @@ def coupling_payload():
                 })
             bv = block_votes(z, coupling.theme_blocks(list(r.columns)), pair_states)
             out["blocks"] = bv.to_dict("records") if len(bv) else []
+        # 38×38 复合矩阵（显示层：每格用应有时钟，观察池打标，样本不足淡显）
+        out["matrix"] = coupling.composite_matrix(conn)
     finally:
         conn.close()
     _COUPLING_CACHE.update(at=now, payload=out)

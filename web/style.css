@@ -114,6 +114,7 @@ main { flex: 1; min-width: 0; padding: 0 0 26px; }
 .chart.iv { height: 236px; }
 .chart.short { height: 240px; }
 .chart.half { height: 220px; }
+.chart.matrix { height: 720px; margin-top: 12px; }
 
 /* ---------- ① 结论板 ---------- */
 .board { background: #fff; border-bottom: 1px solid var(--border); padding: 22px 24px 20px; }

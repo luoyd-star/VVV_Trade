@@ -176,6 +176,60 @@ async function loadCoupling() {
   host.innerHTML = parts.join('');
   $('coupMeta').textContent =
     `阈值代 ${j.threshold_version} · 更新 ${ago(j.updated_at)}`;
+  renderCoupMatrix(j.matrix);
+}
+
+// 38×38 复合相关矩阵：每格用应有时钟（加密24/7 / 美股RTH / 跨类共同RTH），
+// 慢线 EWMA；样本不足（n<400）淡显；观察池符号打 ° 标；轴按主题块排序。
+function renderCoupMatrix(m) {
+  const c = chart('coupMatrix');
+  if (!c || !m || !(m.symbols || []).length) return;
+  const short = (s) => s.split('-')[0] + (m.pools[s] === 'observation' ? '°' : '');
+  const labels = m.symbols.map(short);
+  const data = [];
+  m.cells.forEach(([i, j, rho, n, valid]) => {
+    if (rho == null) return;
+    const cell = { value: [j, i, rho], n, valid };
+    if (!valid) cell.itemStyle = { opacity: 0.22 };
+    data.push(cell);
+    if (i !== j) {
+      const mir = { value: [i, j, rho], n, valid };
+      if (!valid) mir.itemStyle = { opacity: 0.22 };
+      data.push(mir);
+    }
+  });
+  c.setOption({
+    animation: false,
+    tooltip: {
+      backgroundColor: COL.tipBg, borderColor: COL.border,
+      textStyle: { color: COL.ink, fontSize: 11.5 },
+      formatter: (p) => {
+        const a = m.symbols[p.value[1]], b = m.symbols[p.value[0]];
+        const d = p.data;
+        return `<b>${esc(a.split('-')[0])} × ${esc(b.split('-')[0])}</b><br>`
+          + `ρ_slow = ${fmtN(p.value[2], 3, true)}<br>`
+          + `联合样本 ${d.n}${d.valid ? '' : `（<${m.min_eff}，样本不足·淡显）`}`;
+      },
+    },
+    grid: { left: 70, right: 60, top: 8, bottom: 76 },
+    xAxis: { type: 'category', data: labels, position: 'bottom',
+             axisLabel: { rotate: 60, fontSize: 9, color: COL.sub },
+             axisTick: { show: false }, splitLine: { show: false } },
+    yAxis: { type: 'category', data: labels, inverse: true,
+             axisLabel: { fontSize: 9, color: COL.sub },
+             axisTick: { show: false }, splitLine: { show: false } },
+    visualMap: {
+      min: -1, max: 1, calculable: false, orient: 'vertical',
+      right: 4, top: 'center', itemHeight: 160, textStyle: { color: COL.muted, fontSize: 9 },
+      inRange: { color: ['#b91f31', '#f6e9ea', '#ffffff', '#e7f2ee', '#0a8a66'] },
+    },
+    series: [{
+      type: 'heatmap', data,
+      label: { show: false },
+      emphasis: { itemStyle: { borderColor: COL.ink, borderWidth: 1 } },
+      itemStyle: { borderColor: '#ffffff', borderWidth: 0.5 },
+    }],
+  }, true);
 }
 
 /* ---------- 渲染 ---------- */
