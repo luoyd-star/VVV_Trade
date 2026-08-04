@@ -527,6 +527,63 @@ def build_dashboard(symbol: str) -> dict:
         conn.close()
 
 
+_COUPLING_CACHE = {"at": 0.0, "payload": None}
+
+
+def coupling_payload():
+    """跨资产耦合雷达（M3）：pair 状态 + 块三票 + 三面板全局量。5 分钟缓存
+    ——FSM 全史重放约 1-2s，不能每请求算。诊断输出，阈值代随行。"""
+    now = time.time()
+    if _COUPLING_CACHE["payload"] is not None and now - _COUPLING_CACHE["at"] < 300:
+        return _COUPLING_CACHE["payload"]
+    from regime import coupling
+    from regime.coupling_fsm import (
+        THRESHOLD_VERSION, block_votes, pair_rho_series, run_pair_fsm,
+    )
+    out = {"updated_at": int(now * 1000), "threshold_version": THRESHOLD_VERSION,
+           "panels": {}, "pairs": [], "blocks": []}
+    conn = storage.connect_ro()
+    try:
+        for panel in ("all247", "usrth", "cross"):
+            syms = coupling.panel_members(conn, panel)
+            r = coupling.panel_returns(conn, syms, panel)
+            if r.empty or len(r.columns) < 2:
+                continue
+            z, _ = coupling.ewma_vol_standardize(r)
+            C = coupling.lw_shrink_corr(z)
+            g = (coupling.global_stats(C, coupling.theme_blocks(list(C.columns)))
+                 if C is not None else None)
+            t = coupling.pair_table(r)
+            out["panels"][panel] = {
+                "n_symbols": len(r.columns), "n_rows": len(r),
+                "status_counts": t["status"].value_counts().to_dict(),
+                "global": ({"market_mode": g["market_mode"],
+                            "mean_corr": g["mean_corr"],
+                            "dispersion": g["dispersion"],
+                            "blocks": g["blocks"]} if g else None),
+            }
+            if panel != "all247":
+                continue  # pair FSM 目前只有 all247 有资格对
+            pair_states = {}
+            for _, row in t[t.status == "ELIGIBLE"].iterrows():
+                ser = pair_rho_series(z[row.a], z[row.b])
+                states, events = run_pair_fsm(ser)
+                cur = str(states.iloc[-1])
+                pair_states[tuple(sorted((row.a, row.b)))] = cur
+                out["pairs"].append({
+                    "a": row.a, "b": row.b, "state": cur,
+                    "rho_fast": row.rho_fast, "rho_slow": row.rho_slow,
+                    "c": row.c, "dz": row.dz,
+                    "last_event": (events[-1]["reason"] if events else None),
+                })
+            bv = block_votes(z, coupling.theme_blocks(list(r.columns)), pair_states)
+            out["blocks"] = bv.to_dict("records") if len(bv) else []
+    finally:
+        conn.close()
+    _COUPLING_CACHE.update(at=now, payload=out)
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
@@ -540,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/dashboard":
                 symbol = (qs.get("symbol") or ["BTC-USDT"])[0]
                 return self._json(build_dashboard(symbol))
+            if parsed.path == "/api/coupling":
+                return self._json(coupling_payload())
             if parsed.path == "/api/agent/info":
                 cfg = agent_config()
                 return self._json(

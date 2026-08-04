@@ -128,6 +128,54 @@ async function load() {
   S.nextRefresh = Date.now() + REFRESH_MS;
   renderAll();
   hermesSync(); // 顺带同步共享对话（终端里的新提问会出现在这里）
+  loadCoupling(); // 耦合雷达跨品种，独立取数（服务端 5 分钟缓存）
+}
+
+/* ---------- 耦合雷达（M3 诊断层，独立于单品种数据流） ---------- */
+const CSTATE = {
+  coupled:        { label: '耦合',   color: COL.blue },
+  decoupling:     { label: '脱耦中', color: '#a87c05' },
+  decoupled:      { label: '已脱耦', color: COL.down },
+  recoupling:     { label: '回耦中', color: COL.azure },
+  REBASE_PENDING: { label: '待重锚', color: COL.muted },
+  NOT_APPLICABLE: { label: '不适用', color: COL.muted },
+};
+async function loadCoupling() {
+  let j;
+  try {
+    const r = await fetch('/api/coupling');
+    j = await r.json();
+  } catch (e) { return; }
+  const host = $('coupBody');
+  if (!host || !j) return;
+  const parts = [];
+  const pn = { all247: '24/7（加密+商品）', usrth: '美股RTH', cross: '跨类共同RTH' };
+  const pl = Object.entries(j.panels || {}).map(([k, p]) => {
+    const g = p.global;
+    const ins = (p.status_counts || {}).INSUFFICIENT || 0;
+    return `<span class="li"><b>${pn[k] || k}</b> ${g
+      ? `λ1/N ${fmtN(g.market_mode, 2)} · 均值ρ ${fmtN(g.mean_corr, 2)}`
+      : '—'}${ins ? ` · 样本不足对 ${ins}` : ''}</span>`;
+  }).join('');
+  parts.push(`<div class="coup-panels">${pl}</div>`);
+  if ((j.pairs || []).length) {
+    parts.push('<div class="coup-pairs">' + j.pairs.map((p) => {
+      const m = CSTATE[p.state] || { label: esc(p.state), color: COL.muted };
+      return `<span class="cchip" style="border-color:${m.color}">
+        <i style="background:${m.color}"></i>${esc(p.a.split('-')[0])}×${esc(p.b.split('-')[0])}
+        <b>${fmtN(p.rho_fast, 2, true)}</b> ${m.label}</span>`;
+    }).join('') + '</div>');
+  }
+  if ((j.blocks || []).length) {
+    parts.push('<div class="coup-blocks">' + j.blocks.map((b) =>
+      `<span class="li">${esc(b.block_a)}×${esc(b.block_b)}：${b.votes}/3票 `
+      + `<b>${b.state === 'coupled' ? '耦合' : '未耦合'}</b>`
+      + `（中位ρ ${fmtN(b.median_rho_slow, 2, true)} · coupled占比 ${fmtN(b.coupled_share, 2)}）</span>`
+    ).join('') + '</div>');
+  }
+  host.innerHTML = parts.join('');
+  $('coupMeta').textContent =
+    `阈值代 ${j.threshold_version} · 更新 ${ago(j.updated_at)}`;
 }
 
 /* ---------- 渲染 ---------- */

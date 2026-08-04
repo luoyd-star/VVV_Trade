@@ -204,6 +204,18 @@ td.pos { color: var(--up); } td.neg { color: var(--down); }
           font-family: -apple-system, "PingFang SC", sans-serif; font-size: 12px; }
 .stchip .dot { width: 8px; height: 8px; }
 
+/* ---------- ③b 耦合雷达 ---------- */
+.coup { display: flex; flex-direction: column; gap: 10px; }
+.coup-panels { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; color: var(--sub); }
+.coup-panels b { color: var(--ink); font-weight: 600; }
+.coup-pairs { display: flex; flex-wrap: wrap; gap: 6px; }
+.cchip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px;
+         border: 1px solid var(--border); font-size: 12px; color: var(--sub);
+         font-family: var(--mono); }
+.cchip i { width: 8px; height: 8px; flex: none; }
+.cchip b { color: var(--ink); }
+.coup-blocks { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--sub); }
+
 /* ---------- ④ 折叠区 ---------- */
 .fold { margin: 0 24px 16px; background: #fff; border: 1px solid var(--border); }
 .fold > summary {

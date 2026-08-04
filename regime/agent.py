@@ -338,6 +338,21 @@ def overview_brief() -> str:
             tfs = by_sym[sym]
             lines.append(sym + " | " + " | ".join(
                 f"{tf}: {tfs[tf]}" for tf in ("1d", "4h", "1h") if tf in tfs))
+        try:
+            # 耦合雷达一行摘要（M3 诊断层；运行时导入避免环依赖，失败静默省略）
+            from dashboard import coupling_payload
+            cp = coupling_payload()
+            if cp.get("pairs"):
+                seg = " ".join(
+                    f"{p['a'].split('-')[0]}×{p['b'].split('-')[0]}:{p['state']}"
+                    f"({p['rho_fast']:+.2f})" for p in cp["pairs"])
+                lines.append(f"耦合雷达(阈值代 {cp['threshold_version']}，诊断非信号): {seg}")
+            for b in cp.get("blocks") or []:
+                lines.append(
+                    f"块级: {b['block_a']}×{b['block_b']} {b['votes']}/3票 {b['state']}"
+                    f"（中位ρ {b['median_rho_slow']}）")
+        except Exception:  # noqa: BLE001
+            pass
         lines.append(
             "以上仅横截面摘要。当前品种的全量细节在 <panel>。要查其他品种的深度"
             "数据，用只读查询接口（已实测你的沙箱可运行）：\n"
