@@ -102,36 +102,64 @@ def sync_moomoo_iv(conn, symbols) -> tuple:
     us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
     if not us:
         return None, []
-    errors, wrote, today = [], 0, date.today()
+    errors, today = [], date.today()
     try:
         ctx = moomoo_iv.open_ctx()
     except Exception as e:  # noqa: BLE001
         return None, [f"moomoo_iv 连接: {e}"]
+
+    def incr(sym, getter, fetch, put, tag):
+        """自库内最后一日重叠一天起拉，覆盖当日可能的未定值。返回写入行数。"""
+        have = getter(conn, sym, moomoo_iv.SOURCE, limit=5)
+        if have.empty:
+            begin = moomoo_iv.DATA_FLOOR
+        else:
+            last = datetime.fromtimestamp(
+                int(have["ts"].iloc[-1]) / 1000, tz=timezone.utc
+            ).date()
+            if last >= today:
+                return 0
+            begin = (last - timedelta(days=1)).isoformat()
+        rows = fetch(ctx, sym, begin, today.isoformat())
+        if rows:
+            put(conn, sym, moomoo_iv.SOURCE, rows)
+        return len(rows)
+
+    n_iv = n_pc = 0
     try:
         for sym in us:
             try:
-                have = storage.get_stock_vol(conn, sym, moomoo_iv.SOURCE, limit=5)
-                if have.empty:
-                    begin = moomoo_iv.DATA_FLOOR
-                else:
-                    last = datetime.fromtimestamp(
-                        int(have["ts"].iloc[-1]) / 1000, tz=timezone.utc
-                    ).date()
-                    if last >= today:
-                        continue
-                    begin = (last - timedelta(days=1)).isoformat()
-                rows = moomoo_iv.fetch_history(ctx, sym, begin, today.isoformat())
-                if rows:
-                    storage.upsert_stock_vol(conn, sym, moomoo_iv.SOURCE, rows)
-                    wrote += len(rows)
+                n_iv += incr(sym, storage.get_stock_vol, moomoo_iv.fetch_history,
+                             storage.upsert_stock_vol, "iv")
             except Exception as e:  # noqa: BLE001
                 errors.append(f"moomoo_iv {sym}: {e}")
+            try:
+                # 期权流（put/call）纯采集，不进判定——历史易逝，先留住
+                n_pc += incr(sym, storage.get_stock_option_stat,
+                             moomoo_iv.fetch_option_stat,
+                             storage.upsert_stock_option_stat, "pc")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"moomoo_optstat {sym}: {e}")
+        # 财报日历：只补未来 90 天，日频节流已够（日历本身变动罕见）
+        try:
+            rows = moomoo_iv.fetch_earnings(
+                ctx, us, today.isoformat(), (today + timedelta(days=90)).isoformat()
+            )
+            if rows:
+                storage.upsert_earnings(conn, moomoo_iv.SOURCE, rows)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"moomoo_earnings: {e}")
     finally:
         try:
             ctx.close()
         except Exception:  # noqa: BLE001, S110
             pass
-    return (f"个股 IV(moomoo): {wrote} 行 / {len(us)} 品种" if wrote else None), errors
+    parts = []
+    if n_iv:
+        parts.append(f"IV {n_iv} 行")
+    if n_pc:
+        parts.append(f"期权流 {n_pc} 行")
+    return (f"moomoo({'/'.join(parts)}) / {len(us)} 品种" if parts else None), errors
 
 
 def sync_vol_index(
