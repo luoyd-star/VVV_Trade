@@ -41,8 +41,10 @@ LAG_BARS = {
 #   v1 按 0 计入，|direction| 上限降到 0.90 却仍比同一个 0.30 阈值——
 #   同样的结构，短历史品种被系统性压低了趋势判定概率（50.8% 的行受影响）。
 #   阈值三件套（0.60/0.30/0.10）与规则树结构未动，仍待回测校准。
-RULES_VERSION = "v3"   # v3（2026-08-05）：A1 事件感知确认门槛——事件窗内 squeeze→趋势 +1 根
-                       # 测量层 classify() 未变，只动确认层；升版触发全量重算（版本谓词）
+RULES_VERSION = "v3.1"  # v3（2026-08-05）：A1 事件感知确认门槛——事件窗内 squeeze→趋势 +1 根
+                        # v3.1（同日）：事件窗改按 **ET 日历日**比较（12 路审计 6 路独立发现
+                        # UTC 毫秒严格比较把财报当天整天排除在窗外 + 跨 DST 漂移 1 小时）。
+                        # 窗口定义变更改变确认态 → 按纪律升版重算，不允许同版本号下换算法
 
 # 审计特征集版本：features JSON 的键集或口径一变就递增（规则可以不变）。
 # 两个版本都进入 state_ts_set 的跳过谓词：任一不匹配的行视为"缺失"、
@@ -229,10 +231,13 @@ def confirm_states(raw_states, event_win=None):
         confirmed.append(cur)
     candidate = None
     if pending is not None:
+        need = _confirm_need(pending, from_state=cur, event_win=last_win)
         candidate = {
-            "state": pending, "count": count,
-            "need": _confirm_need(pending, from_state=cur, event_win=last_win),
+            "state": pending, "count": count, "need": need,
             "event_win": last_win,
+            # gated=门槛真的因事件 +1（仅 squeeze→趋势）。审计发现：只凭 event_win
+            # 显示"门槛+1"会对 range→trend 等不受门槛的候选谎报
+            "gated": need > _confirm_need(pending, from_state=cur, event_win=False),
         }
     return confirmed, candidate
 

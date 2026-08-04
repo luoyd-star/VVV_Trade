@@ -127,8 +127,7 @@ def render_context(p: dict) -> str:
         name = inst.get("display") or ""
         if inst.get("market_open"):
             lines.append(
-                f"品种类型: 美股永续（标的 {name} 按工作日时钟推断为盘中 9:30-16:00 ET；"
-                "未校验节假日——若今日为美股假日则此判断错误）"
+                f"品种类型: 美股永续（标的 {name} 盘中——已按 NYSE 假日/半日市日历校验）"
             )
         else:
             lines.append(
@@ -149,7 +148,8 @@ def render_context(p: dict) -> str:
             f"[{tf}] 状态={t['state_label']}(原始判定conf {t['confidence']:.2f}——确认态无独立置信度)"
             + (f"[原始判定={raw}]" if raw and raw != t.get("state") else "")
             + (f"[酝酿中:{cand['state']} {cand['count']}/{cand['need']}"
-               + ("（事件窗:未来10日有财报,确认门槛+1根）" if cand.get("event_win") else "")
+               + ("（事件窗:未来10日有财报,确认门槛+1根）" if cand.get("gated")
+                  else ("（事件窗内,此转换不受门槛）" if cand.get("event_win") else ""))
                + "]" if cand else "")
             + (
                 f"[未收线预览:{t['preview']['state']}(conf {t['preview']['confidence']:.2f})]"

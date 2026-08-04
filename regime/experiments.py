@@ -114,7 +114,10 @@ def e2_squeeze_events(df: pd.DataFrame, tf: str,
     fwd_range = pd.concat(
         [hi.shift(-k) for k in range(1, H + 1)], axis=1).max(axis=1) - pd.concat(
         [lo.shift(-k) for k in range(1, H + 1)], axis=1).min(axis=1)
-    expansion = (fwd_range / atr14).replace([np.inf, -np.inf], np.nan)
+    # 严格未来窗：尾部不足 H 根的部分窗整体作废（skipna 的 max/min 会用残窗凑数，
+    # 审计实测 300 根/H=10 产出 299 个窗、其中 9 个是 10..2 根的部分窗）
+    full_win = hi.shift(-H).notna()
+    expansion = (fwd_range / atr14).where(full_win).replace([np.inf, -np.inf], np.nan)
     fwd_ret = np.log(c.shift(-H) / c)
     base_med = float(expansion.dropna().median()) if expansion.notna().any() else None
     grid = {}
@@ -204,7 +207,9 @@ def e4_hysteresis_grid(raw_states, y, tf) -> dict:
     from .classify import _confirm_need
     res = {}
     variants = {f"N={k}": (lambda r, k=k: k) for k in (1, 2, 3, 4)}
-    variants["现行(非对称)"] = _confirm_need
+    # 注意：此处折叠的是 **v2 语义**（_confirm_need 不带事件窗参数即无事件门）。
+    # 审计发现旧标签"现行"失实——v3 的事件门在此网格中不参与，故如实命名
+    variants["v2基线(非对称,无事件门)"] = _confirm_need
     fin = np.isfinite(y)
     for name, fn in variants.items():
         folded = _confirm_fold(raw_states, fn)
@@ -212,15 +217,19 @@ def e4_hysteresis_grid(raw_states, y, tf) -> dict:
         churn = eps[-1] + 1
         stay = len(folded) / churn
         ewma_by, dev = {}, []
-        for s, yy in zip(folded, y):
-            if not np.isfinite(yy):
-                continue
-            m = ewma_by.get(s)
-            if m is not None:  # 先评后更：偏差只用过去信息（因果）
-                dev.append(abs(yy - m))
-                ewma_by[s] = m * 0.95 + yy * 0.05
-            else:
-                ewma_by[s] = yy
+        H = {"1h": 24, "4h": 18, "1d": 10}[tf]
+        for i, (st, yy) in enumerate(zip(folded, y)):
+            # y_t 是 [t, t+H] 的未来窗量，要到 t+H 才完整实现——EWMA 只能吸收
+            # 已实现的 y_{t-H}（审计实测：即时吸收 y_t 时，改一个"尚未可知"的 y0
+            # 就能把 tracking_dev 从 1.93 推到 947，纯未来泄漏）
+            if i >= H and np.isfinite(y[i - H]):
+                sp = folded[i - H]
+                m = ewma_by.get(sp)
+                ewma_by[sp] = y[i - H] if m is None else m * 0.95 + y[i - H] * 0.05
+            if np.isfinite(yy):
+                m = ewma_by.get(st)
+                if m is not None:
+                    dev.append(abs(yy - m))
         res[name] = {
             "episodes": churn, "avg_stay_bars": round(stay, 1),
             "tracking_dev": round(float(np.mean(dev)), 6) if dev else None,

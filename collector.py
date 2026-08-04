@@ -236,7 +236,11 @@ def sync_moomoo_iv(conn, symbols) -> tuple:
     us = moomoo_iv.iv_symbols(symbols)   # 美股永续 + 配了 vol_proxy 的商品（XAU→GLD/XAG→SLV）
     if not us:
         return None, []
-    errors, today = [], date.today()
+    from zoneinfo import ZoneInfo as _ZI
+
+    # "今天"必须取 ET 日历日：宿主机时区在 UTC+8/9 时 date.today() 比 ET 提前一天，
+    # 财报权威窗与 prune 起点会跳到 ET 的明天，漏掉 ET 当日的新增/改期（审计 3 路发现）
+    errors, today = [], datetime.now(_ZI("America/New_York")).date()
     try:
         ctx = moomoo_iv.open_ctx()
     except Exception as e:  # noqa: BLE001
@@ -377,12 +381,20 @@ def snapshot_universe(conn, symbols) -> None:
     """
     import hashlib
     rows = []
+    hash_rows = []
     for sym in sorted(symbols):
         cfg = instruments.get(sym)
         rows.append((sym, cfg.get("pool") or "core",
                      json.dumps(cfg.get("theme") or [], ensure_ascii=False),
                      cfg.get("class"), cfg.get("valid_from")))
-    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()[:16]
+        # 哈希须覆盖**所有改变口径的字段**——审计实测：换数据源、换 vol_index、
+        # 换 vol_proxy 都不触发新快照（旧哈希只看 pool/theme/class/valid_from）
+        hash_rows.append(rows[-1] + (
+            json.dumps(cfg.get("sources") or []), cfg.get("vol_index"),
+            cfg.get("vol_proxy"), cfg.get("hl_coin"),
+        ))
+    digest = hashlib.sha256(
+        json.dumps(hash_rows, sort_keys=True).encode()).hexdigest()[:16]
     if storage.get_meta(conn, "universe_hash") == digest:
         return
     now = int(time.time() * 1000)
@@ -501,6 +513,16 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     sym, tf, sources=source_order, drop_unclosed=False
                 )
                 df = df_full.iloc[:-1].reset_index(drop=True)  # 已收盘部分
+                # 序列下限（公司行动/合约重定价断点治理）：源端服务的是未复权
+                # 原始历史，删掉的断点前段会被下一轮 fetch 重新灌回（CRWD 4:1
+                # 重定价实测：4h 每轮拉 50 天、必够到旧口径段）。floor 之前的
+                # 行一律不入库；设置＝手工清修时写 meta series_floor_{sym}
+                floor = storage.get_meta(conn, f"series_floor_{sym}")
+                if floor:
+                    from regime.storage import ts_to_ms as _t2m
+                    keep = [t >= int(floor) for t in _t2m(df["ts"])]
+                    if not all(keep):
+                        df = df[keep].reset_index(drop=True)
                 storage.upsert_ohlcv(conn, sym, tf, df, src)
                 # 形成中的最后一根另存 live_bars，供面板滚动预览（不入确认历史）
                 live = df_full.iloc[-1]
@@ -522,7 +544,8 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     hist, tf, existing, session_aware=session_aware, source=src
                 )
                 if new_states:
-                    storage.upsert_states(conn, sym, tf, new_states)
+                    # commit=False：与下方确认折叠合并成单事务（见 conn.commit() 处）
+                    storage.upsert_states(conn, sym, tf, new_states, commit=False)
                 if len(hist) >= 10_000 + FEATURE_WINDOW - 1:
                     # 重算窗已满：窗外若还有旧版本行，升版永远重算不到它们，
                     # 且 get_states 无版本谓词、折叠会混版——必须让人看见
@@ -554,7 +577,10 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     if rows_all[i]["state"] != confirmed[i]
                 ]
                 if fixes:
-                    storage.set_confirmed(conn, sym, tf, fixes)
+                    storage.set_confirmed(conn, sym, tf, fixes, commit=False)
+                # 与上面的 upsert_states(commit=False) 同一事务提交：消灭
+                # "raw 已可见、确认未落"的中间窗口（审计 3 路独立发现）
+                conn.commit()
                 now_state = confirmed[-1] if confirmed else "?"
                 log.info(
                     "%s %s src=%s bars=%d states+%d 确认=%s%s%s",

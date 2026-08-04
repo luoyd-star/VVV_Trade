@@ -7,4 +7,6 @@ cd "$(dirname "$0")/.."
 echo "== $(date -u '+%Y-%m-%d %H:%M') UTC 每周复跑 =="
 .venv/bin/python scripts/run_backtest_p0.py --note "weekly rerun"
 .venv/bin/python scripts/run_tier1_experiments.py
+# A1 事件门槛的预登记复评（v3.1；窗内样本 ≥100 时自动给出维持/撤销建议）
+.venv/bin/python scripts/exp_event_gate.py
 echo "== 完成。报告在 docs/，账本在 data/backtest_ledger.sqlite3 =="

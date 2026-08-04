@@ -24,15 +24,23 @@ CRYPTO_DEFAULT = {
 }
 
 
+_LAST_GOOD: dict = {}
+
+
 def load() -> dict:
+    """热读注册表。**损坏时回退最近一次成功解析的快照**，绝不回退空表——
+    审计发现：半写 JSON 会让 61 个美股静默降级成 crypto 默认（错源、错时钟、
+    丢 IV/休市语义），且无任何告警。last-known-good 是唯一安全的降级方向。"""
+    global _LAST_GOOD
     try:
         with open(PATH, encoding="utf-8") as f:
             data = json.load(f) or {}
-    except OSError:
-        return {}
-    except Exception:  # noqa: BLE001  配置写坏时回退默认而不是拖垮服务
-        return {}
-    return {k: v for k, v in data.items() if not k.startswith("_")}
+        good = {k: v for k, v in data.items() if not k.startswith("_")}
+        if good:
+            _LAST_GOOD = good
+        return good or dict(_LAST_GOOD)
+    except Exception:  # noqa: BLE001  配置读坏：用上一份好的，而非空表
+        return dict(_LAST_GOOD)
 
 
 def get(symbol: str) -> dict:

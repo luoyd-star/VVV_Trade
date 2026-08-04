@@ -307,9 +307,16 @@ def _stock_iv_block(conn, symbol: str):
     earn = storage.earnings_proximity(
         conn, symbol, int(time.time() * 1000)
     )
+    # asof/age：结算序列的最后日期与年龄——OpenD 断供后旧值不得无限期冒充当前
+    #（审计：模拟断供 14 天，NVDA 仍显示 IV=48.0 而无任何陈旧标志）
+    asof_ms = int(s["ts"].iloc[-1])
+    age_days = round((time.time() * 1000 - asof_ms) / 86_400_000, 1)
     return {
         "source": moomoo_iv.SOURCE,
         "last": round(last, 2),
+        "asof": asof_ms,
+        "age_days": age_days,
+        "stale": bool(age_days > 4.0),   # 结算日频+周末，>4 天即断供
         "live": _live_iv_block(conn, symbol, s, last, in30),
         "rank": rank,
         "n": n,
@@ -359,10 +366,20 @@ def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
         (symbol, moomoo_iv.SOURCE),
     ).fetchall()
     if rows:
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+        from zoneinfo import ZoneInfo
+
         ed = np.array([r[0] for r in rows], dtype="int64")
         now_ms = int(time.time() * 1000)
-        fut = ed[ed >= now_ms - 86_400_000]   # 今天（含）以后的财报
-        in30_now = bool(len(fut) and (fut[0] - now_ms) / 86_400_000.0 <= EARN_WINDOW_D)
+        # 今天的财报状态按 **ET 日历日**判（v3.1：UTC 毫秒差在财报夜会提前 4-5 小时
+        # 切出条件组，把实时 IV 与错误的历史参照比）
+        today_ord = _dt.fromtimestamp(now_ms / 1000,
+                                      tz=ZoneInfo("America/New_York")).date().toordinal()
+        e_ords = np.array([_dt.fromtimestamp(int(t) / 1000, tz=_tz.utc).date().toordinal()
+                           for t in ed], dtype="int64")
+        dd = e_ords - today_ord
+        in30_now = bool(((dd >= 0) & (dd <= EARN_WINDOW_D)).any())
         sw = settled_s.tail(EARN_COND_WIN)    # 与正式条件分位同一 2 年窗
         ts = sw["ts"].to_numpy(dtype="int64")[:, None]
         ahead = (ed[None, :] - ts) / 86_400_000.0
@@ -586,9 +603,18 @@ def _usvol_payload(conn, symbol: str):
         xdf = storage.get_opt_iv_near(conn, symbol, limit=1)
         if len(xdf) and xdf["iv"].iloc[-1] == xdf["iv"].iloc[-1]:
             r = xdf.iloc[-1]
-            xopt = {"iv": round(float(r["iv"]), 2),
-                    "tenor_days": float(r["tenor_days"]),
-                    "method": r["method"], "captured_at": int(r["ts"])}
+            age_min = (int(time.time() * 1000) - int(r["ts"])) / 60_000
+            # 新鲜度闸（审计：币安宕机后一年前的值仍冒充"24/7 当前 IV"）：
+            # 采集节奏 30 分钟，超 2 小时即陈旧不给。method/n_expiries 一并出——
+            # nearest+单到期意味着读数对单点 mark 极敏感（实测 66 分钟 ±95%），用户须可见
+            if age_min <= 120:
+                xopt = {"iv": round(float(r["iv"]), 2),
+                        "tenor_days": float(r["tenor_days"]),
+                        "method": r["method"],
+                        "n_expiries": (int(r["n_expiries"])
+                                       if r["n_expiries"] == r["n_expiries"] else None),
+                        "age_min": round(age_min),
+                        "captured_at": int(r["ts"])}
     base_iv = iv["last"] if iv else idx_last
     return {
         "index": idx,
@@ -773,15 +799,17 @@ def _collector_info(conn):
 
 
 def _instrument_payload(symbol: str) -> dict:
-    """品种元信息；美股永续附带标的正股是否盘中（9:30-16:00 ET，工作日；不含假日历）。"""
+    """品种元信息；美股永续附带标的正股是否盘中。
+
+    v3.1：改用仓库自己的 NYSE 日历（假日表 + 半日市收盘时刻）——5 路审计独立发现
+    旧实现硬编码"工作日 9:30-16:00"，感恩节会显示"标的盘中"、半日市收盘后还绿三小时。
+    """
+    from regime.calendar_nyse import is_rth
+
     inst = instruments.get(symbol)
     market_open = None
     if inst["class"] == "us_stock_perp":
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-        market_open = bool(
-            now_et.weekday() < 5
-            and (9, 30) <= (now_et.hour, now_et.minute) < (16, 0)
-        )
+        market_open = bool(is_rth(int(time.time() * 1000)))
     return {
         "class": inst["class"],
         "display": inst.get("display"),

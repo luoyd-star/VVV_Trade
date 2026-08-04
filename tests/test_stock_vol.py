@@ -541,17 +541,51 @@ def test_numeric_cleaners_reject_inf():
     assert storage._f(1.5) == 1.5
 
 
-def test_earnings_event_windows_boundaries():
-    """事件窗：恰 10 日在窗内；当日（ts==财报日）不算"未来"；已过不算；无记录全 False。"""
+def test_earnings_event_windows_et_semantics():
+    """v3.1 事件窗 = ET 日历日差 ∈ [0, 10]，**含财报当天**。
+
+    v3 的 UTC 毫秒严格比较有两个真 P0（12 路审计 6 路独立发现）：
+    ① 财报当天整天被排除在窗外——恰是开盘跳空、最需要门槛的一天；
+    ② 固定 240h 窗口在跨 DST 时与 ET 日历差漂移 1 小时。
+    注意 00:00 UTC 锚的 ts 换到 ET 是**前一天晚上**，日差按 ET 日期算。
+    """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+
+    def et_ms(d, hh, mm=0):
+        return int(datetime.combine(d, dtime(hh, mm), tzinfo=et).timestamp() * 1000)
+
     conn = _mem_conn()
     e = moomoo_iv.day_ms(date(2026, 8, 20))
     storage.upsert_earnings(conn, "moomoo", [
         {"symbol": "NVDA-USDT", "ts": e, "pub_type": None, "period": None}])
-    D = 86_400_000
-    ts = [e - 11 * D, e - 10 * D, e - 1 * D, e, e + 1 * D]
+
+    # 用真实 ET 盘中时刻测（不是午夜锚，避免测试与实现共享同一盲区）：
+    ts = [
+        et_ms(date(2026, 8, 9), 10),    # 距财报 11 个 ET 日 → False
+        et_ms(date(2026, 8, 10), 10),   # 恰 10 日 → True
+        et_ms(date(2026, 8, 19), 15),   # 前一日盘中 → True
+        et_ms(date(2026, 8, 20), 10),   # **财报当天 RTH → True（v3 的 P0：曾为 False）**
+        et_ms(date(2026, 8, 20), 21),   # 财报当天盘后 → True（AMC 发布前后同日保守含）
+        et_ms(date(2026, 8, 21), 10),   # 次日 → False
+    ]
     assert storage.earnings_event_windows(conn, "NVDA-USDT", ts) == \
-        [False, True, True, False, False]
-    assert storage.earnings_event_windows(conn, "AAPL-USDT", ts) == [False] * 5
+        [False, True, True, True, True, False]
+    assert storage.earnings_event_windows(conn, "AAPL-USDT", ts) == [False] * 6
+
+    # DST 跨越（2026-11-01 结束夏令时）：固定 240h 窗会漂移，ET 日差不会
+    conn2 = _mem_conn()
+    e2 = moomoo_iv.day_ms(date(2026, 11, 2))
+    storage.upsert_earnings(conn2, "moomoo", [
+        {"symbol": "NVDA-USDT", "ts": e2, "pub_type": None, "period": None}])
+    ts2 = [
+        et_ms(date(2026, 10, 22), 20),  # ET 日差 11 → False（毫秒口径曾误判 True）
+        et_ms(date(2026, 10, 23), 10),  # 恰 10 → True
+        et_ms(date(2026, 11, 1), 19),   # 前一日（DST 切换日）→ True（毫秒口径曾误判 False）
+    ]
+    assert storage.earnings_event_windows(conn2, "NVDA-USDT", ts2) == [False, True, True]
 
 
 def test_breadth_slot_respects_half_day_close():

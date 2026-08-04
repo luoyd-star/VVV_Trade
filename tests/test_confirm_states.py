@@ -34,7 +34,7 @@ def main() -> None:
     # ③ 恢复 range 3 根：第 3 根 raw=R 才确认；2 根时仍是旧态且报候选
     conf, cand = confirm_states([T, T, R, R])
     assert conf == [T, T, T, T], f"range 2 根就切了: {conf}"
-    assert cand == {"state": R, "count": 2, "need": 3, "event_win": False}, f"候选计数错: {cand}"
+    assert cand == {"state": R, "count": 2, "need": 3, "event_win": False, "gated": False}, f"候选计数错: {cand}"
     conf, cand = confirm_states([T, T, R, R, R])
     assert conf[-1] == R and conf[-2] == T, f"range 第 3 根应确认: {conf}"
     assert cand is None, f"确认恰在末根时 candidate 必须清空: {cand}"
@@ -48,7 +48,7 @@ def main() -> None:
     # ⑤ 抖动重置：A/B 来回跳时计数必须清零，永不凑数确认
     conf, cand = confirm_states([R, T, S, T, S, T, S])
     assert all(x == R for x in conf), f"抖动序列不该确认任何切换: {conf}"
-    assert cand == {"state": S, "count": 1, "need": 2, "event_win": False}, f"末端候选错: {cand}"
+    assert cand == {"state": S, "count": 1, "need": 2, "event_win": False, "gated": False}, f"末端候选错: {cand}"
     print("⑤ 抖动重置    T/S 交替 6 根零确认，候选停在 1/2 ✓")
 
     # ⑥ 回到当前态清空酝酿：T,T,R,R 后一根 T，候选必须归零
@@ -58,7 +58,7 @@ def main() -> None:
 
     # ⑦ 首根即当前态；chop 之后进 range 同样要 3 根
     conf, cand = confirm_states([C, R, R])
-    assert conf == [C, C, C] and cand == {"state": R, "count": 2, "need": 3, "event_win": False}
+    assert conf == [C, C, C] and cand == {"state": R, "count": 2, "need": 3, "event_win": False, "gated": False}
     print("⑦ 冲击后恢复  chop→range 同样吃 3 根迟滞 ✓")
 
     # ⑧ 输出与输入等长、空输入安全
@@ -101,7 +101,7 @@ def test_event_gate_v3():
 
     # ③ candidate 带事件标记与正确 need
     conf4, cand4 = confirm_states([S, S, T, T], event_win=[True] * 4)
-    assert cand4 == {"state": T, "count": 2, "need": 3, "event_win": True}, cand4
+    assert cand4 == {"state": T, "count": 2, "need": 3, "event_win": True, "gated": True}, cand4
 
     # ④ 门槛按**当根**的窗口状态判定：确认发生在窗外的那根按 2 根算
     seq5 = [S, S, T, T]

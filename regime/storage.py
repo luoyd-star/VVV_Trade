@@ -287,6 +287,19 @@ def upsert_ohlcv(conn, symbol: str, tf: str, df: pd.DataFrame, source: str) -> N
         # NaN 与 ±Inf 一并拒收：非有限值落库后，下一轮修订对账的
         # abs(a-b) 对 Inf 恒为 nan（比较为 False），旧状态永远不会被失效
         raise ValueError(f"{symbol} {tf} 行情含 NaN/Inf，拒绝入库（source={source}）")
+    # 源粘性（审计 4 路独立发现的潜伏 P0）：ohlcv 主键不含 source，主源宕机时
+    # 兜底源会把最近 ~300 根覆盖成另一交易所口径、更早历史仍是旧源——分位窗与
+    # 状态窗变成拼接序列。宁缺毋滥：序列已有既定源时，**拒绝**异源写入
+    #（一天没数据可接受，混口径序列不可接受）。换源必须走显式迁移（删序列重建）。
+    prev = conn.execute(
+        "SELECT source FROM ohlcv WHERE symbol=? AND tf=? AND source IS NOT NULL"
+        " ORDER BY ts DESC LIMIT 1", (symbol, tf),
+    ).fetchone()
+    if prev and prev[0] and prev[0] != source:
+        raise ValueError(
+            f"{symbol} {tf} 拒绝混源写入：序列既定源={prev[0]}，本次={source}"
+            "（源粘性纪律；换源须显式迁移）"
+        )
     _assert_grid(conn, symbol, tf, ts_to_ms(df["ts"]), source)
     rows = [
         (symbol, tf, int(t), float(o), float(h), float(l), float(c), float(v), source)
@@ -371,8 +384,11 @@ def state_ts_set(conn, symbol: str, tf: str, version: str = None,
     return {r[0] for r in rows}
 
 
-def upsert_states(conn, symbol: str, tf: str, rows) -> None:
-    """rows: (ts_ms, state, confidence, features_json, rules_json, version, audit_version)。"""
+def upsert_states(conn, symbol: str, tf: str, rows, commit: bool = True) -> None:
+    """rows: (ts_ms, state, confidence, features_json, rules_json, version, audit_version)。
+
+    commit=False 供 collector 把"写 raw + 迟滞确认"合成单事务——两次独立提交之间
+    的中间态会让面板把未确认的 raw 冒充确认态（审计 3 路独立发现），崩溃则残留到下一轮。"""
     conn.executemany(
         "INSERT INTO regime_history(symbol,tf,ts,state,raw_state,confidence,features,rules,version,audit_version)"
         " VALUES(?,?,?,?,?,?,?,?,?,?)"
@@ -386,16 +402,18 @@ def upsert_states(conn, symbol: str, tf: str, rows) -> None:
             for t, s, c, f, ru, v, av in rows
         ],
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def set_confirmed(conn, symbol: str, tf: str, pairs) -> None:
+def set_confirmed(conn, symbol: str, tf: str, pairs, commit: bool = True) -> None:
     """pairs: (confirmed_state, ts_ms)——把迟滞折叠后的确认态写回 state 列。"""
     conn.executemany(
         "UPDATE regime_history SET state=? WHERE symbol=? AND tf=? AND ts=?",
         [(s, symbol, tf, int(t)) for s, t in pairs],
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_states(conn, symbol: str, tf: str, limit: int = 600):
@@ -803,11 +821,26 @@ def earnings_event_windows(conn, symbol: str, ts_list, horizon_days: int = 10,
     if not rows:
         return [False] * len(ts_list)
     import numpy as np
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
 
-    ed = np.array([r[0] for r in rows], dtype="int64")
-    ts = np.asarray(list(ts_list), dtype="int64")[:, None]
-    h = int(horizon_days) * 86_400_000
-    return ((ed[None, :] > ts) & (ed[None, :] <= ts + h)).any(axis=1).tolist()
+    # **必须按 ET 日历日比较，不能按 UTC 毫秒**（v3.1 修复，6 路审计独立发现）：
+    # 财报 ts 锚在其日期 00:00 UTC，毫秒严格比较 `ed > bar_ts` 会把**财报当天整天**
+    # 排除在窗外——恰是开盘跳空/流动性最差、最需要门槛的一天；且固定 240h 窗口
+    # 在跨 DST 时与 ET 日历差漂移 1 小时。日差语义：0 ≤ (财报日 − bar 的 ET 日) ≤ horizon，
+    # 含第 0 天（盘后财报发布前的当日 RTH 正在窗内）。
+    et = ZoneInfo("America/New_York")
+    e_days = np.array(
+        [_dt.fromtimestamp(r[0] / 1000, tz=_tz.utc).date().toordinal() for r in rows],
+        dtype="int64",
+    )
+    b_days = np.array(
+        [_dt.fromtimestamp(int(t) / 1000, tz=et).date().toordinal() for t in ts_list],
+        dtype="int64",
+    )
+    diff = e_days[None, :] - b_days[:, None]
+    return ((diff >= 0) & (diff <= int(horizon_days))).any(axis=1).tolist()
 
 
 def prune_stale_future_earnings(conn, source: str, symbols, start_ts: int,
@@ -817,13 +850,25 @@ def prune_stale_future_earnings(conn, source: str, symbols, start_ts: int,
     codex 审计：财报从 8-20 改到 8-21 时旧行永久残留，继续参与邻近度与条件分位。
     只清**未来**（start_ts 应 ≥ 今天）——历史行是既成事实永不触碰；
     对未改动的行不做删+插（保住 known_at 的 point-in-time 语义）。
+
+    **fail-safe 边界**（第二轮审计，3 路独立发现）：接口"成功但静默空缺"时不得
+    把有效日历当改期删除——① fresh 为空整体跳过；② 只对 **fresh 里出现过的品种**
+    做清理（品种级 fail-open 保护：厂商漏了某品种，就不动它的旧行）。
+    代价是"某品种唯一未来财报被撤销"的旧行要等它再次出现在日历里才清——
+    宁可残留，不可误删（删除不可恢复）。
     """
+    if not fresh_rows:
+        return 0
     keep = {(r["symbol"], int(r["ts"])) for r in fresh_rows}
+    fresh_syms = {r["symbol"] for r in fresh_rows}
+    prunable = [s for s in symbols if s in fresh_syms]
+    if not prunable:
+        return 0
     stale = [
         (s, t) for s, t in conn.execute(
             f"SELECT symbol, ts FROM earnings WHERE source=? AND ts BETWEEN ? AND ?"
-            f" AND symbol IN ({','.join('?' * len(symbols))})",
-            (source, int(start_ts), int(end_ts), *symbols),
+            f" AND symbol IN ({','.join('?' * len(prunable))})",
+            (source, int(start_ts), int(end_ts), *prunable),
         ).fetchall()
         if (s, int(t)) not in keep
     ]

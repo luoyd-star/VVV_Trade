@@ -38,7 +38,8 @@ def main() -> int:
         print(f"✗ OpenD 未在 {moomoo_iv.HOST}:{moomoo_iv.PORT} 监听")
         return 1
 
-    today = date.today()
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo('America/New_York')).date()   # ET 日历日
     begin = today.isoformat() if args.forward else moomoo_iv.DATA_FLOOR
     end = (today + timedelta(days=90)).isoformat()
     symbols = us_symbols()
