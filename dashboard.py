@@ -275,12 +275,18 @@ def _stock_iv_block(conn, symbol: str):
     n = int(len(s))
     rank = round(float((win < last).mean()), 3) if n >= IV_RANK_MIN else None
     hv = df[["ts", "hv"]].dropna()
+    # 财报邻近度：实测事前峰→事后谷崩塌 38%、占分位分母 9.9%。分母不清洗（财报是该股
+    # IV 分布的结构性部分），但当下读数必须标注——否则日程驱动的高分位会被读成市场压力。
+    earn = storage.earnings_proximity(
+        conn, symbol, int(time.time() * 1000)
+    )
     return {
         "source": moomoo_iv.SOURCE,
         "last": round(last, 2),
         "rank": rank,
         "n": n,
         "win": int(len(win)),
+        "earnings_days": earn["days"] if earn else None,
         "days": round((int(s["ts"].iloc[-1]) - int(s["ts"].iloc[0])) / 86_400_000, 0),
         "series": [[int(t), round(float(v), 2)] for t, v in zip(s["ts"], s["iv"])][-365:],
         "hv_last": round(float(hv["hv"].iloc[-1]), 2) if len(hv) else None,

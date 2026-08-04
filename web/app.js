@@ -673,8 +673,12 @@ function renderUsvol(uv, meta, c) {
   const rankTxt = iv && iv.rank != null
     ? `分位 ${fmtN(iv.rank, 2)}`
     : `样本 ${iv ? iv.n : 0}d·分位不足`;
+  // 财报邻近度：分位在财报窗内是日程驱动而非市场压力，必须标出来
+  const ed = iv && iv.earnings_days;
+  const earnTxt = ed == null ? ''
+    : ed > 0 ? ` ⚑财报还有${ed}日` : ed < 0 ? ` ⚑财报已过${-ed}日` : ' ⚑今日财报';
   const bits = [
-    iv ? `个股IV ${fmtN(iv.last, 1)}（${rankTxt}）` : '个股IV 未回填',
+    iv ? `个股IV ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
     `RV30 ${fmtN(uv.rv_last, 1)}`,
     uv.spread == null ? null
       : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,

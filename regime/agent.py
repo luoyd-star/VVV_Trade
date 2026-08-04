@@ -184,10 +184,15 @@ def render_context(p: dict) -> str:
         # 个股 IV 主线（moomoo 3.1 年史，分位可用）；无回填时才退回 CBOE 短史影子值
         _iv = uv.get("iv")
         if _iv:
+            _ed = _iv.get("earnings_days")
+            _etxt = ("" if _ed is None else
+                     f",⚑财报{'还有' if _ed > 0 else '已过'}{abs(_ed)}日"
+                     f"(该分位含事件成分,非市场压力)" if _ed else ",⚑今日财报")
             iv30_txt = (
                 f"个股IV={_iv['last']}"
-                + (f"(自身{_iv['win']}日分位{_iv['rank']})" if _iv.get("rank") is not None
-                   else f"(样本仅{_iv['n']}日,分位不足)")
+                + (f"(自身{_iv['win']}日分位{_iv['rank']}{_etxt})"
+                   if _iv.get("rank") is not None
+                   else f"(样本仅{_iv['n']}日,分位不足{_etxt})")
             )
         elif uv.get("iv30_last") is not None:
             iv30_txt = f"个股iv30={uv['iv30_last']}(CBOE自采{uv['iv30_days']}天,历史短勿看分位)"

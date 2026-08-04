@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS stock_option_stat(
   option_oi REAL, call_oi REAL, put_oi REAL, pc_oi_ratio REAL,
   PRIMARY KEY(symbol, ts, source)
 );
+CREATE TABLE IF NOT EXISTS earnings(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
+  pub_type TEXT, period TEXT,
+  PRIMARY KEY(symbol, ts, source)
+);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -632,6 +637,41 @@ def get_stock_option_stat(conn, symbol: str, source: str, limit: int = 1500) -> 
         params=(symbol, source, limit),
     )
     return df.iloc[::-1].reset_index(drop=True)
+
+
+def upsert_earnings(conn, source: str, rows) -> None:
+    """财报日历。rows: dict(symbol, ts, pub_type, period)。
+
+    存在的理由不是预测财报，而是**给 IV 分位标注事件邻近度**：实测 NVDA 财报
+    事前峰→事后谷崩塌 38%，占分位分母 9.9%（docs/EARNINGS_IV_CONTAMINATION_20260804.md）。
+    分母不清洗（财报是该股 IV 分布的结构性部分），但当下读数须标注。
+    """
+    conn.executemany(
+        "INSERT INTO earnings(symbol,ts,source,pub_type,period) VALUES(?,?,?,?,?)"
+        " ON CONFLICT(symbol,ts,source) DO UPDATE SET"
+        " pub_type=COALESCE(excluded.pub_type,pub_type),"
+        " period=COALESCE(excluded.period,period)",
+        [(r["symbol"], int(r["ts"]), source, r.get("pub_type"), r.get("period"))
+         for r in rows],
+    )
+    conn.commit()
+
+
+def earnings_proximity(conn, symbol: str, now_ms: int, horizon: int = 10) -> dict | None:
+    """距最近财报的天数：{"days": ±N, "when": "前/后", "ts": ...}，超出 horizon 返回 None。
+
+    负数=财报已过 N 天，正数=还有 N 天。给面板与 Hermes 在 IV 读数旁挂提示用。
+    """
+    row = conn.execute(
+        "SELECT ts FROM earnings WHERE symbol=?"
+        " ORDER BY ABS(ts-?) LIMIT 1", (symbol, now_ms),
+    ).fetchone()
+    if not row:
+        return None
+    days = round((row[0] - now_ms) / 86_400_000)
+    if abs(days) > horizon:
+        return None
+    return {"days": int(days), "ts": int(row[0])}
 
 
 def stock_vol_latest_ranks(conn, source: str, win: int = 252, min_n: int = 120) -> dict:

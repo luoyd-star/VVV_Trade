@@ -157,6 +157,43 @@ def fetch_option_stat(ctx, symbol: str, begin: str, end: str) -> list:
     return [rows[k] for k in sorted(rows)]
 
 
+def fetch_earnings(ctx, symbols, begin: str, end: str) -> list:
+    """财报日历 → [{symbol, ts, pub_type, period}]，只保留我们宇宙内的品种。
+
+    接口**单次窗口上限 7 天**（超出报错），故按 7 天分段；一次返回全市场约 1700 行/周，
+    在本地按 symbol 过滤比逐品种查快得多。
+    """
+    from moomoo import RET_OK
+
+    want = {to_moomoo(s): s for s in symbols}
+    b, e = date.fromisoformat(begin), date.fromisoformat(end)
+    out: dict[tuple, dict] = {}
+    seg = b
+    while seg <= e:
+        seg_end = min(seg + timedelta(days=6), e)
+        ret, data = ctx.get_earnings_calendar(
+            "US", begin_date=seg.isoformat(), end_date=seg_end.isoformat()
+        )
+        time.sleep(PACE)
+        if ret != RET_OK:
+            raise RuntimeError(f"earnings_calendar {seg}~{seg_end}: {data}")
+        for _, r in data.iterrows():
+            sym = want.get(r.get("security"))
+            if sym is None:
+                continue
+            try:
+                d = date.fromisoformat(str(r["earnings_date"])[:10])
+            except (TypeError, ValueError):
+                continue
+            out[(sym, day_ms(d))] = {
+                "symbol": sym, "ts": day_ms(d),
+                "pub_type": str(r.get("pub_type") or "") or None,
+                "period": str(r.get("period_text") or "") or None,
+            }
+        seg = seg_end + timedelta(days=1)
+    return sorted(out.values(), key=lambda x: (x["symbol"], x["ts"]))
+
+
 def _num(v):
     """数值化；'N/A'、None、NaN 一律 None——绝不让占位字符串变成 0。"""
     try:

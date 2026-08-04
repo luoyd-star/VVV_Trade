@@ -134,6 +134,42 @@ def test_optstat_source_isolated_and_coalesced():
     assert storage.get_stock_option_stat(conn, "NVDA-USDT", "cboe").empty
 
 
+def test_earnings_proximity_sign_and_horizon():
+    """邻近度：正=未来、负=已过、超出 horizon 返回 None。
+
+    符号搞反会让"财报已过"被读成"财报将至"——对 IV 解释是相反的方向
+    （事前隐波堆积 vs 事后崩塌）。
+    """
+    conn = _mem_conn()
+    t0 = moomoo_iv.day_ms(date(2026, 8, 20))
+    storage.upsert_earnings(conn, "moomoo", [
+        {"symbol": "NVDA-USDT", "ts": t0, "pub_type": "AFTER", "period": "2026Q2"},
+    ])
+    now = moomoo_iv.day_ms(date(2026, 8, 17))
+    p = storage.earnings_proximity(conn, "NVDA-USDT", now)
+    assert p is not None and p["days"] == 3, "未来财报应为正数"
+
+    after = moomoo_iv.day_ms(date(2026, 8, 24))
+    p2 = storage.earnings_proximity(conn, "NVDA-USDT", after)
+    assert p2 is not None and p2["days"] == -4, "已过财报应为负数"
+
+    far = moomoo_iv.day_ms(date(2026, 9, 30))
+    assert storage.earnings_proximity(conn, "NVDA-USDT", far) is None, "超出窗口应为 None"
+    assert storage.earnings_proximity(conn, "AAPL-USDT", now) is None, "无记录应为 None"
+
+
+def test_earnings_picks_nearest_not_first():
+    """多个财报日时取**距今最近**的那个，不是最早或最晚的。"""
+    conn = _mem_conn()
+    for d in (date(2026, 2, 20), date(2026, 5, 20), date(2026, 8, 20)):
+        storage.upsert_earnings(conn, "moomoo", [
+            {"symbol": "NVDA-USDT", "ts": moomoo_iv.day_ms(d), "pub_type": None, "period": None},
+        ])
+    now = moomoo_iv.day_ms(date(2026, 8, 18))
+    p = storage.earnings_proximity(conn, "NVDA-USDT", now)
+    assert p["days"] == 2, f"应取 8-20 那个（+2 天），实得 {p}"
+
+
 if __name__ == "__main__":
     import pytest
 
