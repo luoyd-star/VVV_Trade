@@ -594,6 +594,29 @@ def get_stock_vol(conn, symbol: str, source: str, limit: int = 1500) -> pd.DataF
     return df.iloc[::-1].reset_index(drop=True)
 
 
+def stock_vol_latest_ranks(conn, source: str, win: int = 252, min_n: int = 120) -> dict:
+    """全品种最新 IV 与其自身分位：{symbol: (iv, rank|None, n)}。一次查询算完。
+
+    给 Hermes 横截面用——逐品种查会是 31 次往返。样本不足 min_n 的不给分位
+    （与面板 _stock_iv_block 同一纪律：新股宁可空着也不给假统计量）。
+    """
+    df = pd.read_sql_query(
+        "SELECT symbol, ts, iv FROM stock_vol WHERE source=? AND iv IS NOT NULL"
+        " ORDER BY symbol, ts",
+        conn,
+        params=(source,),
+    )
+    out = {}
+    for sym, g in df.groupby("symbol"):
+        n = len(g)
+        last = float(g["iv"].iloc[-1])
+        w = g["iv"].tail(win)
+        out[sym] = (round(last, 2),
+                    round(float((w < last).mean()), 3) if n >= min_n else None,
+                    n)
+    return out
+
+
 def stock_vol_coverage(conn, source: str) -> pd.DataFrame:
     """每个品种在该口径下的覆盖情况（行数/起止），供面板与运维体检用。"""
     return pd.read_sql_query(

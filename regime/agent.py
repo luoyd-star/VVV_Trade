@@ -339,6 +339,22 @@ def overview_brief() -> str:
             lines.append(sym + " | " + " | ".join(
                 f"{tf}: {tfs[tf]}" for tf in ("1d", "4h", "1h") if tf in tfs))
         try:
+            # 个股隐波横截面（moomoo 口径，3.1 年史）：让 Hermes 能横向比"谁的隐波
+            # 相对自己历史贵/便宜"——这是 VXN 代理时代给不了的。分位为空=样本不足。
+            conn2 = storage.connect_ro()
+            try:
+                ivs = storage.stock_vol_latest_ranks(conn2, "moomoo")
+            finally:
+                conn2.close()
+            if ivs:
+                seg = " ".join(
+                    f"{s.split('-')[0]}:{v:.0f}"
+                    + (f"%{r:.2f}" if r is not None else f"(n{n})")
+                    for s, (v, r, n) in sorted(ivs.items()))
+                lines.append(f"个股隐波(IV，%后为自身252日分位；moomoo口径不与VIX混比): {seg}")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             # 耦合雷达一行摘要（M3 诊断层；运行时导入避免环依赖，失败静默省略）
             from dashboard import coupling_payload
             cp = coupling_payload()

@@ -287,6 +287,30 @@ def _stock_iv_block(conn, symbol: str):
     }
 
 
+def _iv30_fields(conn, symbol: str, cboe_last, cboe_hourly, spans) -> dict:
+    """deriv 卡的个股 IV 三元组：优先 moomoo 正牌序列，退化 CBOE 影子值。
+
+    分开写是因为两条路的分位口径不同：moomoo 是 252 交易日窗的日频分位，
+    CBOE 是小时重采样后的短窗分位（样本不足时本就返回 None）。混在一个表达式里
+    迟早会有人把两者的分位当同一个统计量。
+    """
+    blk = _stock_iv_block(conn, symbol)
+    if blk:
+        return {"iv30": blk["last"], "iv30_rank": blk["rank"], "iv30_src": blk["source"]}
+    return {
+        "iv30": round(cboe_last, 1) if cboe_last is not None else None,
+        "iv30_rank": _rank_or_none(cboe_hourly, cboe_last, spans),
+        "iv30_src": "cboe" if cboe_last is not None else None,
+    }
+
+
+def _rank_or_none(hourly, current, spans):
+    s = hourly["iv30"].dropna() if len(hourly) else hourly
+    if current is None or not len(s) or len(s) < 20 or spans["iv30"] < 7:
+        return None
+    return round(float((s < current).mean()), 3)
+
+
 def _usvol_payload(conn, symbol: str):
     """美股波动率维度：**个股自身 IV 为主线** + CBOE 指数 IV 作长历史锚 + 自算 RV30 + 期限结构。
 
@@ -462,8 +486,9 @@ def _deriv_payload(conn, symbol: str):
             float(taker_h["taker_ratio"].iloc[-1]) if len(taker_h) else None,
             spans["taker"],
         ),
-        "iv30": round(iv30, 1) if iv30 is not None else None,
-        "iv30_rank": rank_of(iv30_h["iv30"], iv30, spans["iv30"]),
+        # 个股 IV：有 moomoo 正牌序列（3.1 年）就用它及其真实分位；退化到 CBOE 自采
+        # 影子值（仅几天，分位必被 20 样本闸挡成 None）。iv30_src 让前端能说清口径。
+        **_iv30_fields(conn, symbol, iv30, iv30_h, spans),
         "spans": spans,
         "span_days": spans["oi"],          # 兼容旧前端字段：持仓图的核心序列是 OI
         "warmup": bool(spans["oi"] < 21),  # 预热指"持仓维度"（OI 侧），逐指标看 spans
