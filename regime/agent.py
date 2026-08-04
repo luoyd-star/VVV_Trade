@@ -58,8 +58,10 @@ margin=到最近可翻转状态边界的距离（<0.15 表示状态处于边界�
 与滞后确认的"酝酿中"互补）。这组读数滞后约60根（窗口120的一半），解读时注意。
 美股永续专属：ATR%ds=按(小时,是否周末)桶去季节化后的 ATR 分位（影子字段，不参与判定）
 ——与 ATR% 分歧大说明当前读数主要是时段效应（盘中/盘外/周末）而非真实波动状态变化；
-指数IV=CBOE 板块波动率指数（个股映射 VXN=纳指100、SPY 映射 VIX），个股iv30 为
-CBOE 延迟报价自采（历史短则分位不可用），期限结构9D/3M>1 表示近端恐慌（倒挂）。
+个股IV=该标的自身的 30 天隐含波动率（moomoo 口径，2023-06 起约 3.1 年史），
+其分位是**与自己历史比**（252 交易日窗）——绝对值高低跨品种不可比，分位才可比；
+指数IV=CBOE 板块指数（VXN=纳指100 / VIX），仅作长周期锚，**不与个股IV混算分位**
+（两者口径不同源）；期限结构9D/3M>1 表示近端恐慌（倒挂）。
 </panel_legend>"""
 
 
@@ -179,12 +181,18 @@ def render_context(p: dict) -> str:
         )
     uv = p.get("usvol")
     if uv:
-        _ivr = (p.get("deriv") or {}).get("iv30_rank")
-        iv30_txt = (
-            (f"个股iv30={uv['iv30_last']}(自采{uv['iv30_days']}天"
-             + (f",分位{_ivr}" if _ivr is not None else ",历史短勿看分位") + ")")
-            if uv.get("iv30_last") is not None else "个股iv30=采集中"
-        )
+        # 个股 IV 主线（moomoo 3.1 年史，分位可用）；无回填时才退回 CBOE 短史影子值
+        _iv = uv.get("iv")
+        if _iv:
+            iv30_txt = (
+                f"个股IV={_iv['last']}"
+                + (f"(自身{_iv['win']}日分位{_iv['rank']})" if _iv.get("rank") is not None
+                   else f"(样本仅{_iv['n']}日,分位不足)")
+            )
+        elif uv.get("iv30_last") is not None:
+            iv30_txt = f"个股iv30={uv['iv30_last']}(CBOE自采{uv['iv30_days']}天,历史短勿看分位)"
+        else:
+            iv30_txt = "个股IV=未回填"
         ts_txt = (
             f" 期限结构9D/3M={uv['ts_ratio']}" + ("(倒挂,近端恐慌)" if uv["ts_ratio"] > 1 else "")
             if uv.get("ts_ratio") is not None else ""
@@ -192,7 +200,9 @@ def render_context(p: dict) -> str:
         lines.append(
             f"美股波动率: {uv['index']}={uv['index_last']}(一年分位{uv['index_rank']}) "
             f"RV30={uv['rv_last']}"
-            + (f" 指数IV−RV={uv['spread']:+.1f}pt" if uv.get("spread") is not None else "")
+            # 标签须跟着 spread_src 走：值来自个股 IV 却标"指数IV−RV"会误导读者
+            + (f" {'个股' if uv.get('spread_src') == 'stock' else '指数'}IV−RV="
+               f"{uv['spread']:+.1f}pt" if uv.get("spread") is not None else "")
             + f" {iv30_txt}{ts_txt}"
         )
     dr = p.get("deriv")
