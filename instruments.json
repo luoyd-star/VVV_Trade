@@ -30,6 +30,7 @@
 
   "COIN-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["crypto_linked"], "valid_from": "2026-08-04", "display": "Coinbase", "vol_index": "VXN" },
   "MSTR-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["crypto_linked"], "valid_from": "2026-08-04", "display": "Strategy", "vol_index": "VXN" },
+  "CRCL-USDT": { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["crypto_linked", "stablecoin"], "valid_from": "2026-08-04", "display": "Circle", "vol_index": "VIX" },
 
   "QQQ-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["broad_index"], "valid_from": "2026-08-04", "display": "纳指100 ETF", "vol_index": "VXN" },
   "SPY-USDT":  { "class": "us_stock_perp", "sources": ["binance_futures"], "pool": "core", "theme": ["broad_index"], "valid_from": "2026-08-04", "display": "标普500 ETF", "vol_index": "VIX" },
