@@ -41,7 +41,8 @@ LAG_BARS = {
 #   v1 按 0 计入，|direction| 上限降到 0.90 却仍比同一个 0.30 阈值——
 #   同样的结构，短历史品种被系统性压低了趋势判定概率（50.8% 的行受影响）。
 #   阈值三件套（0.60/0.30/0.10）与规则树结构未动，仍待回测校准。
-RULES_VERSION = "v2"
+RULES_VERSION = "v3"   # v3（2026-08-05）：A1 事件感知确认门槛——事件窗内 squeeze→趋势 +1 根
+                       # 测量层 classify() 未变，只动确认层；升版触发全量重算（版本谓词）
 
 # 审计特征集版本：features JSON 的键集或口径一变就递增（规则可以不变）。
 # 两个版本都进入 state_ts_set 的跳过谓词：任一不匹配的行视为"缺失"、
@@ -178,25 +179,41 @@ def classify(struct: dict, vol: dict, volu: dict, er_rank: float) -> Regime:
     return Regime(state, round(conf, 2), features, rules=rules)
 
 
-def _confirm_need(state: str) -> int:
-    """非对称迟滞：冲击态立即；恢复震荡（≈NORMAL）要 3 根；其余 2 根。"""
+def _confirm_need(state: str, from_state: str = None, event_win: bool = False) -> int:
+    """非对称迟滞：冲击态立即；恢复震荡（≈NORMAL）要 3 根；其余 2 根。
+
+    v3 事件门槛（A1）：**事件窗内（未来 10 日历日有财报）从 squeeze 进趋势态 +1 根**。
+    依据：① 外部实证——压缩态+财报窗未来 10 日扩张概率 60.6% vs 21.4%（2.83×，
+    15/17 品种同向），事件驱动的扩张多为双向脉冲而非趋势诞生；② 本地诊断
+    （2026-08-05，docs/A1_EVENT_GATE_20260805.md）——事件窗内 squeeze→趋势确认的
+    10 根失败率 83.8% vs 77.2%（1h）、80% vs 72%（4h），真趋势率 16.2% vs 22.8%，
+    方向一致但 z≈0.9 未达显著（样本仅 2 个财报周期）——故门槛取**最小强度 +1 根**，
+    属版本化先验；预登记复评：窗内转换样本 ≥100 时由每周复跑重估。
+    冲击态（high_vol_chop）不受门槛：对波动冲击的响应速度不能慢。
+    """
     if state == "high_vol_chop":
         return 1
-    if state == "range":
-        return 3
-    return 2
+    need = 3 if state == "range" else 2
+    if (event_win and from_state == "squeeze"
+            and state in ("trend_up", "trend_down")):
+        need += 1
+    return need
 
 
-def confirm_states(raw_states):
+def confirm_states(raw_states, event_win=None):
     """把逐根 raw 状态序列折叠成确认态序列（非对称迟滞）。
 
+    event_win：与 raw_states 等长的 bool 列表（该 bar 起 10 日历日内有财报），
+    None = 无事件数据（加密/商品），行为与 v2 完全一致。
     返回 (confirmed_list, candidate)：candidate 是序列末端酝酿中的切换
-    {"state", "count", "need"}，尚未达到确认根数时非 None。
+    {"state", "count", "need", "event_win"}，尚未达到确认根数时非 None。
     """
     confirmed = []
     cur = None
     pending, count = None, 0
-    for raw in raw_states:
+    last_win = False
+    for i, raw in enumerate(raw_states):
+        last_win = bool(event_win[i]) if event_win is not None else False
         if cur is None:
             cur = raw
         elif raw == cur:
@@ -206,13 +223,17 @@ def confirm_states(raw_states):
                 count += 1
             else:
                 pending, count = raw, 1
-            if count >= _confirm_need(raw):
+            if count >= _confirm_need(raw, from_state=cur, event_win=last_win):
                 cur = raw
                 pending, count = None, 0
         confirmed.append(cur)
     candidate = None
     if pending is not None:
-        candidate = {"state": pending, "count": count, "need": _confirm_need(pending)}
+        candidate = {
+            "state": pending, "count": count,
+            "need": _confirm_need(pending, from_state=cur, event_win=last_win),
+            "event_win": last_win,
+        }
     return confirmed, candidate
 
 

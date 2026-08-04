@@ -34,7 +34,7 @@ def main() -> None:
     # ③ 恢复 range 3 根：第 3 根 raw=R 才确认；2 根时仍是旧态且报候选
     conf, cand = confirm_states([T, T, R, R])
     assert conf == [T, T, T, T], f"range 2 根就切了: {conf}"
-    assert cand == {"state": R, "count": 2, "need": 3}, f"候选计数错: {cand}"
+    assert cand == {"state": R, "count": 2, "need": 3, "event_win": False}, f"候选计数错: {cand}"
     conf, cand = confirm_states([T, T, R, R, R])
     assert conf[-1] == R and conf[-2] == T, f"range 第 3 根应确认: {conf}"
     assert cand is None, f"确认恰在末根时 candidate 必须清空: {cand}"
@@ -48,7 +48,7 @@ def main() -> None:
     # ⑤ 抖动重置：A/B 来回跳时计数必须清零，永不凑数确认
     conf, cand = confirm_states([R, T, S, T, S, T, S])
     assert all(x == R for x in conf), f"抖动序列不该确认任何切换: {conf}"
-    assert cand == {"state": S, "count": 1, "need": 2}, f"末端候选错: {cand}"
+    assert cand == {"state": S, "count": 1, "need": 2, "event_win": False}, f"末端候选错: {cand}"
     print("⑤ 抖动重置    T/S 交替 6 根零确认，候选停在 1/2 ✓")
 
     # ⑥ 回到当前态清空酝酿：T,T,R,R 后一根 T，候选必须归零
@@ -58,7 +58,7 @@ def main() -> None:
 
     # ⑦ 首根即当前态；chop 之后进 range 同样要 3 根
     conf, cand = confirm_states([C, R, R])
-    assert conf == [C, C, C] and cand == {"state": R, "count": 2, "need": 3}
+    assert conf == [C, C, C] and cand == {"state": R, "count": 2, "need": 3, "event_win": False}
     print("⑦ 冲击后恢复  chop→range 同样吃 3 根迟滞 ✓")
 
     # ⑧ 输出与输入等长、空输入安全
@@ -73,8 +73,48 @@ def main() -> None:
     print("\n全部通过 ✓")
 
 
+def test_event_gate_v3():
+    """v3 事件门槛：**只**对事件窗内 squeeze→趋势 +1 根，其余全部不变。"""
+    from regime.classify import _confirm_need, confirm_states
+
+    S, T, D, C, R = "squeeze", "trend_up", "trend_down", "high_vol_chop", "range"
+
+    # ① 门槛函数逐分支
+    assert _confirm_need(T, from_state=S, event_win=True) == 3, "窗内 S→T 应为 3"
+    assert _confirm_need(D, from_state=S, event_win=True) == 3, "窗内 S→D 应为 3"
+    assert _confirm_need(T, from_state=S, event_win=False) == 2, "窗外 S→T 保持 2"
+    assert _confirm_need(T, from_state=R, event_win=True) == 2, "窗内 R→T 不受门槛"
+    assert _confirm_need(C, from_state=S, event_win=True) == 1, "冲击态永远立即"
+    assert _confirm_need(R, from_state=S, event_win=True) == 3, "S→R 保持 3"
+
+    # ② 序列语义：窗内 2 根 T 不足以确认，第 3 根才确认
+    seq = [S, S, T, T, T]
+    win = [True] * 5
+    conf, cand = confirm_states(seq, event_win=win)
+    assert conf == [S, S, S, S, T], f"窗内应第 3 根 T 才确认: {conf}"
+    # 同序列窗外：第 2 根 T 即确认（v2 行为）
+    conf2, _ = confirm_states(seq, event_win=[False] * 5)
+    assert conf2 == [S, S, S, T, T], f"窗外应保持 v2 行为: {conf2}"
+    # event_win=None 与窗外完全一致（加密/商品路径）
+    conf3, _ = confirm_states(seq)
+    assert conf3 == conf2, "None 必须与 v2 完全一致"
+
+    # ③ candidate 带事件标记与正确 need
+    conf4, cand4 = confirm_states([S, S, T, T], event_win=[True] * 4)
+    assert cand4 == {"state": T, "count": 2, "need": 3, "event_win": True}, cand4
+
+    # ④ 门槛按**当根**的窗口状态判定：确认发生在窗外的那根按 2 根算
+    seq5 = [S, S, T, T]
+    win5 = [True, True, True, False]   # 最后一根已出窗
+    conf5, _ = confirm_states(seq5, event_win=win5)
+    assert conf5 == [S, S, S, T], f"确认根在窗外应按 2 根确认: {conf5}"
+
+    print("v3 事件门槛全分支 ✓")
+
+
 if __name__ == "__main__":
     main()
+    test_event_gate_v3()
 
 
 def test_all():

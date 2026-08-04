@@ -111,7 +111,16 @@ def _tf_payload(conn, symbol: str, tf: str):
     raw_now = states[-1]["raw_state"] if states else reg.state
     candidate = None
     if states:
-        _, candidate = confirm_states([r["raw_state"] for r in states])
+        # v3：美股品种传事件窗——与 collector 的确认路径**必须同参**，否则面板
+        # 候选的 need 与库内确认逻辑不一致（显示 2/2 却迟迟不切）
+        ewin = None
+        if instruments.get(symbol).get("class") == "us_stock_perp":
+            ewin = storage.earnings_event_windows(
+                conn, symbol, [r["ts"] for r in states]
+            )
+            if not any(ewin):
+                ewin = None
+        _, candidate = confirm_states([r["raw_state"] for r in states], event_win=ewin)
     ts_to_idx = {t: i for i, t in enumerate(ts_ms)}
     segments = []
     for srow in states:

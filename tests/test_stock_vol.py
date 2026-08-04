@@ -541,6 +541,19 @@ def test_numeric_cleaners_reject_inf():
     assert storage._f(1.5) == 1.5
 
 
+def test_earnings_event_windows_boundaries():
+    """事件窗：恰 10 日在窗内；当日（ts==财报日）不算"未来"；已过不算；无记录全 False。"""
+    conn = _mem_conn()
+    e = moomoo_iv.day_ms(date(2026, 8, 20))
+    storage.upsert_earnings(conn, "moomoo", [
+        {"symbol": "NVDA-USDT", "ts": e, "pub_type": None, "period": None}])
+    D = 86_400_000
+    ts = [e - 11 * D, e - 10 * D, e - 1 * D, e, e + 1 * D]
+    assert storage.earnings_event_windows(conn, "NVDA-USDT", ts) == \
+        [False, True, True, False, False]
+    assert storage.earnings_event_windows(conn, "AAPL-USDT", ts) == [False] * 5
+
+
 def test_breadth_slot_respects_half_day_close():
     """半日市（收 13:00）：12:50 是近收盘槽、15:50 不是。"""
     from datetime import datetime, time as dtime

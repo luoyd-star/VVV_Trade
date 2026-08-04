@@ -786,6 +786,30 @@ def upsert_earnings(conn, source: str, rows) -> None:
     conn.commit()
 
 
+def earnings_event_windows(conn, symbol: str, ts_list, horizon_days: int = 10,
+                           source: str = "moomoo") -> list:
+    """逐 bar 判定：该时刻起 horizon_days 个日历日内是否有财报。→ list[bool]。
+
+    给确认层的事件门槛用（RULES_VERSION v3）。**point-in-time 说明**：
+    对 ≤10 日的前瞻窗，"财报日期在 t 时刻已知"是极强先验——财报日期通常提前
+    数周至数月公布，最后 10 天内改期极罕见。earnings.known_at 对新写入行记录
+    首见时刻；历史回填行为 NULL（事后回填），本函数不按 known_at 过滤——
+    这是**记录在案的先验**而非疏漏（docs/AUDIT_CODEX_20260805.md 处置项）。
+    若日后要求严格 as-of，收紧点只在此一处。
+    """
+    rows = conn.execute(
+        "SELECT ts FROM earnings WHERE symbol=? AND source=?", (symbol, source),
+    ).fetchall()
+    if not rows:
+        return [False] * len(ts_list)
+    import numpy as np
+
+    ed = np.array([r[0] for r in rows], dtype="int64")
+    ts = np.asarray(list(ts_list), dtype="int64")[:, None]
+    h = int(horizon_days) * 86_400_000
+    return ((ed[None, :] > ts) & (ed[None, :] <= ts + h)).any(axis=1).tolist()
+
+
 def prune_stale_future_earnings(conn, source: str, symbols, start_ts: int,
                                 end_ts: int, fresh_rows) -> int:
     """未来窗口内以最新日历为权威：删掉本批品种在窗内、但不在最新日历里的行。

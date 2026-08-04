@@ -534,9 +534,20 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     ).fetchone()[0]
                     if n_stale:
                         errors.append(f"{sym} {tf}: 重算窗外有 {n_stale} 行旧版本状态（混版风险）")
-                # 非对称迟滞：对整条 raw 序列做确认折叠，把确认态写回 state 列
+                # 非对称迟滞：对整条 raw 序列做确认折叠，把确认态写回 state 列。
+                # v3：美股品种传事件窗（未来 10 日历日有财报），事件窗内
+                # squeeze→趋势的确认 +1 根；无财报数据的品种 event_win=None（同 v2）
                 rows_all = storage.get_states(conn, sym, tf, limit=100_000)
-                confirmed, cand = confirm_states([r["raw_state"] for r in rows_all])
+                ewin = None
+                if instruments.get(sym)["class"] == "us_stock_perp":
+                    ewin = storage.earnings_event_windows(
+                        conn, sym, [r["ts"] for r in rows_all]
+                    )
+                    if not any(ewin):
+                        ewin = None   # 无财报记录（ETF）：与 v2 完全一致
+                confirmed, cand = confirm_states(
+                    [r["raw_state"] for r in rows_all], event_win=ewin
+                )
                 fixes = [
                     (confirmed[i], rows_all[i]["ts"])
                     for i in range(len(rows_all))

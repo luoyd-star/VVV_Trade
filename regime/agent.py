@@ -148,7 +148,9 @@ def render_context(p: dict) -> str:
         parts = [
             f"[{tf}] 状态={t['state_label']}(原始判定conf {t['confidence']:.2f}——确认态无独立置信度)"
             + (f"[原始判定={raw}]" if raw and raw != t.get("state") else "")
-            + (f"[酝酿中:{cand['state']} {cand['count']}/{cand['need']}]" if cand else "")
+            + (f"[酝酿中:{cand['state']} {cand['count']}/{cand['need']}"
+               + ("（事件窗:未来10日有财报,确认门槛+1根）" if cand.get("event_win") else "")
+               + "]" if cand else "")
             + (
                 f"[未收线预览:{t['preview']['state']}(conf {t['preview']['confidence']:.2f})]"
                 if t.get("preview") else ""

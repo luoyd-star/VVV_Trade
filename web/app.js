@@ -316,6 +316,7 @@ function renderStateCards() {
     if (t.candidate) {
       const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
       dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`
+        + (t.candidate.event_win ? '（事件窗·门槛+1）' : '')
         + (diverged && t.candidate.state === t.raw_state ? ` · ${confTxt}` : ''));
     }
     if (diverged && !(t.candidate && t.candidate.state === t.raw_state)) {
@@ -404,7 +405,8 @@ function renderAlerts() {
     let cls = '';
     if (t.candidate) {
       const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
-      bits.push(`酝酿 ${cm.label} ${t.candidate.count}/${t.candidate.need}`);
+      bits.push(`酝酿 ${cm.label} ${t.candidate.count}/${t.candidate.need}`
+        + (t.candidate.event_win ? '（事件窗）' : ''));
       cls = 'warn';
     }
     if (t.preview) {
