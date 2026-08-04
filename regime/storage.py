@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS stock_option_stat(
   option_oi REAL, call_oi REAL, put_oi REAL, pc_oi_ratio REAL,
   PRIMARY KEY(symbol, ts, source)
 );
+CREATE TABLE IF NOT EXISTS stock_vol_live(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
+  iv REAL, pre_iv REAL, hv_30d REAL,
+  vendor_iv_rank REAL, vendor_iv_pct REAL,
+  call_volume REAL, put_volume REAL, pc_volume_ratio REAL,
+  PRIMARY KEY(symbol, ts, source)
+);
 CREATE TABLE IF NOT EXISTS earnings(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL,
   pub_type TEXT, period TEXT,
@@ -673,6 +680,40 @@ def get_breadth(conn, slot: str, source: str, limit: int = 800) -> pd.DataFrame:
         f"SELECT ts,{','.join(_BREADTH_COLS)} FROM breadth"
         " WHERE slot=? AND source=? ORDER BY ts DESC LIMIT ?",
         conn, params=(slot, source, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+_LIVE_COLS = ("iv", "pre_iv", "hv_30d", "vendor_iv_rank", "vendor_iv_pct",
+              "call_volume", "put_volume", "pc_volume_ratio")
+
+
+def upsert_stock_vol_live(conn, source: str, rows) -> None:
+    """盘中实时 IV 快照。rows: dict(symbol, ts, ...)。
+
+    **与 stock_vol 分表是刻意的**，同 live_bars 与 ohlcv 的关系：
+    盘中值还在滚动，混进 stock_vol 会让分位分母含一个当天还会变的数
+    （同一天算两次分位得数不同）。分位永远只在结算序列上算，
+    实时值只做预览展示——见 dashboard._stock_iv_block 的 live 段。
+    """
+    cols = ",".join(_LIVE_COLS)
+    ph = ",".join("?" * len(_LIVE_COLS))
+    sets = ",".join(f"{c}=COALESCE(excluded.{c},{c})" for c in _LIVE_COLS)
+    conn.executemany(
+        f"INSERT INTO stock_vol_live(symbol,ts,source,{cols}) VALUES(?,?,?,{ph})"
+        f" ON CONFLICT(symbol,ts,source) DO UPDATE SET {sets}",
+        [(r["symbol"], int(r["ts"]), source, *(_f(r.get(c)) for c in _LIVE_COLS))
+         for r in rows],
+    )
+    conn.commit()
+
+
+def get_stock_vol_live(conn, symbol: str, source: str, limit: int = 200) -> pd.DataFrame:
+    """盘中快照序列（升序）。limit 默认只取最近 200 个点（一个交易日约 78 个）。"""
+    df = pd.read_sql_query(
+        f"SELECT ts,{','.join(_LIVE_COLS)} FROM stock_vol_live"
+        " WHERE symbol=? AND source=? ORDER BY ts DESC LIMIT ?",
+        conn, params=(symbol, source, limit),
     )
     return df.iloc[::-1].reset_index(drop=True)
 

@@ -73,6 +73,46 @@ def fetch_overview(ctx, symbols) -> dict:
     return out
 
 
+def fetch_live(ctx, symbols, now_ms: int | None = None) -> list:
+    """盘中实时快照（3303，单次 ≤500 标的）→ [{symbol, ts, iv, pre_iv, ...}]。
+
+    实测该接口**盘中滚动更新**（ET 09:40 后 5 分钟内四个品种全部变动），
+    且自带 `pre_iv`＝昨日结算值——与我们 stock_vol 存的完全一致，
+    是现成的对照基准（NVDA 实测 pre_iv 48.004 == 库内 48.004）。
+
+    同时给实时的 call/put 成交量，故盘中期权流也一并取回。
+    ts 用采集时刻（本地墙钟），因为返回体不带时间戳。
+    """
+    import time as _t
+
+    from moomoo import RET_OK
+
+    ts = int(now_ms if now_ms is not None else _t.time() * 1000)
+    codes = [to_moomoo(s) for s in symbols]
+    ret, data = ctx.get_option_underlying_overview(codes)
+    if ret != RET_OK:
+        raise RuntimeError(f"3303 live: {data}")
+    back = {to_moomoo(s): s for s in symbols}
+    out = []
+    for _, r in data.iterrows():
+        sym = back.get(r.get("code"))
+        if sym is None:
+            continue
+        cv, pv = _num(r.get("call_volume")), _num(r.get("put_volume"))
+        out.append({
+            "symbol": sym, "ts": ts,
+            "iv": _num(r.get("iv")), "pre_iv": _num(r.get("pre_iv")),
+            "hv_30d": _num(r.get("hv_30d")),
+            # 厂商自算的 rank/percentile（52 周口径）——与我们的条件分位**不是同一个量**，
+            # 只作参考展示，绝不混用
+            "vendor_iv_rank": _num(r.get("iv_rank")),
+            "vendor_iv_pct": _num(r.get("iv_percentile")),
+            "call_volume": cv, "put_volume": pv,
+            "pc_volume_ratio": (pv / cv) if (cv and pv is not None and cv > 0) else None,
+        })
+    return out
+
+
 def fetch_history(ctx, symbol: str, begin: str, end: str) -> list:
     """日频历史（协议 3304）→ [{ts, iv, hv, underlying_price}]，按 ts 升序。
 

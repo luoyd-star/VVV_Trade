@@ -355,6 +355,54 @@ def test_earn_conditioned_rank_falls_back_when_no_earnings():
     assert blk["earn_in30"] is None, "无财报记录时状态应为 None 而非 False"
 
 
+def test_live_never_contaminates_settled_percentile():
+    """实时表与结算表严格分离——写入实时值不得改变正式分位。
+
+    这是整个双轨制的核心不变量：盘中值还会滚动，若混进 stock_vol，
+    同一天算两次分位会得到不同结果。
+    """
+    import dashboard
+
+    conn = _mem_conn()
+    base = date(2026, 1, 1).toordinal()
+    storage.upsert_stock_vol(conn, "NVDA-USDT", "moomoo", [
+        {"ts": moomoo_iv.day_ms(date.fromordinal(base + i)), "iv": 40.0, "hv": 30.0}
+        for i in range(300)])
+    before = dashboard._stock_iv_block(conn, "NVDA-USDT")
+    # 写入一个极端实时值
+    storage.upsert_stock_vol_live(conn, "moomoo", [
+        {"symbol": "NVDA-USDT", "ts": 1785900000000, "iv": 999.0, "pre_iv": 40.0}])
+    after = dashboard._stock_iv_block(conn, "NVDA-USDT")
+    assert after["last"] == before["last"], "结算值不得被实时值改写"
+    assert after["rank"] == before["rank"], "正式分位不得被实时值污染"
+    assert after["live"]["iv"] == 999.0 and after["live"]["preview"] is True
+    assert after["live"]["chg"] == 959.0
+
+
+def test_live_preview_rank_uses_settled_reference():
+    """预览分位＝把实时值代入**结算**参照集，而非与实时序列比。"""
+    import dashboard
+
+    conn = _mem_conn()
+    base = date(2026, 1, 1).toordinal()
+    # 结算序列 20~319 递增；无财报记录 → in30 为 None，预览分位应回退为 None
+    storage.upsert_stock_vol(conn, "QQQ-USDT", "moomoo", [
+        {"ts": moomoo_iv.day_ms(date.fromordinal(base + i)), "iv": 20.0 + i}
+        for i in range(300)])
+    storage.upsert_stock_vol_live(conn, "moomoo", [
+        {"symbol": "QQQ-USDT", "ts": 1785900000000, "iv": 100.0, "pre_iv": 319.0}])
+    blk = dashboard._stock_iv_block(conn, "QQQ-USDT")
+    assert blk["live"]["rank_preview"] is None, "无财报状态时不给预览分位"
+
+    # 有财报记录后：100.0 在 20~319 里应落在约 (100-20)/300 ≈ 0.27
+    storage.upsert_earnings(conn, "moomoo", [
+        {"symbol": "QQQ-USDT", "ts": moomoo_iv.day_ms(date.fromordinal(base + 400)),
+         "pub_type": None, "period": None}])
+    blk2 = dashboard._stock_iv_block(conn, "QQQ-USDT")
+    pr = blk2["live"]["rank_preview"]
+    assert pr is not None and 0.2 < pr < 0.35, f"预览分位应≈0.27，实得 {pr}"
+
+
 if __name__ == "__main__":
     import pytest
 

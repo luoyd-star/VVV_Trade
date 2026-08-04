@@ -688,8 +688,16 @@ function renderUsvol(uv, meta, c) {
   const inv = t.both_inverted ? '（全曲线倒挂）'
     : t.fast && t.fast.inverted ? '（快端倒挂）'
     : t.slow && t.slow.inverted ? '（慢端倒挂）' : '';
+  // 盘中实时值：与结算值分列展示。分位只在结算序列上算，实时值给的是**预览分位**，
+  // 必须显式标注"实时"——同"预览(未收线)"的既有约定
+  const lv = iv && iv.live;
+  const liveTxt = !lv ? '' :
+    `实时 ${fmtN(lv.iv, 1)}`
+    + (lv.chg == null ? '' : `（${fmtN(lv.chg, 1, true)} / ${fmtN(lv.chg_pct, 1, true)}%）`)
+    + (lv.rank_preview == null ? '' : `·预览分位 ${fmtN(lv.rank_preview, 2)}`);
   const bits = [
-    iv ? `个股IV ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
+    lv ? liveTxt : null,
+    iv ? `${lv ? '结算' : '个股IV'} ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
     iv && iv.vrp != null
       ? `VRP ${fmtN(iv.vrp, 1, true)}pt（分位 ${fmtN(iv.vrp_rank, 2)}）` : null,
     `RV30 ${fmtN(uv.rv_last, 1)}`,

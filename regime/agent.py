@@ -196,11 +196,22 @@ def render_context(p: dict) -> str:
             _dv = ("" if _rr is None or _iv.get("rank") is None
                    or abs(_iv["rank"] - _rr) < 0.1 else f",未条件化时为{_rr}")
             _w30 = ",当前处于财报计价窗内(未来30日有财报)" if _iv.get("earn_in30") else ""
+            # 盘中实时值单列——它是未结算的滚动值，与结算分位不是同一个量
+            _lv = _iv.get("live") or {}
+            _ltxt = ""
+            if _lv.get("iv") is not None:
+                _ltxt = (f" 【实时IV={_lv['iv']}"
+                         + (f",今日{_lv['chg']:+.2f}({_lv['chg_pct']:+.1f}%)"
+                            if _lv.get("chg") is not None else "")
+                         + (f",预览分位{_lv['rank_preview']}"
+                            if _lv.get("rank_preview") is not None else "")
+                         + ",未结算仅供盘中参考】")
             iv30_txt = (
-                f"个股IV={_iv['last']}"
+                f"个股IV(昨结算)={_iv['last']}"
                 + (f"(同财报状态内分位{_iv['rank']}{_dv}{_w30}{_etxt})"
                    if _iv.get("rank") is not None
                    else f"(样本仅{_iv['n']}日,分位不足{_etxt})")
+                + _ltxt
             )
         elif uv.get("iv30_last") is not None:
             iv30_txt = f"个股iv30={uv['iv30_last']}(CBOE自采{uv['iv30_days']}天,历史短勿看分位)"

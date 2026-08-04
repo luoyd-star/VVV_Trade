@@ -298,6 +298,7 @@ def _stock_iv_block(conn, symbol: str):
     return {
         "source": moomoo_iv.SOURCE,
         "last": round(last, 2),
+        "live": _live_iv_block(conn, symbol, s, last, in30),
         "rank": rank,
         "n": n,
         "win": int(len(win)),
@@ -310,6 +311,54 @@ def _stock_iv_block(conn, symbol: str):
         "days": round((int(s["ts"].iloc[-1]) - int(s["ts"].iloc[0])) / 86_400_000, 0),
         "series": [[int(t), round(float(v), 2)] for t, v in zip(s["ts"], s["iv"])][-365:],
         "hv_last": round(float(hv["hv"].iloc[-1]), 2) if len(hv) else None,
+    }
+
+
+def _live_iv_block(conn, symbol: str, settled_s, settled_last: float, in30):
+    """盘中实时 IV 预览。**与结算值分列**，同"未收线 K 线"的双轨制。
+
+    给三样东西：① 当前实时值；② 相对昨收的变动（今日的波动率重定价）；
+    ③ 一个**预览分位**——若以此实时值计，在同财报状态的结算分布里会落在哪。
+    预览分位打 `preview: True` 标记，前端必须显式标注，绝不与正式分位混用
+    （正式分位永远只在已结算序列上算——盘中值还会变，同一天算两次得数不同）。
+    """
+    df = storage.get_stock_vol_live(conn, symbol, moomoo_iv.SOURCE, limit=200)
+    if df.empty:
+        return None
+    row = df.iloc[-1]
+    iv = row.get("iv")
+    if iv is None or iv != iv:
+        return None
+    iv = float(iv)
+    pre = row.get("pre_iv")
+    pre = float(pre) if pre is not None and pre == pre else None
+    # 预览分位：与正式分位同一参照集（同财报状态），只是把今日实时值代入
+    prev_rank = None
+    if in30 is not None:
+        rows = conn.execute(
+            "SELECT ts FROM earnings WHERE symbol=? ORDER BY ts", (symbol,)
+        ).fetchall()
+        if rows:
+            ed = np.array([r[0] for r in rows], dtype="int64")
+            ts = settled_s["ts"].to_numpy(dtype="int64")[:, None]
+            ahead = (ed[None, :] - ts) / 86_400_000.0
+            days_to = np.where(ahead >= 0, ahead, np.inf).min(axis=1)
+            peer = settled_s["iv"].to_numpy()[(days_to <= EARN_WINDOW_D) == in30]
+            if len(peer) >= EARN_COND_MIN:
+                prev_rank = round(float((peer < iv).mean()), 3)
+    return {
+        "iv": round(iv, 2),
+        "pre_iv": round(pre, 2) if pre is not None else None,
+        "chg": round(iv - pre, 2) if pre is not None else None,
+        "chg_pct": round((iv / pre - 1) * 100, 2) if pre else None,
+        "captured_at": int(row["ts"]),
+        "rank_preview": prev_rank,
+        "preview": True,          # 前端必须据此标注"未结算"
+        "pc_volume_ratio": (round(float(row["pc_volume_ratio"]), 3)
+                            if row.get("pc_volume_ratio") is not None
+                            and row["pc_volume_ratio"] == row["pc_volume_ratio"] else None),
+        "series": [[int(t), round(float(v), 2)]
+                   for t, v in zip(df["ts"], df["iv"]) if v == v][-120:],
     }
 
 

@@ -150,6 +150,47 @@ def sync_breadth(conn) -> tuple:
             pass
 
 
+def sync_moomoo_iv_live(conn, symbols) -> tuple:
+    """盘中实时 IV 快照 → stock_vol_live（**每轮都跑，不节流**）。
+
+    只在 RTH 内采集：盘外该值恒等于昨日结算值，存进去只是重复行。
+    一次批量调用取回全部美股品种（3303 单次 ≤500 标的），成本≈1 次请求/轮。
+    **与结算序列严格分表**——分位永远只在 stock_vol 上算，实时值只做预览。
+    """
+    import time as _t
+
+    from regime import moomoo_iv
+    from regime.calendar_nyse import is_rth
+
+    now = int(_t.time() * 1000)
+    if not is_rth(now):
+        return None, []
+    if not moomoo_iv.opend_alive():
+        return None, []
+    us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
+    if not us:
+        return None, []
+    try:
+        ctx = moomoo_iv.open_ctx()
+    except Exception as e:  # noqa: BLE001
+        return None, [f"moomoo_live 连接: {e}"]
+    try:
+        rows = moomoo_iv.fetch_live(ctx, us, now_ms=now)
+        if rows:
+            storage.upsert_stock_vol_live(conn, moomoo_iv.SOURCE, rows)
+        moved = sum(1 for r in rows
+                    if r["iv"] is not None and r["pre_iv"] is not None
+                    and abs(r["iv"] - r["pre_iv"]) > 0.01)
+        return f"实时IV {len(rows)} 品种（{moved} 个已偏离昨收）", []
+    except Exception as e:  # noqa: BLE001
+        return None, [f"moomoo_live: {e}"]
+    finally:
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
 def sync_moomoo_iv(conn, symbols) -> tuple:
     """个股 IV 日频增量（moomoo 口径）→ stock_vol。返回 (日志串或 None, 错误列表)。
 
@@ -567,6 +608,12 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
         if msg:
             log.info("%s", msg)
         errors.extend(errs)
+
+    # 盘中实时 IV：每轮都采（不节流），只在 RTH 内——一次批量调用取全部美股
+    msg, errs = sync_moomoo_iv_live(conn, symbols)
+    if msg:
+        log.info("%s", msg)
+    errors.extend(errs)
 
     # 市场宽度影子字段：零历史，须自攒约 2 年才够评审——每天不采都是永久损失
     msg, errs = sync_breadth(conn)
