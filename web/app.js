@@ -727,8 +727,11 @@ function renderIv3(o) {
     yAxis: { scale: true, splitLine: { lineStyle: { color: COL.grid } },
       axisLabel: { color: COL.muted, fontSize: 9.5, formatter: '{value}%' } },
     series: [
+      // IV3 序列 2026-08-05 清零自攒：稀疏期（<60 点）画出点标记，否则 30 分钟宽的
+      // 线段在 100 天轴上是亚像素、完全不可见；攒够后自动退回纯线
       ...(o.iv3 && o.iv3.length ? [{ name: '3d 隐含', type: 'line', data: o.iv3,
-        symbol: 'none', lineStyle: { width: 2 },
+        symbol: 'circle', symbolSize: 4.5, showSymbol: o.iv3.length < 60,
+        lineStyle: { width: 2 },
         endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
       ...(o.rv3 && o.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: o.rv3,
         symbol: 'none', lineStyle: { width: 1.5 },
