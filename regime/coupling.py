@@ -10,8 +10,7 @@
 - 成对时钟 EWMA：权重只在**两腿同时有效**的 bar 上衰减与累积——缺失不
   消耗记忆，n_eff 只数联合有效样本。T_eff 不足输出 INSUFFICIENT，
   禁止缩窗冒充（半衰期 140/420 共同小时 ≈ T_eff 404/1212）。
-- β_ret 与 β_spread 语义分离：本层只算 β_ret（收益暴露）；对冲比是 M2+
-  价差门控的事，不在此混算。
+- β_ret 与 β_spread 的双轨语义保留在规格中，当前 M1 尚未计算或输出任何 beta 字段。
 - 相关性统计一律可转 Fisher-z（atanh）域；本层输出 ρ 与 z 并存。
 - 核心矩阵只收 pool=core 品种（观察池数据照采，消费层过滤——此处即消费层）。
 """
@@ -228,7 +227,7 @@ def rolling_sign_rate(r: pd.DataFrame, halflife: float = HL_SLOW,
 
 
 def pair_table(r: pd.DataFrame) -> pd.DataFrame:
-    """pair 级 nowcast 表：ρ_fast/ρ_slow/z 差/c_ij/β 快慢/资格/INSUFFICIENT。"""
+    """pair 级 nowcast 表：ρ_fast/ρ_slow/z 差/c_ij/资格/INSUFFICIENT（当前无 beta）。"""
     z, _ = ewma_vol_standardize(r)
     fast = pairwise_ewma_corr(z, HL_FAST)
     slow = pairwise_ewma_corr(z, HL_SLOW)
@@ -253,7 +252,7 @@ def pair_table(r: pd.DataFrame) -> pd.DataFrame:
                         and (np.isnan(sr) or sr >= ELIG_SIGN_RATE)
                         and cover >= ELIG_COVERAGE)
             s = np.sign(rho_s) if np.isfinite(rho_s) else np.nan
-            # β_ret 用标准化前收益（暴露语义）；快慢各一
+            # β_ret / β_spread 规格保留、实现延期；当前返回字段不含 beta。
             rows.append({
                 "a": a_, "b": b_, "n_joint": int(n_joint),
                 "coverage": round(float(cover), 3),

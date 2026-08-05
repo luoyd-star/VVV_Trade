@@ -586,7 +586,7 @@ def _codex(cfg: dict, system: str, msgs: list) -> str:
     cmd += _safe_codex_args(cfg.get("codex_args") or [])
     # 只读沙箱：放末尾让同名 -s/--sandbox 以本值为准；但**顺序不足以保证安全**——
     # --dangerously-bypass-approvals-and-sandbox 是独立开关，无论放哪都会关掉沙箱。
-    # 真正的防线是上面的 _safe_codex_args 白名单。
+    # 这里实现的是显式危险参数拒绝列表；未知参数仍会放行，不是允许参数白名单。
     cmd += ["-s", "read-only"]
     cmd.append(prompt)
     try:

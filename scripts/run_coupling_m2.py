@@ -4,8 +4,8 @@
   .venv/bin/python scripts/run_coupling_m2.py [--paths 300]
 
 事件 append-only 写入 data/backtest_ledger.sqlite3 · coupling_events；
-报告 docs/COUPLING_M2_<UTC日期>.md。阈值 threshold_version=prior-1——
-正式效力待 §5 满额校准（≥20k 路 + 注入式功效），本轮给出平台实测底数。
+报告 docs/COUPLING_M2_<UTC日期>.md。当前阈值代 threshold_version=calibrated-1；
+20k 路满额终验仍未执行（见 GAPS E6），本脚本给出平台实测底数。
 """
 from __future__ import annotations
 

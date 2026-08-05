@@ -1,4 +1,7 @@
-"""OHLCV 数据获取：默认 Deribit 优先（用户实测更稳定），OKX、Binance 依次兜底。
+"""OHLCV 数据获取：默认按 instruments 注册表逐品种路由。
+
+截至 2026-08-05，74 个注册品种中 66 个钉死单源 binance_futures；
+Deribit→OKX→Binance 是未登记或未显式配置 sources 的加密品种兜底链，不是全局优先级。
 
 全部为免费公开接口，无需 API key。返回按时间升序的 DataFrame，
 列为 [ts, open, high, low, close, volume]，并丢弃最后一根未收盘的 K 线
@@ -376,8 +379,8 @@ def fetch_ohlcv(
     sources=None,
     drop_unclosed: bool = True,
 ):
-    """按 sources 顺序逐个尝试。sources=None 时按 instruments 注册表路由
-    （加密默认 deribit -> okx -> binance；美股永续 binance_futures -> hyperliquid）。
+    """按 sources 顺序逐个尝试。sources=None 时按 instruments 注册表逐品种路由；
+    未登记或未显式配置 sources 的加密品种才用 deribit -> okx -> binance 兜底链。
     返回 (df, 数据源名)。
 
     默认丢弃最后一根未收盘 K 线；drop_unclosed=False 时保留（collector 用它

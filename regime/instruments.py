@@ -1,12 +1,15 @@
 """品种注册表：symbol → 类别 / 数据源路由 / Hyperliquid coin 映射。
 
-instruments.json 每次调用热读（与 agent.json 同哲学，改完即生效）；
+instruments.json 的品种属性每次调用热读（与 agent.json 同哲学，改完即生效）；
+但 collector 成员只在启动时从 DEFAULT_SYMBOLS 解析，新增/删除品种成员须重启 collector；
 未登记的 symbol 回退到加密默认（deribit→okx→binance 现货），存量行为零变化。
 类别 class：
   crypto        加密（默认）
   us_stock_perp 美股永续（币安 EQUITY 区 / Hyperliquid builder dex）——
                 标的正股仅 9:30-16:00 ET 交易，合约 24/7，休市期波动塌陷
                 可能产生"假挤压"，面板与 VVVhermes 都会标注。
+  commodity     商品永续
+  intl_stock_perp 国际股票永续（当前 SKHY，标的采用 KRX 时钟）
 """
 from __future__ import annotations
 

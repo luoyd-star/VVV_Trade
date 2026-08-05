@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# 本地数据库与日志：约 9MB 行情/状态历史，靠 collector 自采积累，不入版本控制
+# 本地数据库与日志：数百 MB 级且持续增长，靠 collector 自采积累，不入版本控制
 data/
 
 # 模型后端配置：可能含 API key，用 agent.example.json 作模板

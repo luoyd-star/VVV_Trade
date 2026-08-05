@@ -3,5 +3,5 @@ numpy>=1.23
 requests>=2.28
 urllib3<2  # macOS 系统 Python 的 ssl 基于 LibreSSL，urllib3 2.x 会告警
 anthropic>=0.120  # Hermes 面板助手的 anthropic provider（其余 provider 走 requests）
-pytest>=7  # tests/ 的自动化入口（每个文件保留 python 直跑的 main()）
+pytest>=7  # tests/ 自动化入口；截至 2026-08-05，12 个测试文件中 7 个支持 python 直跑
 moomoo-api>=10.8  # 标的级 IV（协议 3303/3304，10.8.6808 起才有）；须本机 OpenD 常驻

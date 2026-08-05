@@ -7,7 +7,7 @@
   elig_enter ∈ {0.35, 0.40, 0.45}（exit = enter − 0.05）
   d_enter_std ∈ {1.5, 2.0, 2.5}（strong = std − 0.5）
   delta_floor_std ∈ {0.25, 0.29, 0.35}（strong = std − 0.04）
-每组合：误报（fa_paths 路稳态零模型，11 资格对）+ 功效（pw_paths 路，
+每组合：误报（fa_paths 路稳态零模型；截至 2026-08-05 现库为 37 资格对）+ 功效（pw_paths 路，
 Δρ=0.29，代表对 BTC×ETH 强 / ETH×XAU 边缘）。
 双目标：约束 max 年化误报 ≤5%，目标最大化检出率、最小化中位延迟。
 **逐组合打印进度**（M2b 4 小时黑盒的教训）。产出 docs/COUPLING_CALIBRATED1_<日期>.md。

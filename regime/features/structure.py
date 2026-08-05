@@ -71,7 +71,8 @@ def structure_features(df: pd.DataFrame, pivot_k: int = 4) -> dict:
     # 缺席的子分必须把权重让给在场的（重归一），而不是按 0 计入——
     # 否则历史 <200 根时 |direction| 的上限悄悄从 1.00 掉到 0.90，
     # 却仍去比同一个 0.30 阈值：同样的结构，短历史品种更难被判成趋势。
-    # 实测受影响的入库行占 50.8%（外部审阅发现，RULES_VERSION v1→v2 的动因之一）。
+    # 截至 2026-08-05，现库 win<200 的入库行占 7.62%（1d 23.09% / 4h 16.51% /
+    # 1h 4.47%）；v1→v2 时的历史比例见 git blame，不作为当前覆盖率引用。
     parts = [(0.45, pivot_dir), (0.25, slope_score), (0.20, dc_score)]
     if len(df) >= 200:
         above_ema200 = 1.0 if float(close.iloc[-1]) > float(ema(close, 200).iloc[-1]) else -1.0

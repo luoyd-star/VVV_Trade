@@ -15,5 +15,5 @@ jobs:
           # 与生产环境一致（macOS CommandLineTools 的 3.9）；升级解释器前先在这改
           python-version: "3.9"
       - run: pip install -r requirements.txt
-      # 六个测试全部离线：合成数据 + 内存库 + 注入的假数据源，不碰网络与真库
+      # 截至 2026-08-05：12 个测试文件 / 69 个用例，全部离线，不碰网络与真库
       - run: python -m pytest tests/ -q

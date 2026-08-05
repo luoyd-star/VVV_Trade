@@ -130,4 +130,4 @@ ORATS $49 降级为可选加深项——仅当日后需要 2023-06 以前的长�
 + per-symbol valid_from + source 标注；④ 分位窗按品种自适应（新股样本短）。
 
 任何组合下的口径纪律：VIX/VXN 的 17-37 年历史留作长周期锚；
-moomoo/CBOE/ORATS 三源**分位只在单一口径内算**，不混拼；个股 IV 转正进规则层须并入 v2。
+moomoo/CBOE/ORATS 三源**分位只在单一口径内算**，不混拼；个股 IV 转正进规则层须在下一次 RULES_VERSION 升版时评审。

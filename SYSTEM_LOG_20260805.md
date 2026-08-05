@@ -157,7 +157,7 @@ flowchart TD
 
 特征层 6 个模块 634 行，**但只有 structure / volatility / volume 三支进判定**；pathgeom / crsi / vwap 全部是影子或展示层。
 
-判定是**一棵四层短路树**（trend > squeeze > high_vol > range），并且——这一点旧版没说清——**只有两个阈值真正决定状态**：`er_rank ≥ 0.60` 与 `|direction| ≥ 0.30`。第三个阈值 `tilt_confirm = 0.10` **只调置信度不改状态**。另有 `SQUEEZE_BBW=0.15 / SQUEEZE_ATR=0.30 / HIGHVOL_ATR=0.85` 三个分位线。
+判定是**一棵四层短路树**（trend > squeeze > high_vol > range）：两个趋势阈值 `er_rank ≥ 0.60`、`|direction| ≥ 0.30`，加上三个波动分位阈值 `SQUEEZE_BBW=0.15 / SQUEEZE_ATR=0.30 / HIGHVOL_ATR=0.85`，共 **5 个阈值决定 state**；`tilt_confirm = 0.10` **只调置信度，不改 state**。
 
 📊 **库内实况**（236,830 行 / 74 品种 / 180 个 (symbol,tf) 组合）：
 
@@ -166,7 +166,7 @@ flowchart TD
 | 确认态分布 | range 47.4% / high_vol_chop 13.7% / trend_down 13.2% / squeeze 13.1% / trend_up 12.5% |
 | **迟滞改写率**（state ≠ raw_state） | **12.6%**（29,834 行） |
 | 迟滞的方向 | range 123,765→112,252（−9.3%）；high_vol_chop 25,107→32,496（**+29.4%**）；squeeze 28,405→30,948（+9.0%） |
-| 平均置信度 | squeeze 0.937 / high_vol_chop 0.930 / trend_up 0.680 / trend_down 0.674 / range 0.677 |
+| 按 `raw_state` 分组的原判平均置信度 | squeeze 0.937 / high_vol_chop 0.930 / trend_up 0.680 / trend_down 0.674 / range 0.677 |
 | margin < 0.15（边界过渡中）占比 | 65.0% |
 | **窗深达 250 的行占比** | 1h **93.5%** / 4h **76.6%** / 1d **73.1%** |
 

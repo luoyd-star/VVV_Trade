@@ -1,4 +1,5 @@
-"""SQLite 存储层：collector 写、dashboard 读，WAL 模式支持并发读写。
+"""SQLite 存储层：collector 与维护脚本写业务表；dashboard/VVVhermes 读业务表、只写 chat；
+backtest、experiments 与 coupling 只读 market.db。WAL 模式支持并发读写。
 
 时间戳统一存 UTC 毫秒整数。数据库文件在 data/market.db。
 """
@@ -120,10 +121,9 @@ _DERIV_COLS = ("oi", "oi_notional", "funding", "premium", "taker_ratio", "iv30",
 def connect() -> sqlite3.Connection:
     """写者连接（collector 专用）：建表 + 迁移。
 
-    迁移里有 ALTER / 全量 UPDATE / 代际清空重算这类重武器，**只允许 collector
-    这一个进程持有扳机**。面板等只读消费者一律用 connect_ro()——曾实测：
-    面板每次请求都跑迁移时，审计代际一升版，谁先 connect 谁执行 purge，
-    一条 GET /api/dashboard 就能把 regime_history 清成 0 行。
+    迁移里有 ALTER / 兼容性 UPDATE / usvol 定点清理，**只允许 collector 这一个进程
+    持有扳机**。面板等只读消费者一律用 connect_ro()。历史上曾有审计代际全表 purge，
+    现已拆除并由版本谓词原地重算取代。
     """
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=15)
@@ -156,8 +156,11 @@ def connect_rw_nomigrate() -> sqlite3.Connection:
 
 
 def _migrate(conn) -> None:
-    """就地迁移：regime_history 增加审计列；旧的无审计行一次性清空重算
-    （walk-forward 状态完全可由 K 线重算，不丢信息）。"""
+    """就地迁移 schema/兼容列，并保留 usvol 的一次性定点清理。
+
+    regime_history 不做代际全表删除；版本不匹配的行由 state_ts_set 谓词视为缺失，
+    后续在涉改序列上 upsert 原地重算。
+    """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(regime_history)")}
     for col in ("features", "rules", "version", "raw_state", "audit_version"):
         if col not in cols:
@@ -170,9 +173,9 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE deriv ADD COLUMN kind TEXT")
     # earnings 的 point-in-time 缺口（codex 审计）：无 known_at 则无法证明历史 in30
     # 是当时可知的。此列只对**新写入**行有效；既有回填行 known_at 为 NULL，
-    # 语义=事后回填、非 point-in-time——将来 IV 进规则层（v2）时必须只用
-    # known_at 非空且早于判定时刻的行。显示层的条件分位维持现状（财报日期
-    # 提前数月公布、极少改动，可接受先验；见 EARNINGS_IV_CONTAMINATION 文档）。
+    # 语义=事后回填、非 point-in-time。当前 v3.1 事件门槛仍消费这些 NULL 历史行，
+    # 明确接受先验；known_at 非空覆盖 ≥2 财报季后，才在下一次 RULES_VERSION 升版时
+    # 切换严格 as-of。显示层条件分位维持现状（见 GAPS C1/C9）。
     ecols = {r[1] for r in conn.execute("PRAGMA table_info(earnings)")}
     if "known_at" not in ecols:
         conn.execute("ALTER TABLE earnings ADD COLUMN known_at INTEGER")
