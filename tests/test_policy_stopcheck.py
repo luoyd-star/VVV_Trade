@@ -5,7 +5,9 @@ import math
 
 import pytest
 
-from regime.policy.stopcheck import check_stop_vs_iv, find_structural_stop
+from regime.policy.stopcheck import (
+    STOPCHECK_VERSION, check_stop_vs_iv, find_structural_stop,
+)
 
 
 def _zone(lo=99.0, hi=101.0):
@@ -60,4 +62,10 @@ def test_iv3_missing_or_invalid_returns_none():
     assert check_stop_vs_iv(2.0, float("nan")) is None
     assert check_stop_vs_iv(2.0, 0.0) is None
     assert check_stop_vs_iv(0.0, 50.0) is None
+    assert STOPCHECK_VERSION == "stop1"
 
+
+def test_stop_check_uses_actual_iv_tenor_when_supplied():
+    result = check_stop_vs_iv(2.0, 50.0, holding_days=1.67)
+    assert result is not None
+    assert result["expected_move_pct"] == pytest.approx(50.0 * math.sqrt(1.67 / 365.0))

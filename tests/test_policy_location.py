@@ -176,3 +176,11 @@ def test_unavailable_inputs_propagate_none(price, atr, zones, reason):
     assert result["meaning"] is None
     assert result["tradeable"] is False
     assert result["degraded"] == [reason]
+
+
+def test_chain_overflow_never_enters_location_judgment():
+    overflow = {**_zone("range_lo", "support"), "chain_overflow": True}
+    result = locate(100.0, 4.0, [overflow], "range", None)
+    assert result["version"] == "loc1"
+    assert result["at"] is None and result["tradeable"] is False
+    assert result["reason"] == "chain_overflow"

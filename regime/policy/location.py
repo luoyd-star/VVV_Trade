@@ -11,6 +11,8 @@ from typing import Optional
 import numpy as np
 
 
+LOCATION_VERSION = "loc1"
+
 APPROACH_BARS = 3               # 起步值，待校准；识别“回踩至/反弹至”的最短路径窗
 AT_ZONE_ATR = 0.50              # 起步值，待校准；离区间边界不超过此距离才算到位
 
@@ -33,6 +35,7 @@ def _finite_float(value) -> Optional[float]:
 
 def _unavailable(reason: str) -> dict:
     return {
+        "version": LOCATION_VERSION,
         "at": None,
         "zone": None,
         "dist_atr": None,
@@ -45,8 +48,9 @@ def _unavailable(reason: str) -> dict:
     }
 
 
-def _middle() -> dict:
+def _middle(degraded=None) -> dict:
     return {
+        "version": LOCATION_VERSION,
         "at": "middle_zone",
         "zone": None,
         "dist_atr": None,
@@ -55,7 +59,7 @@ def _middle() -> dict:
         "tradeable": False,
         "role_flipped": False,
         "reason": "no_regime_key_level_nearby",
-        "degraded": [],
+        "degraded": list(degraded or []),
     }
 
 
@@ -194,8 +198,12 @@ def locate(price: float, atr: float, zones: list, regime: str,
 
     candidates = []
     valid_zone_n = 0
+    overflow_n = 0
     for zone in zones:
         if not isinstance(zone, dict):
+            continue
+        if zone.get("chain_overflow") is True:
+            overflow_n += 1
             continue
         state = _zone_state(price_f, atr_f, zone)
         if state is None:
@@ -211,9 +219,11 @@ def locate(price: float, atr: float, zones: list, regime: str,
             candidates.append((state["dist_atr"], -len(kinds), zone, state, kinds))
 
     if valid_zone_n == 0:
+        if overflow_n:
+            return _unavailable("chain_overflow")
         return _unavailable("invalid_zones")
     if not candidates:
-        return _middle()
+        return _middle(["chain_overflow_ignored"] if overflow_n else [])
 
     # 等距时优先共振来源更多的 zone；再保留输入顺序，避免无意义抖动。
     _, _, zone, state, kinds = min(candidates, key=lambda item: (item[0], item[1]))
@@ -227,6 +237,7 @@ def locate(price: float, atr: float, zones: list, regime: str,
         reason = "wrong_approach"
 
     return {
+        "version": LOCATION_VERSION,
         "at": "at_support" if role == "support" else "at_resistance",
         "zone": zone,
         "dist_atr": state["dist_atr"],
@@ -236,5 +247,5 @@ def locate(price: float, atr: float, zones: list, regime: str,
         "role_flipped": state["role_flipped"],
         "approach": zone_approach,
         "reason": reason,
-        "degraded": [],
+        "degraded": ["chain_overflow_ignored"] if overflow_n else [],
     }

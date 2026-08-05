@@ -441,8 +441,14 @@ function renderPolicy() {
     return;
   }
 
+  const versions = p.versions || {};
+  const versionText = [versions.levels, versions.location, versions.stopcheck, versions.volnote]
+    .every(Boolean)
+    ? `先验 ${versions.levels}/${versions.location}/${versions.stopcheck}/${versions.volnote} · 未校准`
+    : '先验版本不可用 · 未校准';
   $('policyMeta').textContent = `${p.tf || '4h'} · ${p.regime_4h || '状态不可用'}`
-    + (p.regime_1d ? ` · 1d ${p.regime_1d}` : ' · 1d 不可用');
+    + (p.regime_1d ? ` · 1d ${p.regime_1d}` : ' · 1d 不可用')
+    + ` · ${versionText}`;
   const location = p.location || {};
   let conclusion = p.play;
   if (!conclusion && location.at === 'middle_zone') conclusion = '中间区域，默认观望';
@@ -475,7 +481,7 @@ function renderPolicy() {
       <td>${fmtN(zone.dist_atr, 2)}</td>
       <td class="mono">[${fmtPrice(zone.lo)}, ${fmtPrice(zone.hi)}]</td>
       <td style="text-align:left">${(zone.kinds || []).map(esc).join(' · ') || '—'}</td>
-      <td>${zone.touches == null ? '—' : esc(zone.touches)}</td>
+      <td title="枢轴价位簇成员数；不是静态价格带回扫次数">${zone.touches == null ? '—' : esc(zone.touches)}</td>
       <td>${role}${flipped}</td><td>${eligible}${matched ? ' · 命中' : ''}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="6">没有可用关键位区间</td></tr>';
@@ -502,10 +508,10 @@ function renderPolicy() {
       too_tight: '严重提示：偏紧', tight: '提示：偏紧', ok: '宽度充足',
     }[stop.verdict] || stop.verdict;
     $('policyStop').textContent = `${stop.side === 'long' ? '多头' : '空头'}结构失效参考 ${fmtPrice(stop.stop_price)}`
-      + ` · 距现价 ${fmtN(stop.stop_dist_pct, 2)}% · 持仓期预期波动 ${fmtN(stop.expected_move_pct, 2)}%`
+      + ` · 距最近已收线 4h 收盘价 ${fmtN(stop.stop_dist_pct, 2)}% · IV对应期限预期波动 ${fmtN(stop.expected_move_pct, 2)}%`
       + ` · 比值 ${fmtN(stop.ratio, 2)} · ${verdict}（${stop.note}）`;
   } else {
-    $('policyStop').textContent = '结构位或 IV3 缺失，止损宽度校验不可计算';
+    $('policyStop').textContent = '结构位或 IV/期限元数据缺失，止损宽度校验不可计算';
   }
   const degraded = p.degraded || [];
   $('policyDegraded').textContent = degraded.length ? `降级标注：${degraded.join(' · ')}` : '';

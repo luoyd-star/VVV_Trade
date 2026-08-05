@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
+import regime.policy.levels as levels_mod
 from regime.policy.levels import (
     MAX_ZONE_ATR,
     PIVOTS_PER_SIDE,
@@ -47,13 +49,13 @@ def _vol1h(end: pd.Timestamp, prices: np.ndarray, volume: np.ndarray) -> pd.Data
 def test_merge_respects_max_width_and_keeps_chain_split():
     # 相邻中心均小于 0.5 ATR，若只看邻距会把四段链式并完；
     # 第四段使总宽 1.6 ATR，必须拒并。
-    raw = [_raw_zone(mid, half=0.2) for mid in (100.0, 100.4, 100.8, 101.2)]
+    raw = [_raw_zone(mid, half=0.25) for mid in (100.0, 100.45, 100.9, 101.35)]
     merged = merge_zones(raw, atr_value=1.0)
     assert merged is not None and len(merged) == 2
     assert all(z["width_atr"] <= MAX_ZONE_ATR for z in merged)
     assert merged[0]["kinds"] == ["pivot_low"]
     # 原输入不能被聚类函数原地改写。
-    assert [z["mid"] for z in raw] == [100.0, 100.4, 100.8, 101.2]
+    assert [z["mid"] for z in raw] == [100.0, 100.45, 100.9, 101.35]
 
 
 def test_all_sources_and_pivot_retention_are_auditable():
@@ -64,7 +66,10 @@ def test_all_sources_and_pivot_retention_are_auditable():
     prices[-40:] = 110.2
     vol = _vol1h(df["ts"].iloc[-1], prices, volume)
 
-    payload = extract_levels(df, vol1h=vol)
+    payload = extract_levels(
+        df, vol1h=vol,
+        expected_end_ts=vol["ts"].iloc[-1] + pd.Timedelta(hours=1),
+    )
     assert payload["version"] == "lv1"
     assert payload["zones"] is not None
     assert payload["degraded"] == []
@@ -82,6 +87,10 @@ def test_all_sources_and_pivot_retention_are_auditable():
         assert zone["width_atr"] <= MAX_ZONE_ATR or len(zone["kinds"]) == 1
         assert zone["touches"] >= 0
         assert zone["last_touch_bars"] is None or zone["last_touch_bars"] >= 0
+    assert all(
+        left["hi"] < right["lo"]
+        for left, right in zip(payload["zones"], payload["zones"][1:])
+    )
 
 
 def test_poc_uses_volume_bucket_and_rejects_short_coverage():
@@ -90,12 +99,17 @@ def test_poc_uses_volume_bucket_and_rejects_short_coverage():
     prices = np.r_[np.full(180, 100.2), np.full(60, 110.2)]
     volume = np.r_[np.ones(180), np.full(60, 10.0)]
     full = _vol1h(df["ts"].iloc[-1], prices, volume)
-    payload = extract_levels(df, vol1h=full, atr_value=4.0)
+    expected_end = full["ts"].iloc[-1] + pd.Timedelta(hours=1)
+    payload = extract_levels(
+        df, vol1h=full, atr_value=4.0, expected_end_ts=expected_end,
+    )
     poc = payload["sources"]["poc"]
     assert poc is not None and 109.0 < poc["mid"] < 112.0
 
     short = full.tail(100).reset_index(drop=True)
-    degraded = extract_levels(df, vol1h=short, atr_value=4.0)
+    degraded = extract_levels(
+        df, vol1h=short, atr_value=4.0, expected_end_ts=expected_end,
+    )
     assert degraded["sources"]["poc"] is None
     assert "poc_coverage_insufficient" in degraded["degraded"]
     # POC 缺失不能用均价或 0 填进共振 kinds。
@@ -127,15 +141,16 @@ def test_previous_day_and_week_use_utc_calendar_buckets():
     assert payload["sources"]["prev_week_lo"]["mid"] == 77.0
 
 
-def test_touch_count_counts_entries_not_resident_bars():
+def test_static_overlap_count_is_not_mislabeled_as_pivot_touches():
     df = _ohlcv(20, "1h")
     df[["open", "high", "low", "close"]] = 110.0
     # 三根连续处于 [99,101] 是一次触碰；离开后再进入才是第二次。
     df.loc[5:7, ["open", "high", "low", "close"]] = 100.0
     df.loc[12, ["open", "high", "low", "close"]] = 100.0
     merged = merge_zones([_raw_zone(100.0, half=1.0)], atr_value=4.0, price_df=df)
-    assert merged is not None and merged[0]["touches"] == 2
-    assert merged[0]["last_touch_bars"] == 7
+    assert merged is not None and merged[0]["touches"] == 1
+    assert merged[0]["overlap_count"] == 2
+    assert merged[0]["last_overlap_bars"] == 7
 
 
 def test_none_propagation_for_no_atr_and_short_history():
@@ -146,10 +161,70 @@ def test_none_propagation_for_no_atr_and_short_history():
     assert all(value is None for value in no_atr["sources"].values())
     assert no_atr["degraded"] == ["no_atr"]
 
-    partial = extract_levels(too_short, atr_value=2.0)
+    partial = extract_levels(_ohlcv(15), atr_value=2.0)
     assert partial["sources"]["ema200"] is None
     assert partial["sources"]["range_hi"] is None
     assert partial["sources"]["poc"] is None
     assert "ema200_history_insufficient" in partial["degraded"]
     assert "range_history_insufficient" in partial["degraded"]
     assert "poc_missing" in partial["degraded"]
+
+
+@pytest.mark.parametrize("bad_col", ["open", "high", "low", "close"])
+def test_atr_window_rejects_nonfinite_ohlc_before_any_level(bad_col):
+    df = _ohlcv()
+    df.loc[len(df) - 2, bad_col] = np.nan
+    payload = extract_levels(df)
+    assert payload["atr"] is None and payload["zones"] is None
+    assert payload["degraded"] == ["no_atr"]
+
+
+def test_atr_window_rejects_impossible_candle_even_with_supplied_atr():
+    df = _ohlcv()
+    df.loc[len(df) - 1, "high"] = df["close"].iloc[-1] - 1.0
+    payload = extract_levels(df, atr_value=4.0)
+    assert payload["atr"] is None and payload["degraded"] == ["no_atr"]
+
+
+def test_poc_is_anchored_to_decision_time_and_rejects_stale_tail():
+    df = _ohlcv()
+    decision = pd.Timestamp("2026-08-06T12:00:00Z")
+    latest = decision - pd.Timedelta(hours=4)
+    prices = np.full(240, 100.0)
+    vol = _vol1h(latest, prices, np.ones(240))
+    payload = extract_levels(
+        df, vol1h=vol, atr_value=4.0, expected_end_ts=decision,
+    )
+    assert payload["sources"]["poc"] is None
+    assert "poc_stale" in payload["degraded"]
+
+
+def test_pivot_zone_width_comes_from_price_cluster_not_pivot_candle(monkeypatch):
+    df = _ohlcv()
+    # 极端大 K 线仅提供噪声振幅；枢轴价格本身仍是 100，zone 必须保持 0.5 ATR。
+    df.loc[80, ["open", "high", "low", "close"]] = [100.0, 118.0, 82.0, 100.0]
+    monkeypatch.setattr(
+        levels_mod, "swing_pivots",
+        lambda frame, k: pd.DataFrame([
+            {"idx": 80, "kind": "H", "price": 100.0},
+            {"idx": 100, "kind": "H", "price": 100.2},
+            {"idx": 120, "kind": "H", "price": 100.1},
+            {"idx": 90, "kind": "L", "price": 95.0},
+        ]),
+    )
+    payload = extract_levels(df, atr_value=4.0)
+    highs = payload["sources"]["pivot_high"]
+    assert len(highs) == 1
+    assert highs[0]["touches"] == 3
+    assert highs[0]["width_atr"] == pytest.approx(0.5)
+    assert highs[0]["established_ts"] == int(df["ts"].iloc[80].timestamp() * 1000)
+
+
+def test_unresolvable_overlap_is_flagged_and_output_stays_disjoint():
+    raw = [
+        {**_raw_zone(100.0), "lo": 99.0, "hi": 101.0, "mid": 100.0},
+        {**_raw_zone(100.0), "lo": 99.0, "hi": 101.0, "mid": 100.0},
+    ]
+    zones = merge_zones(raw, atr_value=1.0)
+    assert zones is not None and len(zones) == 1
+    assert zones[0]["chain_overflow"] is True

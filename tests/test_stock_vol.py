@@ -683,6 +683,38 @@ def test_collector_warns_when_iv_term_uses_one_leg(monkeypatch, caplog):
     assert "ATM 单腿退化" in caplog.text and "NVDA-USDT 3d" in caplog.text
 
 
+def test_collector_rotates_iv_term_build_start_across_failed_rounds(monkeypatch):
+    """R2-9：即使每轮建链都失败，下一轮也不能继续从同一批列表头开始。"""
+    import collector
+    from regime import calendar_nyse, stock_iv_term
+
+    class Ctx:
+        def close(self):
+            pass
+
+    conn = _mem_conn()
+    syms = [f"S{i}-USDT" for i in range(5)]
+    seen = []
+    monkeypatch.setattr(calendar_nyse, "is_rth", lambda now: True)
+    monkeypatch.setattr(moomoo_iv, "opend_alive", lambda: True)
+    monkeypatch.setattr(moomoo_iv, "open_ctx", lambda: Ctx())
+    monkeypatch.setattr(collector, "_should", lambda *args: True)
+    monkeypatch.setattr(collector.instruments, "get", lambda symbol: {"class": "us_stock_perp"})
+    monkeypatch.setattr(stock_iv_term, "load_codes_cache", lambda conn: {})
+
+    def build(ctx, symbols, existing=None):
+        seen.append(list(symbols))
+        return {}, ["RATE_LIMIT"]
+
+    monkeypatch.setattr(stock_iv_term, "build_codes", build)
+    collector.sync_stock_iv_term(conn, syms)
+    collector.sync_stock_iv_term(conn, syms)
+
+    shift = stock_iv_term.BUILD_BATCH % len(syms)
+    assert seen[0] == syms
+    assert seen[1] == syms[shift:] + syms[:shift]
+
+
 def test_iv_term_storage_roundtrip():
     conn = _mem_conn()
     storage.upsert_stock_iv_term(conn, [

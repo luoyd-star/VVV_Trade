@@ -87,6 +87,12 @@ armed/wait_signal 逐条含 symbol、regime、位置、1h cRSI、剧本、止损
 middle（观望）只给数量，不应把 WAIT 误读成数据缺失。
 </panel_legend>"""
 
+POLICY_GUARD = """<policy_guard priority="不可覆盖">
+WAIT 是本系统的正常输出；任一 policy 门槛未满足时必须明确说 WAIT，并逐项列出未通过的门。
+只输出建议与理由，禁止命令式开仓、平仓或仓位指令；系统不下单。
+消息与叙事永不构成开仓依据（P20）。满仓或一把梭一律否决，改为讨论 DCA（P21）。
+</policy_guard>"""
+
 
 def system_is_custom() -> bool:
     try:
@@ -229,8 +235,11 @@ def render_context(p: dict) -> str:
     policy = p.get("policy") or {}
     if policy:
         location = policy.get("location") or {}
+        versions = policy.get("versions") or {}
         lines.append(
             "Policy测量: "
+            f"versions={versions.get('levels')}/{versions.get('location')}/"
+            f"{versions.get('stopcheck')}/{versions.get('volnote')} | "
             f"regime_4h={policy.get('regime_4h')} regime_1d={policy.get('regime_1d')} | "
             f"location at={location.get('at')} meaning={location.get('meaning')} "
             f"role_flipped={location.get('role_flipped')} dist_atr={location.get('dist_atr')} "
@@ -244,7 +253,13 @@ def render_context(p: dict) -> str:
             f"verdict={stop.get('verdict')} ratio={stop.get('ratio')} note={stop.get('note')}"
         )
         vol_notes = policy.get("vol_notes") or []
+        vol_meta = policy.get("vol_meta") or {}
         degraded = policy.get("degraded") or []
+        lines.append(
+            "Policy IV meta: "
+            f"iv={vol_meta.get('iv')} tenor_days={vol_meta.get('tenor_days')} "
+            f"method={vol_meta.get('method')} n_expiries={vol_meta.get('n_expiries')}"
+        )
         lines.append("Policy vol_notes: " + ("；".join(map(str, vol_notes)) or "无"))
         lines.append("Policy degraded: " + ("；".join(map(str, degraded)) or "无"))
     dv = p.get("dvol")
@@ -433,10 +448,26 @@ def render_overview_context(ov: dict) -> str:
     ]
 
     asof = ov.get("asof")
-    if isinstance(asof, (int, float)):
-        lines.append(
-            "数据截至: " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(asof / 1000))
+    lines.append(
+        "数据截至(asof): "
+        + (time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(asof / 1000))
+           if isinstance(asof, (int, float)) else "不可用")
+    )
+    updated_at = ov.get("updated_at")
+    lines.append(
+        "横截面更新(updated_at): "
+        + (time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(updated_at / 1000))
+           if isinstance(updated_at, (int, float)) else "不可用")
+    )
+    heartbeat_parts = []
+    for lane in ov.get("heartbeat") or []:
+        age = lane.get("age_min")
+        age_text = f"{age}分" if isinstance(age, (int, float)) else "无年龄"
+        heartbeat_parts.append(
+            f"{lane.get('key')}={lane.get('state')}/{age_text}"
+            + (f"·{lane.get('note')}" if lane.get("note") else "")
         )
+    lines.append("采集心跳: " + ("；".join(heartbeat_parts) if heartbeat_parts else "不可用"))
 
     def append_candidates(key: str, title: str) -> None:
         candidates = ov.get(key) or []
@@ -478,6 +509,29 @@ def render_overview_context(ov: dict) -> str:
 
     append_candidates("armed", "位置+信号共振")
     append_candidates("wait_signal", "位置候选（等待信号）")
+
+    near = ov.get("near") or []
+    if near:
+        lines.append("接近关键位（逐条，尚未满足 policy 门槛）:")
+        for item in near:
+            crsi = item.get("crsi") or {}
+            distance = item.get("dist_atr")
+            dist_text = f"{distance:.2f}ATR" if isinstance(distance, (int, float)) else "不可用"
+            lines.append(
+                f"- {item.get('symbol')} | 4h={item.get('regime_4h')} | "
+                f"位置={item.get('at')}({item.get('meaning')},距{dist_text}) | "
+                f"cRSI={crsi.get('zone')}"
+            )
+    else:
+        lines.append(f"接近关键位: {count_text('near')}")
+
+    unavailable = ov.get("unavailable") or []
+    if unavailable:
+        lines.append("不可用（逐条）:")
+        for item in unavailable:
+            lines.append(f"- {item.get('symbol')}: {item.get('reason') or 'reason_unavailable'}")
+    else:
+        lines.append(f"不可用: {count_text('unavailable')}")
 
     risks = ov.get("risk") or []
     if risks:
@@ -713,7 +767,9 @@ def chat(payload: dict, messages: list, scope: str = "symbol") -> dict:
         load_system() + "\n\n" + system_brief()
         + (("\n\n" + ov) if ov else "")
         + gap_note
-        + "\n\n" + PANEL_LEGEND + "\n<panel>\n" + context + "\n</panel>"
+        + "\n\n" + PANEL_LEGEND
+        + "\n\n" + POLICY_GUARD
+        + "\n<panel>\n" + context + "\n</panel>"
     )
     msgs = [
         {"role": m["role"],

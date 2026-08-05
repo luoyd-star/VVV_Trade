@@ -63,7 +63,7 @@ def _item(symbol: str, *, dist=0.2, tradeable=True, at="at_support",
         ("trend_down", "at_resistance", False, ["ema55"], "S1 反弹至压力做空"),
         (
             "trend_down", "at_support", False, ["ema100"],
-            "S13 深跌逆势做多（需二次确认·半仓）",
+            "S13 深跌逆势做多（需二次确认·仓位为顺势单的 1/3-1/2）",
         ),
         ("range", "at_support", False, ["range_lo"], "S3 区间下沿做多"),
         ("range", "at_resistance", False, ["range_hi"], "S3 区间上沿做空"),

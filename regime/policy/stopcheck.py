@@ -9,6 +9,8 @@ import math
 from typing import Optional
 
 
+STOPCHECK_VERSION = "stop1"
+
 ZONE_BUFFER_ATR = 0.25          # 起步值，待校准；结构区外预留的失效缓冲
 MAX_STOP_DIST_ATR = 3.0         # 起步值，待校准；拒绝与 4h 命中结构明显错配的止损
 HOLDING_DAYS_DEFAULT = 3.0      # 起步值，待校准；与 1-3 天持仓前端口径对齐
@@ -86,7 +88,7 @@ def find_structural_stop(location: dict, zones: list, price: float,
 
 def check_stop_vs_iv(stop_dist_pct: float, iv3: Optional[float],
                      holding_days: float = HOLDING_DAYS_DEFAULT) -> Optional[dict]:
-    """比较止损距离与 IV3 隐含的计划持仓期预期波动。"""
+    """比较止损距离与 IV 对应实际期限的预期波动。"""
     stop_f = _finite(stop_dist_pct)
     iv_f = _finite(iv3)
     days_f = _finite(holding_days)

@@ -49,7 +49,9 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
         dashboard, "_overview_vol_inputs",
         lambda *args, **kwargs: {
             "iv3": 50.0, "iv30": None, "iv30_rank": None, "rv3": None,
-            "earnings_days": None, "term_inverted": None,
+            "earnings_days": None, "earnings_uncertain": False,
+            "term_inverted": None, "tenor_days": 1.67,
+            "method": "nearest", "n_expiries": 1,
         },
     )
 
@@ -58,9 +60,12 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
         {"4h": {"state": "trend_up"}, "1d": {"state": "range"}},
     )
     assert set(policy) == {
-        "tf", "regime_4h", "regime_1d", "price", "atr", "location", "crsi",
+        "versions", "tf", "regime_4h", "regime_1d", "price", "atr", "location", "crsi",
         "signal_ok", "signal_tf", "play", "zones", "vol_notes", "stop_check",
-        "degraded",
+        "vol_meta", "degraded",
+    }
+    assert policy["versions"] == {
+        "levels": "lv1", "location": "loc1", "stopcheck": "stop1", "volnote": "vol1",
     }
     assert policy["location"]["at"] == "at_support"
     assert policy["location"]["approach"] == "from_above"
@@ -68,12 +73,18 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
     assert policy["signal_tf"] == "1h"
     assert policy["play"] == "S4 趋势回踩做多"
     assert policy["zones"] == [{
-        **zone, "dist_atr": 0.0, "role_now": "support",
+        **zone, "established_ts": None, "overlap_count": None,
+        "last_overlap_bars": None, "chain_overflow": False,
+        "dist_atr": 0.0, "role_now": "support",
         "role_flipped": False, "eligible": True,
     }]
     assert policy["stop_check"]["side"] == "long"
     assert policy["stop_check"]["stop_price"] == 98.0
     assert policy["stop_check"]["verdict"] == "too_tight"
+    assert policy["vol_meta"] == {
+        "iv": 50.0, "tenor_days": 1.67, "method": "nearest", "n_expiries": 1,
+    }
+    assert "按实际期限 ~1.7d 计" in policy["vol_notes"][0]
     assert policy["degraded"] == []
 
 
@@ -124,6 +135,9 @@ def test_single_symbol_context_contains_policy_gate_and_degradation_fields():
         "tfs": {},
         "collector": {},
         "policy": {
+            "versions": {
+                "levels": "lv1", "location": "loc1", "stopcheck": "stop1", "volnote": "vol1",
+            },
             "regime_4h": "trend_up", "regime_1d": "range",
             "location": {
                 "at": "at_support", "meaning": "pullback_long_opportunity",
@@ -135,7 +149,8 @@ def test_single_symbol_context_contains_policy_gate_and_degradation_fields():
         },
     }
     text = render_context(payload)
-    assert "Policy测量: regime_4h=trend_up regime_1d=range" in text
+    assert "Policy测量: versions=lv1/loc1/stop1/vol1" in text
+    assert "regime_4h=trend_up regime_1d=range" in text
     assert "location at=at_support meaning=pullback_long_opportunity" in text
     assert "role_flipped=False dist_atr=0.2 approach=from_above" in text
     assert "signal_ok=True signal_tf=1h" in text and "play=S4 趋势回踩做多" in text

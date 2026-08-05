@@ -214,7 +214,17 @@ def sync_stock_iv_term(conn, symbols) -> tuple:
         want_full = len(stock_iv_term.TARGETS)
         missing = [s for s in us if len(cached.get(s) or {}) < want_full]
         if missing:
-            codes, fails = stock_iv_term.build_codes(ctx, us, existing=cached)
+            # R2-9：跨轮轮换建链起点。即使某轮末尾撞账号级限频，下一轮也从
+            # 另一个位置开始，列表尾部品种不会永久饿死；先写 next，整轮异常也会前进。
+            offset_key = "stock_iv_term_build_offset"
+            try:
+                start = int(storage.get_meta(conn, offset_key, 0) or 0) % len(us)
+            except (TypeError, ValueError):
+                start = 0
+            rotated = us[start:] + us[:start]
+            next_start = (start + stock_iv_term.BUILD_BATCH) % len(us)
+            storage.set_meta(conn, offset_key, str(next_start))
+            codes, fails = stock_iv_term.build_codes(ctx, rotated, existing=cached)
             if codes:
                 stock_iv_term.save_codes_cache(conn, codes)
             done = sum(1 for s in us if len(codes.get(s) or {}) >= want_full)

@@ -33,10 +33,17 @@ from regime.features.utils import pct_rank, rolling_pct_rank
 from regime.features.volatility import atr, bb_width, realized_vol
 from regime.features.vwap import WIN_HOURS as VWAP_WIN_HOURS
 from regime.features.vwap import rolling_vwap, vwap_payload
-from regime.policy.levels import extract_levels
-from regime.policy.location import APPROACH_BARS, _eligible, _zone_state, locate
-from regime.policy.stopcheck import check_stop_vs_iv, find_structural_stop
-from regime.policy.volnote import EARNINGS_NEAR_DAYS, vol_notes
+from regime.policy.levels import LEVELS_VERSION, extract_levels
+from regime.policy.location import (
+    APPROACH_BARS, LOCATION_VERSION, _eligible, _zone_state, locate,
+)
+from regime.policy.stopcheck import (
+    STOPCHECK_VERSION, check_stop_vs_iv, find_structural_stop,
+)
+from regime.policy.volnote import (
+    EARNINGS_NEAR_DAYS, TARGET_TENOR_DAYS, VOLNOTE_VERSION,
+    interpolate_iv_to_tenor, vol_notes,
+)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
@@ -54,6 +61,15 @@ OVERVIEW_DVOL_RANK_MIN = 120        # 起步值，待校准；不足样本不输
 POLICY_SIGNAL_TF = "1h"
 POLICY_SIGNAL_OHLCV_LIMIT = 400     # 起步值，待校准；覆盖 cRSI 自适应带观察窗
 STALE_TF_MULTIPLIER = 1.5           # 起步值，待校准；超过 1.5 个周期视为陈旧
+EARNINGS_BEFORE_CUTOFF_MIN_ET = 570  # 起步值，待校准；BEFORE 财报在 ET 09:30 后视为已发生
+EARNINGS_AFTER_CUTOFF_MIN_ET = 960   # 起步值，待校准；AFTER 财报在 ET 16:00 后视为已发生
+
+POLICY_VERSIONS = {
+    "levels": LEVELS_VERSION,
+    "location": LOCATION_VERSION,
+    "stopcheck": STOPCHECK_VERSION,
+    "volnote": VOLNOTE_VERSION,
+}
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1160,7 +1176,7 @@ def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None,
         play = "S1 反弹至压力做空"
     elif (regime == "trend_down" and at == "at_support"
           and kinds & {"ema100", "ema200"}):
-        play = "S13 深跌逆势做多（需二次确认·半仓）"
+        play = "S13 深跌逆势做多（需二次确认·仓位为顺势单的 1/3-1/2）"
     elif regime == "range" and at == "at_support":
         play = "S3 区间下沿做多"
     elif regime == "range" and at == "at_resistance":
@@ -1183,7 +1199,7 @@ def _policy_zone_payload(zone: dict, price: float, atr_value: float,
         raw_kinds = [raw_kinds]
     state = _zone_state(price, atr_value, zone)
     eligible = False
-    if state is not None:
+    if state is not None and zone.get("chain_overflow") is not True:
         eligible = _eligible(
             regime, state["role"], {str(kind) for kind in raw_kinds},
             state["role_flipped"],
@@ -1194,9 +1210,13 @@ def _policy_zone_payload(zone: dict, price: float, atr_value: float,
         "mid": zone.get("mid"),
         "kinds": list(raw_kinds),
         "touches": zone.get("touches"),
+        "established_ts": zone.get("established_ts"),
         "last_touch_bars": zone.get("last_touch_bars"),
+        "overlap_count": zone.get("overlap_count"),
+        "last_overlap_bars": zone.get("last_overlap_bars"),
         "origin_role": zone.get("origin_role"),
         "width_atr": zone.get("width_atr"),
+        "chain_overflow": zone.get("chain_overflow") is True,
         "dist_atr": state.get("dist_atr") if state else None,
         "role_now": state.get("role") if state else None,
         "role_flipped": state.get("role_flipped") if state else None,
@@ -1226,6 +1246,7 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
     regime_1d = (tfs_payload.get("1d") or {}).get("state")
     degraded: list[str] = []
     base = {
+        "versions": dict(POLICY_VERSIONS),
         "tf": "4h",
         "regime_4h": regime_4h,
         "regime_1d": regime_1d,
@@ -1238,6 +1259,7 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
         "play": None,
         "zones": [],
         "vol_notes": [],
+        "vol_meta": None,
         "stop_check": None,
         "degraded": degraded,
     }
@@ -1272,7 +1294,9 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
     except (KeyError, TypeError, ValueError, IndexError):
         degraded.append("vol1h_unavailable")
 
-    levels = extract_levels(df, vol1h=vol1h)
+    levels = extract_levels(
+        df, vol1h=vol1h, expected_end_ts=last_close_ms,
+    )
     degraded.extend(levels.get("degraded") or [])
     atr_value = levels.get("atr")
     zones = levels.get("zones")
@@ -1317,6 +1341,13 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
     try:
         vol_input = _overview_vol_inputs(conn, symbol)
         base["vol_notes"] = vol_notes(symbol, price, **vol_input)
+        if vol_input.get("iv3") is not None:
+            base["vol_meta"] = {
+                "iv": vol_input.get("iv3"),
+                "tenor_days": vol_input.get("tenor_days"),
+                "method": vol_input.get("method"),
+                "n_expiries": vol_input.get("n_expiries"),
+            }
     except Exception as exc:  # noqa: BLE001  风险补充失败不拖垮结构测量
         degraded.append(f"vol_inputs_unavailable:{type(exc).__name__}")
 
@@ -1327,7 +1358,15 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
             degraded.append("structural_stop_unavailable")
         else:
             iv3 = vol_input.get("iv3") if vol_input else None
-            width = check_stop_vs_iv(structural["stop_dist_pct"], iv3)
+            tenor_days = vol_input.get("tenor_days") if vol_input else None
+            width = (
+                check_stop_vs_iv(
+                    structural["stop_dist_pct"], iv3,
+                    holding_days=tenor_days,
+                )
+                if tenor_days is not None
+                else check_stop_vs_iv(structural["stop_dist_pct"], iv3)
+            )
             if width is None:
                 degraded.append("iv3_missing_for_stop_check")
             else:
@@ -1335,6 +1374,45 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
 
     base["degraded"] = list(dict.fromkeys(degraded))
     return base
+
+
+def _policy_earnings_proximity(conn, symbol: str, now_ms: int,
+                               horizon: int = EARNINGS_NEAR_DAYS) -> dict | None:
+    """在 policy 层消费 pub_type，修正财报当日盘前/盘后的已发生边界。"""
+    rows = conn.execute(
+        "SELECT ts,pub_type FROM earnings WHERE symbol=? AND source=?",
+        (symbol, "moomoo"),
+    ).fetchall()
+    if not rows:
+        return None
+    et = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    now_et = datetime.fromtimestamp(now_ms / 1000, tz=et)
+    today = now_et.date()
+    minute_et = now_et.hour * 60 + now_et.minute
+    candidates = []
+    for ts, raw_pub_type in rows:
+        event_date = datetime.fromtimestamp(int(ts) / 1000, tz=utc).date()
+        days = (event_date - today).days
+        pub_type = str(raw_pub_type).upper() if raw_pub_type else None
+        uncertain = False
+        if days == 0:
+            if pub_type == "BEFORE":
+                if minute_et >= EARNINGS_BEFORE_CUTOFF_MIN_ET:
+                    days = -1
+            elif pub_type == "AFTER":
+                if minute_et >= EARNINGS_AFTER_CUTOFF_MIN_ET:
+                    days = -1
+            else:
+                uncertain = True
+        candidates.append({
+            "days": int(days),
+            "ts": int(ts),
+            "pub_type": pub_type,
+            "uncertain": uncertain,
+        })
+    best = min(candidates, key=lambda item: (abs(item["days"]), item["days"], item["ts"]))
+    return best if abs(best["days"]) <= horizon else None
 
 
 def _overview_vol_inputs(conn, symbol: str) -> dict:
@@ -1347,7 +1425,11 @@ def _overview_vol_inputs(conn, symbol: str) -> dict:
         "iv30_rank": None,
         "rv3": None,
         "earnings_days": None,
+        "earnings_uncertain": False,
         "term_inverted": None,
+        "tenor_days": None,
+        "method": None,
+        "n_expiries": None,
     }
 
     if kind == "us_stock_perp":
@@ -1357,8 +1439,28 @@ def _overview_vol_inputs(conn, symbol: str) -> dict:
             age_sec = time.time() - int(row["ts"]) / 1000
             if age_sec <= OVERVIEW_TERM_FRESH_SEC:
                 iv3 = row.get("iv3")
+                t3 = row.get("t3")
+                iv9 = row.get("iv9")
+                t9 = row.get("t9")
                 iv30 = row.get("iv30")
-                out["iv3"] = float(iv3) if iv3 is not None and iv3 == iv3 else None
+                near_iv = float(iv3) if iv3 is not None and iv3 == iv3 else None
+                near_tenor = float(t3) if t3 is not None and t3 == t3 else None
+                far_iv = float(iv9) if iv9 is not None and iv9 == iv9 else None
+                far_tenor = float(t9) if t9 is not None and t9 == t9 else None
+                interpolated = interpolate_iv_to_tenor(
+                    near_iv, near_tenor, far_iv, far_tenor,
+                    TARGET_TENOR_DAYS,
+                )
+                if interpolated is not None:
+                    out.update(
+                        iv3=float(interpolated), tenor_days=TARGET_TENOR_DAYS,
+                        method="interp", n_expiries=2,
+                    )
+                elif near_iv is not None and near_tenor is not None and near_tenor > 0:
+                    out.update(
+                        iv3=near_iv, tenor_days=near_tenor,
+                        method="nearest", n_expiries=1,
+                    )
                 term_iv30 = float(iv30) if iv30 is not None and iv30 == iv30 else None
                 out["term_inverted"] = (
                     out["iv3"] > term_iv30
@@ -1369,16 +1471,21 @@ def _overview_vol_inputs(conn, symbol: str) -> dict:
         if stock_iv and not stock_iv.get("stale"):
             out["iv30"] = stock_iv.get("last")
             out["iv30_rank"] = stock_iv.get("rank")
-        earnings = storage.earnings_proximity(
-            conn, symbol, int(time.time() * 1000), horizon=EARNINGS_NEAR_DAYS
+        earnings = _policy_earnings_proximity(
+            conn, symbol, int(time.time() * 1000), horizon=EARNINGS_NEAR_DAYS,
         )
         out["earnings_days"] = earnings["days"] if earnings else None
+        out["earnings_uncertain"] = bool(earnings and earnings.get("uncertain"))
         return out
 
     # 加密与配置了期权代理的商品共用近端 1-3 天 IV；_xopt_block 自带新鲜度闸。
     if kind == "crypto" or inst.get("vol_proxy"):
         near = _xopt_block(conn, symbol)
-        out["iv3"] = near.get("iv") if near else None
+        if near:
+            out.update(
+                iv3=near.get("iv"), tenor_days=near.get("tenor_days"),
+                method=near.get("method"), n_expiries=near.get("n_expiries"),
+            )
 
     base = symbol.upper().replace("/", "-").split("-")[0]
     if kind == "crypto" and base in {"BTC", "ETH"}:
@@ -1406,7 +1513,10 @@ def _overview_zone(zone):
         "hi": zone.get("hi"),
         "kinds": list(kinds),
         "touches": zone.get("touches"),
+        "established_ts": zone.get("established_ts"),
+        "overlap_count": zone.get("overlap_count"),
         "width_atr": zone.get("width_atr"),
+        "chain_overflow": zone.get("chain_overflow") is True,
     }
 
 
@@ -1443,7 +1553,9 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
     last_close_ms = last_ts + TF_SEC["4h"] * 1000
     if len(vol1h):
         vol1h = vol1h[vol1h["ts"] < last_close_ms].reset_index(drop=True)
-    levels = extract_levels(df, vol1h=vol1h)
+    levels = extract_levels(
+        df, vol1h=vol1h, expected_end_ts=last_close_ms,
+    )
     if levels.get("atr") is None:
         return {"symbol": symbol, "reason": "no_atr", **timing}
     if levels.get("zones") is None:
@@ -1488,7 +1600,15 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
             degraded.append("structural_stop_unavailable")
         else:
             iv3 = vol_input.get("iv3") if vol_input else None
-            width = check_stop_vs_iv(structural["stop_dist_pct"], iv3)
+            tenor_days = vol_input.get("tenor_days") if vol_input else None
+            width = (
+                check_stop_vs_iv(
+                    structural["stop_dist_pct"], iv3,
+                    holding_days=tenor_days,
+                )
+                if tenor_days is not None
+                else check_stop_vs_iv(structural["stop_dist_pct"], iv3)
+            )
             if width is None:
                 degraded.append("iv3_missing_for_stop_check")
             else:
@@ -1520,6 +1640,12 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
         ),
         "vol_note": "；".join(notes) if notes else None,
         "vol_notes": list(notes),
+        "vol_meta": ({
+            "iv": vol_input.get("iv3"),
+            "tenor_days": vol_input.get("tenor_days"),
+            "method": vol_input.get("method"),
+            "n_expiries": vol_input.get("n_expiries"),
+        } if vol_input and vol_input.get("iv3") is not None else None),
         "stop_check": stop_check,
         "degraded": list(dict.fromkeys(degraded)),
         "warmup": state_4h["warmup"],
@@ -1533,7 +1659,7 @@ _OVERVIEW_FULL_KEYS = (
     "symbol", "display", "regime_4h", "regime_1d", "price", "atr",
     "at", "role", "meaning", "tradeable", "approach", "role_flipped",
     "zone", "dist_atr", "crsi", "signal_ok", "signal_tf", "play",
-    "vol_note", "vol_notes", "stop_check", "degraded", "warmup",
+    "vol_note", "vol_notes", "vol_meta", "stop_check", "degraded", "warmup",
     "bar_close_ts", "age_sec",
 )
 
@@ -1664,6 +1790,7 @@ def overview_payload() -> dict:
         "updated_at": int(now * 1000),
         "asof": min(bar_closes) if bar_closes else None,
         "tf": "4h",
+        "policy_versions": dict(POLICY_VERSIONS),
         **sections,
         "heartbeat": heartbeat,
     })
