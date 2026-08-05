@@ -1,0 +1,30 @@
+# 路线5：regime/ 全模块注释与 docstring 对实现
+
+## 发现
+
+| # | 类型(不一致/死代码/干扰) | 断言（一句话） | 证据A (file:line + 内容) | 证据B (file:line / grep / SQL) | 建议处置 | 置信(高/中/低) |
+|---|---|---|---|---|---|---|
+| 1 | 不一致 | `dashboard.py` 自称只读 SQLite，但助手聊天和清空历史会从面板进程写 `chat` 表。 | `dashboard.py:2`：“只读 SQLite（collector 负责写入）”。 | `dashboard.py:1155-1165` 打开 `connect_rw_nomigrate()` 并调用 `add_chat`；`dashboard.py:1169-1173` 调用 `clear_chat`；`regime/storage.py:146-153` 明确称其为“面板的 chat 表读写专用”。 | 文件头改成“市场数据只读；chat 表例外可写”，不要继续宣称整个面板只读。 | 高 |
+| 2 | 不一致 | 资金费率周期接口强调未知时绝不猜 8h，但面板无 meta 时仍默认 8h 并据此年化。 | `regime/deriv.py:122-127`：“失败返回 None（不是伪装成 8.0）”“不知道，而不是‘是 8h’”。 | `dashboard.py:809-811`：`get_meta(..., 8.0) or 8.0`，随后用该值计算 `per_year`；`dashboard.py:823-824` 输出年化及周期。 | meta 缺失时令周期及年化为 `None`，前端标“周期未知”；只允许沿用真实旧值。 | 高 |
+| 3 | 不一致 | funding 首轮历史在两处仍写约 333 天，实际接口和今日数据库都只有约 168–170 天。 | `regime/deriv.py:4-6` 写“funding 结算 1000 条≈333 天”；`collector.py:667` 日志也输出 `funding≈333天`。 | `regime/deriv.py:60-64` 已更正为“实测约 168 天”。只读 SQL：`SELECT ROUND((MAX(ts)-MIN(ts))/86400000.0,1),COUNT(*) FROM deriv WHERE funding IS NOT NULL AND kind='settled';` → `168.5, 22306`。 | 文件头和 collector 日志统一为“接口上限 1000，实得约 6 个月/168 天”。 | 高 |
+| 4 | 干扰 | 币安近端 IV 模块标题及 collector 行内注释仍说只覆盖 XAU/XAG，实际已经扩到 8 个标的。 | `regime/binance_opt_iv.py:1`：“合成（XAU/XAG，24/7）”；`collector.py:737` 同样只写 XAU/XAG。 | `regime/binance_opt_iv.py:26-34` 列出贵金属 2 个和加密 6 个；只读 SQL：`SELECT COUNT(DISTINCT symbol),GROUP_CONCAT(DISTINCT symbol) FROM opt_iv_near;` → 8 个：BNB/BTC/DOGE/ETH/SOL/XAG/XAU/XRP。 | 标题和 collector 注释改成“XAU/XAG + 6 个加密标的”。 | 高 |
+| 5 | 干扰 | `coupling.py` 仍称 M2 状态机是未来工作，但 M2 已实现并被面板实时调用。 | `regime/coupling.py:3-4`：“状态机（M2）……后续在此之上搭建”。 | `regime/coupling_fsm.py:1-11` 已定义 M2 四态状态机；`dashboard.py:1020-1022,1048-1051` 导入并执行 `run_pair_fsm`。 | 文件头改为当前分层：M1 计算、M2 FSM 已实现、M3 面板消费；仅把真正未实现的 M4 标为后续。 | 高 |
+| 6 | 干扰 | 除已知的 dashboard 注释外，`coupling.py` 自己的函数 docstring 也残留一份“38×38”，实际矩阵为 74×74。 | `regime/coupling.py:66-71`：`composite_matrix` 写“38×38”；这是已知清单未定位的第二份副本。 | `regime/coupling.py:73` 动态读取全部 cross 成员；`regime/storage.py:1049-1051` 从 `ohlcv` 取全体品种。只读 SQL：`SELECT COUNT(DISTINCT symbol) FROM ohlcv WHERE tf='1h';` → `74`。 | 删除固定数字，改成“N×N（N 为当前注册且有数据的成员数）”。 | 高 |
+| 7 | 不一致 | E1 离线实验声称与正式 `pct_rank` 同口径，实际实验使用 `<=`，正式特征使用 `<`。 | `regime/experiments.py:47-51`：docstring 称“同口径”，实现 `(x <= x[-1]).mean()`。 | `regime/features/utils.py:8-13`：正式 `pct_rank` 为 `(s < s.iloc[-1]).mean()`；`regime/features/utils.py:16-29` 的滚动版本同样使用 `<`。 | E1 改用正式共用函数/同构 `<` 实现；重跑受影响实验并标记协议版本。 | 高 |
+| 8 | 不一致 | `confirm_states` docstring 枚举的 candidate 返回结构漏掉实际存在且被消费的 `gated` 字段。 | `regime/classify.py:205-212` 声明 candidate 为 `state/count/need/event_win`。 | `regime/classify.py:235-240` 实际还返回 `gated`；`regime/agent.py:150-152` 根据该字段生成“确认门槛+1根”。 | docstring 补全 `gated: bool` 及其仅对 squeeze→trend 生效的语义。 | 高 |
+| 9 | 不一致 | cRSI docstring 的返回契约漏掉两个确认时点字段，容易诱使回测调用方使用带前视的枢轴时点。 | `regime/features/crsi.py:54-60` 将 divergence 写成 `{i,kind}`，last divergence 写成 `{kind,i,bars_ago}`。 | `regime/features/crsi.py:162-168` 实际 divergence 含 `confirmed_i`；`regime/features/crsi.py:174-177` last divergence 还含 `confirmed_bars_ago`。 | 完整记录两个字段，并明确告警/回测必须使用 `confirmed_i`。 | 高 |
+| 10 | 不一致 | 个股期限曲线 docstring 声称 ATM IV 是 call/put 均值，实际任一腿缺报价时会直接采用单腿值。 | `regime/stock_iv_term.py:106-110`：“call/put 的 option_implied_volatility 均值”。 | `regime/stock_iv_term.py:138-140` 先过滤缺失腿，`vals` 只剩一个值时仍计算并输出 IV。 | 二选一：要求两腿齐全才输出；或在 docstring 和返回结果中明确 `n_legs`/单腿退化语义。 | 高 |
+| 11 | 不一致 | 文本报告在 1h 缺失时仍会宣称“三周期同向”。 | `regime/report.py:43` 条件允许 `not h1`，即仅有 1d、4h 也可命中。 | `regime/report.py:44` 无条件返回“三周期同向”。 | 按实际存在周期生成“两周期同向/三周期同向”，或要求 `h1` 存在才走该分支。 | 高 |
+| 12 | 干扰 | VVVhermes 注释把 Codex 参数过滤器称为“白名单”，实现其实是可绕过未来新增危险参数的黑名单。 | `regime/agent.py:587-590`：“真正的防线是……白名单”。 | `regime/agent.py:522-528` 仅列 `_CODEX_FORBIDDEN`；`regime/agent.py:539-544` 命中禁项才丢弃，其余参数全部 `append` 放行。 | 注释如实改成“拒绝列表”，或真正改为允许参数白名单；安全承诺不要超出实现。 | 高 |
+| 13 | 干扰 | 两处注释仍承诺“个股 IV 进入 RULES_VERSION v2”，但全局规则版本已是 v3.1，不可能再以 v2 升版。 | `dashboard.py:334`：“需并入 RULES_VERSION v2”；`regime/storage.py:171-175` 也写“将来 IV 进规则层（v2）”。 | `regime/classify.py:44-47`：当前 `RULES_VERSION = "v3.1"`。 | 改成“进入规则层须递增当前 RULES_VERSION 并重算”，不要硬编码未来版本号。 | 高 |
+| 14 | 不一致 | `usvol.py` 对 CBOE CSV 更新时点同时写成 T+1 和当日收盘后，两个行为描述互斥。 | `regime/usvol.py:3-4`：“历史日线 CSV（VIX 自 1990 年，T+1 更新）”。 | `regime/usvol.py:31-35`：“实测该 CSV 当日收盘后即更新（非 T+1）”。只读库中五个指数最新确权日均为 `2026-08-04`。 | 文件头采用已验证口径，并给实测日期；若不同指数存在差异，应逐指数描述。 | 高 |
+| 15 | 死代码 | `moomoo_iv.fetch_overview` 全仓没有调用方，其“仍须 RTH 复测”说明也已被同文件的新实时管线推翻。 | `regime/moomoo_iv.py:71-75` 定义函数，并称盘中滚动更新仍须复测。 | grep：`grep -RIn --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ --include='*.py' -w fetch_overview .` → 仅 `regime/moomoo_iv.py:71` 一处定义；`regime/moomoo_iv.py:97-105` 的在用 `fetch_live` 已记录 RTH 实测滚动更新。 | 删除 `fetch_overview`；若保留兼容入口，则让它委托 `fetch_live` 并删除失效开放项。 | 高 |
+| 16 | 死代码 | `get_ref_daily` 与 `get_breadth` 两个读取函数均零调用，形成“持续写表但没有代码消费者”的孤立读取接口。 | `regime/storage.py:482-487` 定义 `get_ref_daily`；`regime/storage.py:723-729` 定义 `get_breadth`。 | grep：分别对 `get_ref_daily`、`get_breadth` 执行 `grep -RIn --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ --include='*.py' -w NAME .` → 每个都只有定义行，测试中也无调用。 | 若近期无消费计划则删 getter；若作为预留接口保留，应明确标 `reserved/no current consumer`，避免被误认为已接入研究或面板。 | 高 |
+| 17 | 死代码 | `YEAR_DAYS` 常量和 `rolling_sign_rate.window_frac` 参数从未参与任何计算。 | `regime/binance_opt_iv.py:37` 定义 `YEAR_DAYS = 365.0`；`regime/coupling.py:209-210` 定义 `window_frac` 参数。 | grep：对 `YEAR_DAYS` 和 `window_frac` 执行同一零引用命令 → 各仅命中定义一次；`regime/coupling.py:213-227` 的函数体没有读取 `window_frac`。 | 删除二者；若 `window_frac` 是未完成能力，则先实现其窗口作用并补测试再暴露参数。 | 高 |
+| 18 | 干扰 | 宽度模块未注明日期地保留“分母五周期同为 2659”的实测数，今日库内两个槽位已经是 2661 和 2664。 | `regime/breadth.py:12-13`：“实测 N 不随周期漂移：五个周期同为 2659”。 | 只读 SQL：`SELECT slot,denom FROM breadth ORDER BY captured_at;` → `0945=2661`、`1559=2664`；`regime/breadth.py:52` 每轮重新取得实时分母。 | 将动态数字改成带日期的探针记录，或只保留“各期限须同步记录分母”的不变量。 | 中 |
+
+## 自查盲区
+
+- 本路线未扩展到 `web/` 的 DOM id、CSS 类和前端死分支；已知 `.bak` 问题也未重复。
+- 对需要重新访问 CBOE、Binance、moomoo 在线接口才能复现的实测数字，只核对了当前只读库可验证部分。
+- 零引用证明覆盖仓库内全部 Python 文件并排除 `.git/.venv/__pycache__`；无法完全排除仓库外脚本通过动态反射调用这些函数。

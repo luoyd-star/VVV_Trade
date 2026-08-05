@@ -1,0 +1,29 @@
+# 路线2：README.md 全文逐节对现实
+
+## 发现
+
+| # | 类型(不一致/死代码/干扰) | 断言（一句话） | 证据A (file:line + 内容) | 证据B (file:line / grep / SQL) | 建议处置 | 置信(高/中/低) |
+|---|---|---|---|---|---|---|
+| 1 | 不一致 | `confidence` 并非统一表示“子信号一致程度”，而是按状态采用不同强度公式，squeeze/high-vol 甚至各只看一个分位。 | `README.md:16`：“confidence 表示子信号的一致程度”。 | `regime/classify.py:160-174`：趋势态用 direction/ER/tilt 加权；squeeze=`1-bbw_rank`；high-vol=`atr_rank`；range 为 `(1-er_rank)` 与 `(1-|dir|)` 均值。 | 改称“原始判定强度的状态专属启发式分数”，并列出各状态公式。 | 高 |
+| 2 | 不一致 | README 的迟滞说明漏掉 v3.1 的财报事件门槛：事件窗内 squeeze→trend 需要 3 根，而非一般的 2 根。 | `README.md:18-20`：一般状态连续 2 根确认、高波立即、range 3 根。 | `regime/classify.py:184-202`：`event_win and from_state=="squeeze"` 时趋势确认 `need += 1`；`tests/test_confirm_states.py:76-104` 钉死窗内 3 根、窗外 2 根。 | 补充“美股财报窗内 squeeze→trend 为 3 根”，并标注 RULES_VERSION v3.1。 | 高 |
+| 3 | 干扰 | “BTC 1h 翻转 26→12”没有样本窗、截止时间或版本，当前库按常见窗口均无法复现。 | `README.md:20`：“实测 BTC 1h 翻转从 26 次降到 12 次。” | 只读 SQL：对当前 `BTC-USDT/1h` 计算相邻翻转，最近 300 根为 `raw 50 / confirmed 26`，最近 400 根为 `63/34`，全序列为 `643/353`。命令核心：`WITH r AS (... ORDER BY ts DESC LIMIT 300), x AS (... lag(...) ...) SELECT sum(raw_state<>pr),sum(state<>ps) FROM x;` | 补齐数据截止、窗口根数及版本桶；否则删掉该陈旧实测数。 | 中 |
+| 4 | 不一致 | README 仍要求影子字段转正时“清空重算”，但当前版本机制明确没有清空动作，而是版本谓词触发原地 upsert 重算。 | `README.md:39`：“进规则之日必须升 RULES_VERSION 并清空重算。” | `regime/storage.py:180-184`：旧代际 DELETE 已由版本谓词取代，“谓词方案没有删除动作”；`regime/classify.py:49-57,260-261`：版本不匹配视为缺失并原地重算。 | 改为“升 RULES_VERSION，由版本谓词触发涉改序列原地重算”。 | 高 |
+| 5 | 干扰 | README 称美股盘中徽章“不含假日历”，但当前已使用覆盖 2025–2027 年假日和半日市的 NYSE 日历。 | `README.md:52-53`：“不含假日历，仅工作日+时段判断”。 | `regime/calendar_nyse.py:15-37` 定义假日和提前收盘表；`:40-56` 实现交易日/RTH；`dashboard.py:951-962` 明确调用 `is_rth()` 生成徽章。 | 更新为“含 2025–2027 显式 NYSE 日历；表外年份按休市处理”，并写明年度维护义务。 | 高 |
+| 6 | 干扰 | README 唯一具体宇宙描述仍停留在首批 7 个美股，没有交代当前 74 品种、其中 61 个美股永续的规模。 | `README.md:44-48` 只列 NVDA/AAPL/TSLA/MU/SOXL/SPY/QQQ。 | `collector.py:52-64` 的默认宇宙已扩至 74；只读 SQL `SELECT count(DISTINCT symbol) FROM ohlcv;` → `74`；`json_each(instruments.json)` 分组为 `us_stock_perp 61 / crypto 7 / commodity 5 / intl_stock_perp 1`。 | 在注册表章节开头动态或手工写明当前总数及分类，并保留“首批”作为历史说明。 | 中 |
+| 7 | 干扰 | README 把 CBOE 自采 iv30 描述为个股 IV 的 L2 主能力，但现行主线已换成 moomoo；CBOE 仅为短史影子/回退。 | `README.md:56-77` 将波动率体系写成 L0/L1/L2，并以 CBOE `deriv.iv30` 作为 L2。 | `collector.py:705-728` 明标 CBOE 为“影子”；`:730-750` 明标 moomoo 为“个股 IV 主线”，另有 3d/9d/30d、实时 IV；`dashboard.py:327-336` 从 `stock_vol` 读取 moomoo。SQL：`stock_vol/moomoo=47,185 行、63 品种`；`deriv.iv30=2,526 行、29 品种`。 | 将该节重写为当前波动率栈，明确 moomoo 主线、CBOE 影子、3d 前端与 settled/live 双轨。 | 高 |
+| 8 | 不一致 | README 所称默认行情顺序“Deribit→OKX→Binance”只适用于少数未钉源加密品种，并非 collector 当前默认路由。 | `README.md:84-85`：“数据源优先级…Deribit（默认主源）→ OKX → Binance”。 | `collector.py:778-792`：默认 `--sources auto`，按注册表逐品种路由。只读 SQL `SELECT source,count(DISTINCT symbol) FROM ohlcv GROUP BY source;` → `binance_futures\|71`、`deribit\|3`，当前库没有 OKX 行。 | 分开说明“auto 注册表路由”和“未登记加密默认链”；不要把后者写成全系统优先级。 | 高 |
+| 9 | 不一致 | README 称 OHLCV 越积越长会令“分位参照期随之变长”，实际特征窗和分位窗均有固定上限。 | `README.md:103`：“K 线越攒越长，分位参照期随之变长”。 | `regime/classify.py:19-21`：`FEATURE_WINDOW=400`；`regime/features/volatility.py:91-104` 和 `volume.py:12-19`：分位窗口固定为 250。 | 区分“数据库留存深度”“特征计算窗 400”“分位参照窗 250”。 | 高 |
+| 10 | 干扰 | 架构图只展示 3 张表，已无法代表当前单库的 19 张业务表及主要能力边界。 | `README.md:102-105` 仅列 `ohlcv/dvol/regime_history`。 | `regime/storage.py:17-112` 定义 19 张表；只读 SQL `SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';` → `19`。遗漏包括 deriv、usvol、chat、live_bars、stock_vol、earnings、breadth 等。 | 若图只列核心表，应显式标“节选”；另附由 `_SCHEMA` 维护的完整表清单。 | 高 |
+| 11 | 不一致 | 架构图把 dashboard 描述成纯读者，但对话发送和清空会由 dashboard 直接写同一 `market.db` 的 `chat` 表。 | `README.md:102`：`market.db <──读── dashboard.py`。 | `regime/storage.py:146-155` 定义 dashboard chat 专用 `mode=rw` 连接；`dashboard.py:1155-1173` 写入消息并执行 `clear_chat()`。README 自身 `:176-179` 也承认服务端持久化和清空。 | 图中拆成“市场数据只读”和“chat 表可写”两条箭头，避免把数据库权限模型概括成纯只读。 | 高 |
+| 12 | 干扰 | 面板“四层信息架构”的内容描述已落后：主图新增 VWAP、右列新增独立 IV/RV3 卡，历史与明细之间还加入耦合雷达。 | `README.md:137-149` 只描述主图+cRSI、一个波动率合并卡、持仓卡、历史和明细四层。 | `web/index.html:56-80`：主图标题为“价格结构 + cRSI + VWAP”，右列含独立 `IV vs RV30`、`IV vs RV3` 和持仓三卡；`:103-117` 新增跨资产耦合雷达。 | 按当前 DOM 重写面板章节；耦合雷达应注明“保留展示、暂停投入”。 | 高 |
+| 13 | 不一致 | README 声称 Hermes 自动注入“全部特征”，实际只注入精选文本摘要，若干结构和量能字段没有进入 prompt。 | `README.md:163-165`：“三周期状态与全部特征……自动注入”。 | `regime/agent.py:140-179` 只拼装 dir、ER、ATR/BBW、RV、加速度、下行占比、pathgeom、tilt、摆动点、cRSI、VWAP、breakout；`agent.py:470-478` 只把该 `render_context()` 文本放入 `<panel>`。例如审计快照中的 pivot/slope/dc/volz 等见 `regime/classify.py:274-310`，未被完整序列化。 | 改为“精选面板摘要”，或直接注入经过大小限制的结构化完整特征对象。 | 高 |
+| 14 | 不一致 | “已知限制”仍写系统没有迟滞，与 README 前文和当前唯一状态机直接相反。 | `README.md:198`：“无状态迟滞……之后应加”。 | `regime/classify.py:184-242` 已实现非对称迟滞和事件门槛；README 自身 `:18-20` 也宣称已上线。 | 删除该限制，改列当前迟滞参数仍属未校准先验。 | 高 |
+| 15 | 干扰 | “历史窗口约 300 根、之后分页拉长”已不是当前事实：计算窗为 400，库内主要序列已达数千根。 | `README.md:199`：“历史窗口约 300 根”；`:206` 仍把更长历史列为未完成路线。 | `regime/classify.py:21`：计算窗 400。只读 SQL 按 symbol/tf 统计：1h `165–5047` 根、4h `154–2012` 根、1d `91–1502` 根；`collector.py:587-600` 的重算读取上限为 `10000+399`。 | 分别写清当前数据库深度、400 根计算窗、250 根分位窗；路线图把“历史回填”与尚未完成的 parquet 缓存拆开。 | 高 |
+| 16 | 不一致 | 路线图仍把回测框架标成未完成，并保留了已被实现阶段否决的“当期条件分布”主目标。 | `README.md:204-205`：`[ ] 回测框架`，主目标为各状态下条件波动率/回撤/持续时长/转移概率。 | `regime/backtest.py:1-26`：框架已实现，且因旧目标存在自证问题，改为评估 `t+1..t+H` 未来 RV 的因果 CRPS 技能；`docs/BACKTEST_P0_20260803_407071b9336a.md:1-5` 已有实际报告。 | 勾选“回测框架/协议 p3”，单独保留“阈值校准”未完成；路线目标改成当前未来窗 proper-score 口径。 | 高 |
+| 17 | 干扰 | 两处未来工作仍写“并入 v2 升版”，但当前 RULES_VERSION 已是 v3.1，继续照文档执行会发生版本倒退。 | `README.md:78-80`：session 转正“并入 v2”；`:236`：日历剔除和 EMA 种子“并入 v2 升版”。 | `regime/classify.py:38-47`：当前 `RULES_VERSION="v3.1"`，且规则结构变化必须递增。 | 不预写具体下一版本号，统一改成“递增 RULES_VERSION”；真正落地时再决定 v3.2/v4。 | 高 |
+
+## 自查盲区
+
+1. 未联网复测 Deribit/OKX/Binance、CBOE、moomoo 的实时可用性与 `underlyingType=EQUITY` 当前数量；源路由结论基于当前代码、注册表和只读库。
+2. 全量 pytest 因只读环境没有可用临时目录而无法启动；已完成四个入口的 `--help` 烟测、`main.py --demo` 报告烟测及 plist 语法校验。
+3. README 中若干历史“实测”数字可能在原提交时成立，但未记录查询窗口或数据截止，无法可靠重建；除 BTC 翻转这一处外，没有据此继续报错。

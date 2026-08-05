@@ -1,0 +1,21 @@
+# 路线12：治理件与脚本
+## 发现
+| # | 类型(不一致/死代码/干扰) | 断言（一句话） | 证据A (file:line + 内容) | 证据B (file:line / grep / SQL) | 建议处置 | 置信(高/中/低) |
+|---|---|---|---|---|---|---|
+| 1 | 不一致 | collector 的 X1 注释写“37 品种、29 core+8 observation”，但其 X1 硬编码段实际有 38 个品种。 | `collector.py:49-51`：“X1…37 品种。核心池 29 + 观察池 8”。 | `collector.py:52-60` 为 X1 段；命令 `sed -n '52,60p' collector.py \| grep -oE '[A-Z0-9]+-USDT' \| wc -l` 输出 `38`；当前配置对应 30 core+8 observation。 | 更正为 38/30+8，或删除历史数字，避免再次随扩容漂移。 | 高 |
+| 2 | 不一致 | moomoo IV 回填脚本仍按“31 个标的”估时，实际默认处理 63 个品种。 | `scripts/backfill_moomoo_iv.py:7`：“31 个标的全量约 3-4 分钟”。 | `scripts/backfill_moomoo_iv.py:23-28` 选择全部 `us_stock_perp` 加全部 `vol_proxy`；`jq '[.[] \| objects \| select(.class=="us_stock_perp" or .vol_proxy!=null)] \| length' instruments.json` 输出 `63`；SQL：`SELECT COUNT(DISTINCT symbol) FROM stock_vol WHERE source='moomoo';` 输出 `63`。 | 改为动态描述并按请求数估时，不固化标的数。 | 高 |
+| 3 | 不一致 | moomoo 探针内部注释仍写“一次拿全31个标的”，实际动态读取61个美股永续。 | `scripts/probe_moomoo_iv.py:91`：“一次拿全 31 个标的”。 | `scripts/probe_moomoo_iv.py:38-45` 动态选择所有 `us_stock_perp`；对应 jq 计数输出 `61`。 | 删除固定数字，运行时只打印 `len(codes)`。 | 高 |
+| 4 | 干扰 | moomoo 探针仍把“是否能回溯≥3年、是否采用为主路线”写成待决未知，但该结论已经落地生产。 | `scripts/probe_moomoo_iv.py:4-6,137-143` 仍称“唯一承重未知”，并输出“进入回填实施/退回 ORATS”的判决。 | `regime/moomoo_iv.py:3-4` 已记录实测 3.10 年、778 行；`collector.py:730-733` 已把 moomoo IV 作为日频主线运行。 | 标成“历史探针/已裁决”，保留权限与覆盖巡检功能，删除待决措辞。 | 高 |
+| 5 | 不一致 | coupling 网格脚本声称每组合校准11个资格对，但今天按其实际生产函数计算为37个。 | `scripts/run_coupling_grid.py:10`：“稳态零模型，11 资格对”。 | `scripts/run_coupling_grid.py:94-99` 动态取当前 `all247` 资格对；只读复算命令使用 `storage.connect_ro()`、`panel_members/panel_returns/pair_table`，输出 `members=10, pairs=45, eligible=37`。 | 改成动态打印资格对数量；同时更新运行时间/算力预估。 | 高 |
+| 6 | 干扰 | 品种模块的 class 分类说明仍只有 crypto 与 us_stock_perp，遗漏已经上线的 commodity 与 intl_stock_perp。 | `regime/instruments.py:5-9` 的“类别 class”只列两类。 | `instruments.json:4` 明确新增两类；jq 现算分布为 `crypto=7, us_stock_perp=61, commodity=5, intl_stock_perp=1`。 | 将四类完整列入模块 docstring，注明各自交易时钟与功能边界。 | 高 |
+| 7 | 干扰 | “instruments 注册表热读、改完即生效”没有注明成员新增例外；新增 JSON 品种不会自动进入正在运行或默认启动的 collector。 | `instruments.json:2` 称“品种注册表（热读）”；`regime/instruments.py:3-4` 称“每次调用热读，改完即生效”。 | `collector.py:52-64` 另存一份硬编码74品种；`collector.py:775,787` 仅在启动时从 `DEFAULT_SYMBOLS` 解析成员。当前两集合虽一致，但新增 registry 项不会进入循环。 | 明确“仅属性热读、成员非热读”，或让 collector 从注册表派生默认成员并在每轮安全刷新。 | 高 |
+| 8 | 不一致 | requirements 注释称每个测试文件都保留 Python 直跑入口，实际只有7/12有 `__main__`。 | `requirements.txt:6`：“每个文件保留 python 直跑的 main()”。 | `grep -RIl '__main__' tests --include='test_*.py'` 只返回7个文件；`find tests -maxdepth 1 -name 'test_*.py'` 共12个，缺入口的是 backtest_causality、calendar_nyse、coupling、coupling_fsm、vwap。 | 改成“部分文件支持直跑”，或统一补入口。 | 高 |
+| 9 | 不一致 | 根 requirements 无法安装仓内明确标注“可执行”的参考实现所需依赖 SciPy。 | `requirements.txt:1-7` 无 `scipy`。 | `regime-spectrum/04-REFERENCE-IMPL.py:4,12` 明写依赖并导入 `scipy.stats`；执行 `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python regime-spectrum/04-REFERENCE-IMPL.py` 得 `ModuleNotFoundError: No module named 'scipy'`。 | 加入 SciPy，或为参考实现提供独立 requirements 并从根依赖说明中明确排除。 | 高 |
+| 10 | 不一致 | moomoo 依赖注释要求至少10.8.6808，但版本约束只写 `>=10.8`，不能表达所声明的最低版本。 | `requirements.txt:7`：`moomoo-api>=10.8`，同一行注释称“10.8.6808 起才有”。 | `regime/moomoo_iv.py:1` 再次声明 `SDK ≥10.8.6808`；当前安装为10.9.6908只是本机恰好满足，约束本身仍过宽。 | 改为 `moomoo-api>=10.8.6808`。 | 高 |
+| 11 | 死代码 | `REP_PAIRS_IDX` 是完全没有消费者的遗留常量。 | `scripts/run_coupling_grid.py:38` 定义 `REP_PAIRS_IDX = 2`。 | 零引用证明：`grep -RInw 'REP_PAIRS_IDX' . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=data` 仅输出定义这一行。 | 删除；若原意是限制代表对数量，则应实际接入 `reps` 构造。 | 高 |
+| 12 | 死代码 | `backfill_history._fetch_deribit_range` 的 `fetch_tf` 仅赋值后显式丢弃，不参与请求或窗口计算。 | `scripts/backfill_history.py:43` 赋值；`:65` 为 `_ = fetch_tf`。 | 零消费者证明：`grep -RInw 'fetch_tf' scripts/backfill_history.py` 仅输出上述赋值和丢弃；实际请求使用 `scripts/backfill_history.py:48` 的 `_DERIBIT_RES[tf]`。 | 删除两行；保留 `_DERIBIT_RES["4h"]="60"` 作为真实的1h取数依据。 | 高 |
+
+## 自查盲区
+- 未实际调用 Binance、Hyperliquid、moomoo、Yahoo、FRED 等外部接口，因此没有复核探针所述的当前接口形状、限频和耗时。
+- 仓库内没有 weekly rerun 的调度定义；未检查仓库外 Claude Code/cron 调度器的实际注册状态。
+- 未查询远端 GitHub Actions 历史；CI 部分仅核对当前 YAML、依赖声明和本地测试文件结构。

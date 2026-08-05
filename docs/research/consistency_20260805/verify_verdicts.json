@@ -1,0 +1,1885 @@
+{
+  "summary": "对 14 份 codex 一致性审查报告逐条对抗核验",
+  "agentCount": 14,
+  "logs": [
+    "核验完成 14/14 路，共 178 条判定：{\"CONFIRMED\":171,\"CORRECTED\":7}"
+  ],
+  "result": {
+    "stats": {
+      "CONFIRMED": 171,
+      "CORRECTED": 7
+    },
+    "routes": [
+      {
+        "route": "路线1：常量与阈值的多处呈现（对抗复核，11/11 条逐条独立查证）",
+        "verdicts": [
+          {
+            "claim": "前端六条分位条把 ATR/BBW 统一按 <0.15 挤压、>0.85 高波配色，实际规则是 BBW<0.15、ATR<0.30 共判挤压，高波只看 ATR",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "web/app.js:399-417 renderVolRanks 对六条条统一 `val < 0.15 ? squeeze : val > 0.85 ? chop : accent`；web/app.js:653-656 历史图 markLine 只画 0.15/0.85 两条线；web/style.css:156 只有 .t15/.t85 两个刻度类，全前端 grep 无 0.30；regime/features/volatility.py:129-130 `squeeze = bbw_rank<0.15 and atr_rank<0.30`、`high_vol = atr_rank>0.85`。ATR∈(0.15,0.30) 被涂中性色但满足挤压侧条件、BBW>0.85 被涂高波色但 high_vol 根本不看 BBW——两侧证据均复现",
+            "fix_hint": "ATR 条挤压线用 0.30、BBW>0.85 不着 high_vol 色，历史图补 ATR 0.30 markLine"
+          },
+          {
+            "claim": "系统日志称『只有两个阈值真正决定状态』，把直接决定 squeeze/high_vol 的三个分位阈值排除在决定状态的集合之外",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "干扰",
+            "evidence": "SYSTEM_LOG_20260805.md:160 原句确认（行号精确）；regime/classify.py:166-170 `elif vol[\"squeeze\"]: state=\"squeeze\"` / `elif vol[\"high_vol\"]: state=\"high_vol_chop\"`——0.15/0.30/0.85 直接选态，实际 5 个阈值决定 state、tilt_confirm=0.10 只进 conf。细微说明：该句同段末尾其实写了『另有 SQUEEZE_BBW=0.15/SQUEEZE_ATR=0.30/HIGHVOL_ATR=0.85 三个分位线』，所以不是漏列数值，而是把它们错误地排除在『决定状态』之外——报告的实质断言成立",
+            "fix_hint": "改写为『两个趋势阈值 + 三个波动分位阈值共 5 个决定 state；tilt_confirm 仅调置信度』"
+          },
+          {
+            "claim": "experiments.py 的 _rolling_rank 自称与生产 pct_rank 同口径，却用 <=（含自身）而生产用严格 <",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "regime/experiments.py:47-51 docstring『与 features.utils.pct_rank 同口径的滚动分位（<=，含自身）』+ `(x <= x[-1]).mean()`；regime/features/utils.py:8-13 `(s < s.iloc[-1]).mean()`。无并列值的满 250 窗差恰为 1/250=0.004（<= 比 < 恒多计自身一票），有并列值差更大；E1 的 0.30/0.85 阈值翻转率统计因此系统性偏移。另注意生产 pct_rank 先 dropna 再 tail(window)，rolling 版对 NaN 的窗口语义也不同——分叉比报告说的还多一处",
+            "fix_hint": "_rolling_rank 改严格 < 或直接复用 utils.rolling_pct_rank，已出报告注明口径"
+          },
+          {
+            "claim": "CLI 路径（main.py）最多用 299 根已收盘数据算特征，未遵守生产/面板统一的 FEATURE_WINDOW=400",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "regime/classify.py:19-21 FEATURE_WINDOW=400 及『必须用同一个值』注释；main.py:62-64 fetch_ohlcv 不传 limit 后整个 df 直送 analyze_timeframe；regime/data.py:375 默认 limit=300、:399 `closed = df.iloc[:-1]` 丢最后一根 → 至多 299 根。dashboard.py:84 与 collector.py:592 均按 FEATURE_WINDOW 取窗。SQL 独立复现：symbol×tf 组 ≥400 根者 126/180（1h 71、4h 48、1d 7）——与报告数字逐位一致，同一根 bar CLI 与面板/库会给出不同 atr_rank/state 的分叉已是现实",
+            "fix_hint": "main.py 显式 limit>=FEATURE_WINDOW+1 并只送最后 FEATURE_WINDOW 根"
+          },
+          {
+            "claim": "README 与 Hermes 的规则说明把确认表写成无条件 2/3/1，遗漏 v3.1 事件窗内 squeeze→trend 2→3 例外",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "不一致",
+            "correction": "README 侧完全成立：README.md:18-20 只写 2/3/1，全文 grep 无事件门槛。但 Hermes 侧只对了一半：regime/agent.py:50 的静态 PANEL_LEGEND 确实只写 2/3/1，而同文件 :151-152 的动态候选行在被门槛拦截时会实时标注『（事件窗:未来10日有财报,确认门槛+1根）』——Hermes 并非对该例外全盲，遗漏仅在静态图例，运行时有补充说明。规则本体核实无误：classify.py:196-202 need+=1、collector.py:611-623 生产传入事件窗",
+            "evidence": "grep '事件窗' regime/agent.py → :151-152 命中；README.md 全文无命中",
+            "fix_hint": "README 与 PANEL_LEGEND 静态文案补一句事件窗例外（最好从 _confirm_need 生成）"
+          },
+          {
+            "claim": "calibrated-1 报告推荐 elig=0.35，运行时却用进入0.40/退出0.35，且代码把该报告称为自身推导链",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "docs/COUPLING_CALIBRATED1_20260804.md:43 『推荐 calibrated-1：{elig:0.35, d_enter:2.0, delta:0.35}（人工复核后升版）』，全文无 0.40 被采纳的裁决记录；regime/coupling_fsm.py:22 『推导链 docs/COUPLING_CALIBRATED1_20260804.md，用户批准』、:61-62 elig_exit=0.35/elig_enter=0.40。补充语境：代码 docstring（:29-32）其实详细记录了改选 0.40/0.35 的理由（误报 0.043→0.028、强对检出 0.86→0.96、边缘对诚实排除），数字与报告候选表 :38 行吻合——所以误导只在文档侧：顺着『推导链』读报告的人会以为采纳的是 0.35",
+            "fix_hint": "在报告末尾追加人工裁决记录：最终采纳 elig=0.40/退出0.35 及理由"
+          },
+          {
+            "claim": "README 路线图仍把回测框架列为未完成，且描述的是已被 p3 修订废弃的『当期条件分布』目标",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "README.md:204-205 『[ ] 回测框架：主目标统计各状态下的风控背景条件分布…』；regime/backtest.py:1-10 文件头明确原设想『state→当期风险条件分布』有自证缺陷、已改为 t 对 t+1..t+H 的预测信息（CRPS）；:44-58 LOCKBOX/HORIZONS/MIN_*/MAX_SHIFTS/FEE_BPS 已冻结；:347 run_experiment 完整入口；docs/ 下两份 BACKTEST_P0_20260803 报告存在。非 KNOWN_DUP：SYSTEM_LOG 漂移表只列了路线图第 5 项（DATA_DEGRADED），未含此条",
+            "fix_hint": "路线图该项改 [x] 并按 backtest.py 现状重写目标描述"
+          },
+          {
+            "claim": "GAPS_20260805.md 同时宣告 A1 已完成，又在 D2 与结尾把 A1 当待办且要求走已过期的 v2 升版",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "docs/GAPS_20260805.md:34 『A1 已完成（RULES_VERSION v3.1，8-05）』；:69 D2 行『A1 一起做』；:77-79 『若只做一件事：A1……须走完整的 v2 升版』；regime/classify.py:44 RULES_VERSION=\"v3.1\"。只读 SQL 复现：SELECT version,audit_version,COUNT(*) FROM regime_history GROUP BY 1,2 → 唯一桶 v3.1|a8|236830，与报告逐位一致。『若只做一件事：A1』现在是主动错误的优先级指引",
+            "fix_hint": "删『一句话优先级』旧段，D2 的搭车对象与版本号改为『下一 RULES_VERSION』"
+          },
+          {
+            "claim": "YEAR_DAYS=365.0 定义后全仓无任何读取，是死常量",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/binance_opt_iv.py:37 唯一命中；grep -RIn（排除 .git/.venv/data/__pycache__/.pytest_cache）全仓仅此 1 行；同文件内无其它 365/annual 字样、无年化公式消费它；无 getattr/字符串式动态访问该模块属性的调用方。死判定成立",
+            "fix_hint": "删除；若期限年化本应用它，接入公式并补测试"
+          },
+          {
+            "claim": "REP_PAIRS_IDX=2 是未接线配置，代表对仍由手写逻辑决定",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "scripts/run_coupling_grid.py:38 唯一命中（grep -w 全仓 1 行）；:103-106 实际以 next(...BTC×ETH...)、next(...XAU×ETH...) 硬选 strong/edge 后 `reps=[strong, edge]`，常量既不控制数量也不做校验；无动态引用",
+            "fix_hint": "删除常量，或让 reps 构造真正按它截取并断言长度"
+          },
+          {
+            "claim": "experiments.py 导入 _pct 标注『口径参考』但从未调用，且掩盖了第3条的口径分叉",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/experiments.py:107 `from .features.utils import pct_rank as _pct  # noqa: F401 口径参考`；grep -RInw '_pct'（同排除项，--include='*.py'）全仓仅此 1 行；函数局部导入、别名仅存在于该作用域，无动态调用可能。noqa:F401 表明是有意保留的『装饰性』导入，而其『口径参考』注释与 _rolling_rank 实际用 <= 的事实相互矛盾——掩盖分叉的定性成立",
+            "fix_hint": "删死导入，_rolling_rank 复用 utils 的实现（与第3条同一修）"
+          }
+        ],
+        "missed_nearby": [
+          "README.md:195-199『已知限制（v1 刻意为之）』第2条『无状态迟滞』与第3条『历史窗口约 300 根』同样过时：非对称迟滞 2026-07-31 已实现（README:18-20 自己就在讲它），生产路径窗口已是 FEATURE_WINDOW=400 + 回填至 5000 根——与报告第7条同区域但未被列出（第3条对 CLI 路径反而仍成立，恰是报告第4条的另一面）",
+          "regime/features/utils.py pct_rank 的 window 参数默认 250，而调用方与 SYSTEM_LOG 均以 250 为口径叙述；experiments._rolling_rank 除比较算子外对 NaN 的窗口语义也与生产不同（rolling 原序列 vs dropna 后 tail）——第3条修复时应一并对齐",
+          "docs/COUPLING_CALIBRATED1_20260804.md 尾注『升版须人工复核 + 满额（20k 路）终验』与 GAPS E6『calibrated-1 从未跑过 20k 满额终验』互证：第6条修文档时应同时把『终验未跑』写进裁决记录，避免只补采纳值不补欠账"
+        ]
+      },
+      {
+        "route": "路线2：README.md 全文逐节对现实",
+        "verdicts": [
+          {
+            "claim": "confidence 并非统一的“子信号一致程度”，而是按状态各用不同强度公式，squeeze/high-vol 各只看一个分位",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "README.md:16 vs regime/classify.py:160-174：trending conf=0.45|d|+0.35·er_rank+0.20·vol_confirm（165）；squeeze=1-bbw_rank（168）；high_vol=atr_rank（171）；range=0.5(1-er_rank)+0.5(1-|d|)（174）。行号与公式与报告完全一致",
+            "fix_hint": "README 改称“状态专属启发式强度分”并列出各态公式"
+          },
+          {
+            "claim": "README 迟滞说明漏掉 v3.1 事件门槛：财报窗内 squeeze→trend 需 3 根而非 2 根",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "README.md:18-20 无事件门槛描述；regime/classify.py:196-202 `event_win and from_state=='squeeze'` 时 need+=1；tests/test_confirm_states.py:76-110 test_event_gate_v3 钉死窗内 3 根/窗外 2 根，独立复读确认",
+            "fix_hint": "迟滞段补一句 v3.1 事件窗内 squeeze→趋势 3 根"
+          },
+          {
+            "claim": "“BTC 1h 翻转 26→12”无样本窗/截止/版本，当前库按常见窗口无法复现",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "复跑报告的 SQL 数字逐一吻合：最近300根 raw 50/confirmed 26，最近400根 63/34，全序列(4958根,v3.1) 643/353——没有任何窗口给出 26→12。该数为 2026-07-31 v1 时代的活体数字且未记口径，属无法重建而非时点差可解释（当年窗口/版本均已不存在），报告断言“无法复现、需补时点”本身成立",
+            "fix_hint": "给该实测数补上日期/窗口/RULES_VERSION，或删除"
+          },
+          {
+            "claim": "README 仍要求影子转正时“清空重算”，实际版本谓词机制无删除动作、是原地 upsert 重算",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "README.md:39（及 :79、:236 同措辞）；regime/storage.py:180-184 注释明写“谓词方案没有删除动作”及旧 DELETE 机制两个雷已拆；regime/classify.py:49-51,260-261 版本不匹配视为缺失、下一轮 upsert 原地重算。SYSTEM_LOG 版本纪律章也证实，但漂移表未收录 README:39 此条，非 KNOWN_DUP",
+            "fix_hint": "三处“清空重算”统一改为“升版触发版本谓词原地重算”"
+          },
+          {
+            "claim": "README 称美股盘中徽章“不含假日历”，实际已用 2025–2027 显式 NYSE 假日+半日市日历",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "README.md:53 vs regime/calendar_nyse.py:17-35（HOLIDAYS 三年 30 天+EARLY_CLOSE 6 天）、:39-56（is_trading_day/is_rth，表外年份当休市）；dashboard.py:957-962 `_instrument_payload` 用 is_rth 生成徽章，docstring 自述 v3.1 换掉了“工作日 9:30-16:00”旧实现",
+            "fix_hint": "README 改为“含 2025–2027 显式日历，表外年份视为休市，每年 12 月须补表”"
+          },
+          {
+            "claim": "README 宇宙描述停在首批 7 个美股，未交代当前 74 品种（其中 61 美股永续）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "README.md:47 仅 7 个；collector.py:52-65 DEFAULT_SYMBOLS 实数 74 个（脚本计数）；SQL `count(DISTINCT symbol) FROM ohlcv`→74；instruments.json 分类计数 us_stock_perp 61/crypto 7/commodity 5/intl_stock_perp 1，全部与报告一致",
+            "fix_hint": "注册表章节写明当前 74 品种及分类，“首批”降为历史注"
+          },
+          {
+            "claim": "README 把 CBOE iv30 写成个股 IV 的 L2 主能力，实际主线已是 moomoo，CBOE 仅影子/短史",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "干扰",
+            "evidence": "README.md:56-77（L0/L1/L2 以 CBOE iv30 为 L2）；collector.py:728 日志明标“个股 iv30(CBOE影子)”、:730 起“个股 IV 主线（moomoo 口径）”及 3d/9d/30d 期限曲线与盘中实时 IV；dashboard.py:327-340 `_stock_iv_block` 读 stock_vol/moomoo。SQL：stock_vol source='moomoo' 47,185 行/63 品种，deriv.iv30 非空 2,526 行/29 品种——四个数字全部复现",
+            "fix_hint": "重写该节为现行波动率栈：moomoo 主线 + CBOE 影子 + 期限曲线 + live 轨"
+          },
+          {
+            "claim": "README 的默认源顺序“Deribit→OKX→Binance”只是未登记加密品种的兜底链，不是 collector 当前默认路由",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "README.md:84-85 vs collector.py:777-782 默认 `--sources auto`（注册表逐品种路由）；regime/data.py:369 DEFAULT_SOURCES=('deribit','okx','binance') 仅作未登记 symbol 兜底（:380 注释）。SQL `SELECT source,count(DISTINCT symbol) FROM ohlcv GROUP BY source`→binance_futures|71、deribit|3，零 OKX 行——与报告一致。注意：SYSTEM_LOG 漂移表已收录 data.py 文件头的同源漂移，但那条定位在 data.py，README:84-85 这个位置未入档，故不判 KNOWN_DUP",
+            "fix_hint": "分开写“auto 注册表路由（现实）”与“未登记加密兜底链”"
+          },
+          {
+            "claim": "README 称 K 线越攒越长“分位参照期随之变长”，实际特征窗 400、分位窗 250 均固定上限",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "README.md:103 vs regime/classify.py:21 FEATURE_WINDOW=400；regime/features/volatility.py:91-96 rank_window=250；regime/features/volume.py:12 rank_window=250。历史超 250 根后分位参照期即封顶，README 陈述只在暖机期成立",
+            "fix_hint": "架构图注区分 库内留存深度 / 400 计算窗 / 250 分位窗"
+          },
+          {
+            "claim": "架构图只列 3 张表，实际单库已有 19 张业务表",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "README.md:102-105 仅 ohlcv/dvol/regime_history；regime/storage.py:17 起 _SCHEMA 内 grep 到 19 个 CREATE TABLE；SQL `count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`→19",
+            "fix_hint": "图标注“节选”并附完整表清单"
+          },
+          {
+            "claim": "架构图把 dashboard 画成纯读者，实际 chat 表由 dashboard 以 rw 连接直写同一 market.db",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "README.md:102 `<──读──` vs regime/storage.py:146-155 connect_rw_nomigrate（mode=rw，chat 专用）；dashboard.py:1155-1175 `/api/agent/chat` add_chat 两次写入、`/api/agent/clear` 调 storage.clear_chat（storage.py:1030）。README:176-179 自己也承认服务端持久化——图与正文自相矛盾",
+            "fix_hint": "图拆两条箭头：市场数据只读 + chat 表可写"
+          },
+          {
+            "claim": "README 称 Hermes 注入“全部特征”，实际只注入精选文本摘要，pivot/slope/dc/volz 等未进 prompt",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "README.md:163-165 vs regime/agent.py:146-179 parts 只拼 dir/ER/ATR(+ds)/BBW/RV/加速度/下行占比/pathgeom/tilt/摆动点/cRSI/VWAP/突破；agent.py:470-476 仅把 render_context() 文本放进 <panel>。审计快照的 pivot/slope/dc/volz 见 classify.py:276-278,288，确不在 parts 中",
+            "fix_hint": "改称“精选面板摘要”或注入受限的完整结构化特征"
+          },
+          {
+            "claim": "“已知限制”仍写系统无迟滞，与前文及现行状态机直接相反",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "README.md:198 “无状态迟滞……之后应加” vs regime/classify.py:184-242 _confirm_need/confirm_states 已实现非对称迟滞+事件门槛；README:18-20 与路线图 :212 `[x] 非对称迟滞` 均宣称已上线——同一文档三处互斥",
+            "fix_hint": "删该限制，改列“迟滞参数(2/3/+1)仍是未校准先验”"
+          },
+          {
+            "claim": "“历史窗口约 300 根、之后分页拉长”已过时：计算窗 400，库内序列达数千根",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "README.md:199,206 vs classify.py:21（400）；collector.py:592 重算读取 limit=10_000+FEATURE_WINDOW-1；SQL 按 symbol/tf 计数：1h 165–5047、4h 154–2012、1d 91–1502——三组区间与报告逐位吻合",
+            "fix_hint": "分写库内深度/400 计算窗/250 分位窗；路线图只留 parquet 缓存为未完成"
+          },
+          {
+            "claim": "路线图仍标回测框架未完成，且保留已被否决的“当期条件分布”主目标",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "README.md:204-205 `[ ] 回测框架` vs regime/backtest.py:1-26 docstring：框架已实现且明写原设想“state→当期风险条件分布”有自证缺陷、改为 t+1..t+H 未来 RV 的 CRPS 技能（协议 p3）；docs/BACKTEST_P0_20260803_407071b9336a.md 为实跑报告。GAPS 只留“六个阈值校准”为老账，与此不重复",
+            "fix_hint": "勾选回测框架，主目标改为现行 proper-score 口径，阈值校准单列"
+          },
+          {
+            "claim": "两处未来工作仍写“并入 v2 升版”，照做会从 v3.1 版本倒退",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "README.md:79 “若转正则并入 v2 升版”、:236 “并入 v2 升版” vs regime/classify.py:44 RULES_VERSION='v3.1'（:38-47 明确规则改动必须递增）。不在漂移表（表内 README 条目仅 :22 与 DATA_DEGRADED 项）",
+            "fix_hint": "统一改为“递增 RULES_VERSION”，落地时再定具体号"
+          }
+        ],
+        "missed_nearby": [
+          "与 #17 同族的版本倒退引用还有两处代码注释未被报告列出：dashboard.py:334-336 “个股 IV 进规则层需并入 RULES_VERSION v2”、regime/storage.py:172-174 “将来 IV 进规则层（v2）”——修 README 时应一并改为“递增 RULES_VERSION”",
+          "README.md:95 “每周期取约 300 根已收盘 K 线”写在“数据”通节，但它只对 main.py 直连接口路径成立；collector 路径经回填后读窗为 10000+399（collector.py:592）——报告 #15 只覆盖了“已知限制”一节的 300 根表述，未点名此处需区分两条路径",
+          "README.md:22（a7/23 项，实际 a8/25 项）与路线图 :211 的 DATA_DEGRADED 项是本路线范围内的另两处漂移，报告未列——二者均已在 SYSTEM_LOG_20260805 漂移表入档，属 KNOWN_DUP，报告跳过合理但未声明"
+        ]
+      },
+      {
+        "route": "路线3：两份 SYSTEM_LOG 互查 + 对代码（对抗复核）",
+        "verdicts": [
+          {
+            "claim": "20260805:160「只有两个阈值真正决定状态」与实际五个状态边界不符，且回退了 0731 附录已订正的结论",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "SYSTEM_LOG_20260805.md:160 原文复核属实；classify.py:141-174 中 trending 用 er_rank_trend/direction_trend 两阈值，squeeze 分支由 vol['squeeze']（volatility.py:129 = bbw_rank<0.15 and atr_rank<0.30）、high_vol 分支由 vol['high_vol']（volatility.py:130 = atr_rank>0.85）直接决定 state——五个阈值均改变 state；SYSTEM_LOG_20260731.md:825-838 的订正表明确列出这 4 项状态输入并强调 bbw_rank/atr_rank「实质参与判定」",
+            "fix_hint": "改写为「五个状态边界（er_rank/|dir|/SQUEEZE_BBW/SQUEEZE_ATR/HIGHVOL_ATR）；tilt_confirm 只调置信度」"
+          },
+          {
+            "claim": "「structure/volatility/volume 三支进判定」会让读者以为 volume 改变状态，实际 volume 只影响趋势态 confidence 与 rules 文本",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "SYSTEM_LOG_20260805.md:58-60（mermaid F1 标「进判定」）与 :158 原文属实；classify.py:152-153 volu 只进 checks/rules 文案、:162-165 只喂 vol_confirm→趋势态 conf，所有 state 分支（160/166/169/172）均不读 volume；SYSTEM_LOG_20260731.md:833、838 已明确订正「updown_tilt_20 不进任何分支」",
+            "fix_hint": "改为「structure/volatility 决定 state；volume 只参与 confidence/rules」"
+          },
+          {
+            "claim": "「6 个模块 634 行」口径不闭合：六个具名功能模块合计 604 行，634 是含 utils.py 的七文件总数；架构图 F2 已含 crsi、F3 又单列 cRSI",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "wc -l regime/features/{structure,volatility,volume,pathgeom,crsi,vwap}.py = 93+131+44+76+189+71=604，加 utils.py 30 = 634（实测 total 634）；SYSTEM_LOG_20260805.md:60-61 mermaid 中 F2[\"pathgeom / crsi / vwap\"] 与 F3[\"cRSI\"] 重复属实",
+            "fix_hint": "写成「6 个功能模块 604 行 + utils 30 行」，删架构图重复的 F3 节点"
+          },
+          {
+            "claim": "「平均置信度」一行实为按 raw_state 分组，却置于「确认态分布」表格语境中未声明口径切换",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "只读 SQL 复现：GROUP BY state → squeeze 0.886 / high_vol_chop 0.871 / range 0.688 / trend_down 0.670 / trend_up 0.675；GROUP BY raw_state → 0.937/0.930/0.677/0.674/0.680，与 SYSTEM_LOG_20260805.md:169 的 0.937/0.930/0.680/0.674/0.677 逐项吻合——文档数字确是 raw_state 口径，同表其余行（确认态分布/迟滞改写率）是 state 口径",
+            "fix_hint": "该行表头标注「按 raw_state 分组的原判置信度」或改按 state 重算"
+          },
+          {
+            "claim": "12 文件/69 用例正确，但「265 条 assert」现算为 262 条",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "ls tests/test_*.py = 12；AST 遍历 ast.Assert 计数 = 262，grep '^\\s*assert ' 同为 262。且非时点差：最后一次改动 tests/ 的提交是 509b58e（08-05 12:56 JST = 03:56 UTC），早于文档声明的快照截止 06:01 UTC，git diff tests/ 无未提交改动——快照时点的真值就是 262",
+            "fix_hint": "改为 262，并让测试统计由脚本/CI 生成"
+          },
+          {
+            "claim": "快照截止 06:01 UTC 时 collector.log 实际已有 1,181 轮，文档写的 1,175 是约 35 分钟前的读数",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "日志为 JST 本地时间；awk 统计 ts<=2026-08-05 15:01:00（=06:01 UTC）的「本轮完成」= 1181；独立验证行序：collector.log:121753 是第 1175 轮（14:26:31 JST），:123549 是第 1181 轮（14:56:33 JST）。属时点差但口径一致——文档把 1,175 标为截止 06:01 的「全量」且未加 ⚠️ 活体漂移标记，故按规则记 CONFIRMED 并注明系时点差",
+            "fix_hint": "统一 snapshot_at 后一次性取数，或给该数字补 ⚠️ 标记"
+          },
+          {
+            "claim": "「单文件 SQLite」未限定口径：回测 trial ledger 实际写第二个 SQLite 库 backtest_ledger.sqlite3",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "SYSTEM_LOG_20260805.md:144「单文件 SQLite（WAL）」原文属实（该节讲存储层整体未点名 market.db）；backtest.py:421-429 _ledger_conn() 连接并建表于 DATA_DIR + '/backtest_ledger.sqlite3'；data/ 目录实测两个非空库：market.db 235,855,872 字节、backtest_ledger.sqlite3 299,008 字节",
+            "fix_hint": "改为「行情/状态单库 market.db；实验账本独立库 backtest_ledger.sqlite3」"
+          },
+          {
+            "claim": "「全部写入幂等」过强：chat 表是普通 INSERT append，同一请求重放会产生新行",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "storage.py:1008-1016 add_chat 为无业务唯一键、无 ON CONFLICT 的普通 INSERT INTO chat；dashboard.py:1163-1165 每次成功的 /api/agent/chat 追加 user+assistant 两行。且 :144 自己的枚举 13+2+2=17 张也覆盖不到 19 张业务表，「全部」与自身枚举已不闭合",
+            "fix_hint": "限定为「17 张采集/快照表幂等；chat 有意 append-only」"
+          },
+          {
+            "claim": "_migrate docstring 仍声称对旧审计行「一次性清空重算」，与 20260805:154/373「全表 DELETE 已拆除、只留考古注释」相抵触",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "storage.py:158-160 现行 docstring 原文「旧的无审计行一次性清空重算」属实；同函数 :180-189 的代码注释才是现状（版本谓词取代代际清空、无删除动作；仅剩 usvol 定点迁移 DELETE）；函数体内确无 regime_history 删除。该条不在 SYSTEM_LOG_20260805.md:307-323 漂移表的 11 项中，非已知条目",
+            "fix_hint": "更新 _migrate/connect docstring，区分 usvol 定点删除与已拆除的 regime 全表 purge"
+          },
+          {
+            "claim": "ref_daily 持续日更 15,331 行但仓内无真实消费者，唯一读取函数 get_ref_daily 零调用",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "死代码",
+            "correction": "函数级断言成立：get_ref_daily（storage.py:482）全仓仅定义无调用，写入方（collector.py:529/535、scripts/backfill_reference.py）与读取方完全失衡，SQL 实测 15,331 行/9 series 均复现。但「表没有真实消费者」过强——regime/agent.py:457-459 的 VVVhermes 只读 SQL 接口把 ref_daily 明列为可查表（scripts/vvvquery.py sql 直通），是一条有文档背书的动态消费路径；报告建议的「删除表」会拆掉这个已广告的接口",
+            "evidence": "grep -RIn get_ref_daily（排除 .venv/.git）仅 storage.py:482 定义行；grep ref_daily 全仓命中中唯一读路径在该函数与 agent.py 提示词；sqlite3 只读查询 count=15331/distinct series=9",
+            "fix_hint": "删 accessor 可行；表本身若删须同步改 agent.py 的表清单，或为其接入真实消费者"
+          },
+          {
+            "claim": "moomoo_iv.fetch_overview 零调用，已被 fetch_live 取代；其「RTH 复测待做」的说明也被 fetch_live 的实测结论推翻",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "grep -RIn fetch_overview（排除 .venv/.git，含 tests/scripts/web）仅 moomoo_iv.py:71 定义行；无 getattr/字符串动态调用命中。moomoo_iv.py:97-134 fetch_live 调同一 3303 接口且字段超集，:100-102 docstring 记录已完成的 RTH 实测（盘中滚动更新、pre_iv==库内 48.004）；生产调用在 collector.py:258",
+            "fix_hint": "删除 fetch_overview，或改为 fetch_live 的显式薄包装"
+          },
+          {
+            "claim": "data/vvv.db 是零字节、全仓零引用的数据库残留，会干扰单库/双库认知",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "ls -la data/ 实测 vvv.db 0 字节（mtime 08-05 09:56）；grep -RIn 'vvv\\.db'（排除 .git/.venv/*.db*）零命中；代码只具名 market.db（storage.DB_PATH）与 backtest_ledger.sqlite3（backtest.py:422）",
+            "fix_hint": "确认无仓外进程写它后删除，运维文档列明仅有两个有效库"
+          }
+        ],
+        "missed_nearby": [
+          "regime/agent.py:457-459：VVVhermes 只读 SQL 接口的表清单停在 8 张（ohlcv/regime_history/deriv/vol1h/usvol/dvol/stock_vol/ref_daily），缺 08-04 后新增的 earnings/stock_option_stat/stock_vol_live/opt_iv_near/stock_iv_term/breadth 等——与「19 张业务表」现状漂移，属 E16 同族但未被漂移表收录",
+          "SYSTEM_LOG_20260805.md:144 自身枚举即不闭合：13+2+2=17 张幂等表对不上同段「19 张业务表」，chat 与 meta 两张未被口径覆盖（与发现 8 相邻，报告只点了 chat）"
+        ]
+      },
+      {
+        "route": "路线4：docs/ 目录 20 份文档互查（对抗核验）",
+        "verdicts": [
+          {
+            "claim": "GAPS 已标 A1 完成（v3.1），结尾却仍把\"实施 A1、走 v2 升版\"列为唯一优先事项；过期 v2 指令散落三份 IV 文档",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "GAPS_20260805.md:34（A1 已完成 v3.1）vs :69（D2\"A1 一起做\"）、:77-79（\"若只做一件事：A1…v2 升版\"）；EARNINGS_IV_CONTAMINATION_20260804.md:38、RESEARCH_IV_PERSTOCK_20260804.md:59、RESEARCH_IV_PLATFORMS_20260804.md:133 均硬编码\"并入 v2\"；regime/classify.py:44 RULES_VERSION=\"v3.1\"。全部行号逐一复现",
+            "fix_hint": "重写 GAPS\"一句话优先级\"并把所有前瞻升版指令改为\"下一 RULES_VERSION\"。另注意 dashboard.py:334 同款硬编码（见 missed_nearby）"
+          },
+          {
+            "claim": "GAPS C1 仍承诺规则层强制过滤 known_at，但 v3.1 已明确消费 known_at=NULL 的历史财报行",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "GAPS_20260805.md:56（\"v2 进规则层时强制只用 known_at 早于判定时刻的行\"）、AUDIT_CODEX_20260805.md:31-33 同款 must；regime/storage.py:841-847 docstring 明写\"本函数不按 known_at 过滤——记录在案的先验\"；AUDIT_CODEX_R2_20260805.md:63-68 已裁决维持先验并预登记严格模式；SQL 复跑 earnings → 602|579|23、regime_history → v3.1|a8|236830，与报告一致。R2 与 GAPS C9 已承认张力，但 C1 文本本身未更新，且该矛盾不在漂移表/E 组",
+            "fix_hint": "C1 改写为\"当前接受先验，严格 as-of 触发条件见 C9（known_at 非空覆盖 ≥2 财报季）\""
+          },
+          {
+            "claim": "个股 IV rank 预注册门槛 252 交易日，代码实际 120 个观测即放行",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "PRERESEARCH_VOL_20260803.md:17（\"未满一年不得生产化 rank\"）、:52（\"满 252 交易日前不做 rank 生产化\"），grep -n 精确复现；dashboard.py:323-324 IV_RANK_WIN=252 / IV_RANK_MIN=120，:345 n>=IV_RANK_MIN 即出 rank；SQL 复跑：63 品种全部 n≥252、120-251 区间为 0（与报告一致，当前未触发）。SYSTEM_LOG_20260805.md:185 记载 120 闸为事实但无对 252 预注册的改判依据",
+            "fix_hint": "裁决 252 或 120 为正式门槛并留痕；否则下一只新股上市即以 120 违反预注册出分位"
+          },
+          {
+            "claim": "同名 calibrated-1：报告唯一\"推荐\"行 elig=0.35，代码实际 elig_enter=0.40",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "COUPLING_CALIBRATED1_20260804.md:43（grep 精确定位）\"推荐 calibrated-1：{'elig': 0.35, …}（人工复核后升版）\"；regime/coupling_fsm.py:22 THRESHOLD_VERSION=\"calibrated-1\"、:61-62 elig_exit=0.35/elig_enter=0.40，docstring 引用的正是文档 elig=0.4 行的数字（误报 0.028、强检出 0.96）并称\"2026-08-04 用户批准\"。人工裁决改参未回写报告，SYSTEM_LOG 三个文件 grep calibrated-1 均无该裁决记录——审计链断在文档侧",
+            "fix_hint": "给 calibrated-1 报告补一节\"最终人工裁决：enter 0.40 / exit 0.35（迟滞）\"及依据数字"
+          },
+          {
+            "claim": "耦合设计仍以 666 条边描述多重比较风险，扩容后显示宇宙已是 2,701 对",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "DESIGN_COUPLING_20260804.md:48\"杜绝 666 对 pair 的逐边显著性灾难\"（666=C(37,2)，写作当时正确）；X2_EXPANSION_20260805.md:71-74\"配对数从 703 抬到 2,701…全局期望误报数百次/年\"。属日期戳文档的时代滞后而非错误，但设计文档是被 coupling.py:3 引用的现行规格，读者会低估比较族 4 倍",
+            "fix_hint": "设计文档加 X2 修订章（core 池 C(50,2)=1,225 进矩阵、显示池 C(74,2)=2,701 仅展示），与 GAPS D6 对齐"
+          },
+          {
+            "claim": "X1 设计要求主题标签 valid_from/valid_to 区间，实际表结构与写入路径只有 valid_from",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "PRERESEARCH_XASSET_20260803.md:29（\"valid_from/valid_to，禁止事后改判\"）、:47（列为扩容前治理配套）；regime/storage.py:56-60 universe_snapshot 仅 valid_from 列；collector.py:438-458 写入六元组无 valid_to；grep -RIn 'valid_to' collector.py dashboard.py regime scripts tests instruments.json web → 零命中（独立复跑，exit=1）；instruments.json 有 75 处 valid_from、0 处 valid_to。缓解：universe_snapshot append-only 隐式保留历史标签",
+            "fix_hint": "文档明确改为\"新快照隐式终止上一版本\"语义，或补 valid_to 列；二选一留痕"
+          },
+          {
+            "claim": "M1 规格与代码注释声称计算/另存 β_ret、β_spread，pair_table 实际无任何 beta 输出",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "DESIGN_COUPLING_20260804.md:23-24\"另存 β_ret…与 β_spread\"、:109 M1 行含\"β 双轨\"；regime/coupling.py:13\"本层只算 β_ret\"（注：β_spread 已明写推给 M2+，报告此半句略过重）、:256 注释\"β_ret…快慢各一\"，但 :257-270 返回字典无任何 beta 字段；全仓 grep beta_ret|beta_spread|β_ret|β_spread（排除 .venv/.git/.bak/docs）→ 仅 coupling.py:13,256 两条注释，无可执行标识符、无消费者。M2（coupling_fsm.py）中亦无",
+            "fix_hint": "删掉两处\"本层只算/另存\"措辞并在设计文档标注 β 双轨延期；或真实现并补测试",
+            "correction": "细节修正：代码注释只声称 β_ret（β_spread 明确推给 M2+），\"都声称两者\"仅设计文档成立；核心断言（声称计算却零输出零消费者）完全成立"
+          },
+          {
+            "claim": "moomoo_iv.fetch_overview() 已被 fetch_live() 取代，全仓只有定义、零调用方",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/moomoo_iv.py:71-94 定义（docstring 仍留\"是否盘中更新须复测\"旧问题，而 :97 fetch_live docstring 已给出实测答案）；grep -RIn -w fetch_overview 全仓（排除 .git/.venv/.bak）→ 仅定义行一条；collector.py 的 moomoo 调用全走 fetch_live/fetch_history/fetch_option_stat/fetch_earnings，无 getattr/字符串动态调用路径",
+            "fix_hint": "删除，或抽 3303 解析公共段供 fetch_live 复用（两者各自解析同一协议返回体）"
+          },
+          {
+            "claim": "财报污染文档待办 1、2 已完成，仍以未完成清单呈现",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "EARNINGS_IV_CONTAMINATION_20260804.md:34-38 三条待办；待办1：moomoo_iv.py:266-268 get_earnings_calendar 按 7 天分段 + collector.py:335-346 fetch_earnings→upsert_earnings→prune_stale_future_earnings 已入库并清改期旧行；待办2：dashboard.py:365-368 earnings_proximity 进面板、agent.py:196-204 Hermes 输出\"⚑财报N日(该分位含事件成分)\"标注。均独立读码确认",
+            "fix_hint": "待办 1/2 勾完成；待办 3 保留并把\"须 v2\"改成\"下一 RULES_VERSION\"（与第 1 条同批改）"
+          },
+          {
+            "claim": "ORATS $49 条件在两份同日调研中相反，旧文档让读者误以为须持 Tradier 账户",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "RESEARCH_IV_PERSTOCK_20260804.md:36\"$99/月（持 Tradier 账户五折 $49，条款须确认）\"；RESEARCH_IV_PLATFORMS_20260804.md:50 标为核实修正\"$49/月特惠不需要 Tradier\"。GAPS D3\"ORATS $49 单月\"已按修正版记。注意旧文档自带\"条款须确认\"的免责，误导程度有限；外部现价未联网核实（与报告自查盲区一致）",
+            "fix_hint": "PERSTOCK:36 加一句\"已被 PLATFORMS:50 横评更正：无需 Tradier\"交叉引用即可"
+          }
+        ],
+        "missed_nearby": [
+          "dashboard.py:334 docstring 同样硬编码\"个股 IV 进规则层需并入 RULES_VERSION v2\"——与第 1 条同族的过期 v2 指令，但在代码注释侧，报告只覆盖了三份文档，改文档时应成对修",
+          "GAPS_20260805.md 自身内部矛盾：E9（:20）已明确\"连带更正 B5：门槛早已越过，'约 10 月中自然达标'的记述错误\"，但 B5 行（:48）原文未动——同一文档一处已判错、一处照旧陈述，读者按先后顺序读会先接受错误版本"
+        ]
+      },
+      {
+        "route": "路线5：regime/ 全模块注释与 docstring 对实现 —— 对抗复核（18/18 条逐条独立查证）",
+        "verdicts": [
+          {
+            "claim": "dashboard.py 文件头自称只读 SQLite，但助手聊天/清空历史从面板进程写 chat 表",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "dashboard.py:2「只读 SQLite（collector 负责写入）」；dashboard.py:1155-1166 connect_rw_nomigrate()+add_chat×2，1169-1173 clear_chat；regime/storage.py:146-153 connect_rw_nomigrate docstring 自认「面板的 chat 表读写专用」",
+            "fix_hint": "文件头改为「市场数据只读；chat 表为唯一可写例外（见 storage.connect_rw_nomigrate）」"
+          },
+          {
+            "claim": "deriv.funding_interval_h 强调未知时绝不猜 8h，但面板无 meta 时默认 8.0 并据此年化",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/deriv.py:122-127「失败返回 None（不是伪装成 8.0）」「那意味着我们不知道，而不是『是 8h』」；dashboard.py:810 get_meta(conn, f\"funding_interval_{symbol}\", 8.0) or 8.0 → 811 per_year → 822-824 输出年化。注：SQL 查 meta 当前 74 品种全部有 funding_interval_*（含 HYPE/XAU/XAG/CL/XPD/XPT=4.0），故此刻无错误读数在产——是新品种首轮 meta 未写入前的潜在错年化（4h 品种会被按 8h 算、年化砍半），属契约违背而非现行事故",
+            "fix_hint": "meta 缺失时 interval_h/per_year 置 None，前端标「周期未知」"
+          },
+          {
+            "claim": "funding 首轮历史两处仍写≈333天，实际接口/库内只有≈168天",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "regime/deriv.py:4-6「funding 结算 1000 条≈333 天」；collector.py:667 日志「funding≈333天」；regime/deriv.py:61-62 已更正「实测约 168 天（接口 limit=1000 但只供约 6 个月）」；SQL 复现：SELECT ROUND((MAX(ts)-MIN(ts))/86400000.0,1),COUNT(*) FROM deriv WHERE funding IS NOT NULL AND kind='settled' → 168.5, 22306（与报告数字完全一致）",
+            "fix_hint": "deriv.py 文件头与 collector.py:667 日志统一为「接口上限 1000，实得约 168 天」"
+          },
+          {
+            "claim": "binance_opt_iv 标题与 collector 行内注释仍说只覆盖 XAU/XAG，实际已扩到 8 个标的",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "regime/binance_opt_iv.py:1「合成（XAU/XAG，24/7）」；collector.py:737「币安期权近端 IV（XAU/XAG，24/7）」；同文件 26-35 行 UNDERLYINGS 列 8 个；SQL 复现：SELECT COUNT(DISTINCT symbol),GROUP_CONCAT(DISTINCT symbol) FROM opt_iv_near → 8：BNB/BTC/DOGE/ETH/SOL/XAG/XAU/XRP",
+            "fix_hint": "两处注释改为「XAU/XAG + BTC/ETH/SOL/BNB/XRP/DOGE 共 8 标的」"
+          },
+          {
+            "claim": "coupling.py 文件头仍称 M2 状态机是后续工作，但 M2 已实现并被面板实时调用",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "regime/coupling.py:3-4「状态机（M2）、显著性协议与预测层（M4）后续在此之上搭建」；regime/coupling_fsm.py:1「耦合判定层（M2）：pair 四态状态机…」已实现；dashboard.py:1020-1022 import run_pair_fsm 等，1049 states,events = run_pair_fsm(ser) 实时执行",
+            "fix_hint": "文件头改为 M1 已成/M2 已成（coupling_fsm）/仅 M4 为后续"
+          },
+          {
+            "claim": "coupling.py 的 composite_matrix docstring 残留第二份「38×38」，实际 74×74 动态",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "regime/coupling.py:67「38×38 复合相关矩阵（显示层）」；73 行 members = panel_members(conn,\"cross\",include_observation=True) 动态取全体；storage.py:1049-1051 symbols() 从 ohlcv 取全体；SQL 复现：SELECT COUNT(DISTINCT symbol) FROM ohlcv WHERE tf='1h' → 74。非 KNOWN_DUP：SYSTEM_LOG_20260805 漂移表只定位了 dashboard.py:1061 那份，coupling.py 这份未在清单",
+            "fix_hint": "改为「N×N（N=当前有数据的注册成员数）」；同时见 missed_nearby——web/app.js:205 还有第三份"
+          },
+          {
+            "claim": "E1 离线实验 _rolling_rank 自称与正式 pct_rank 同口径，实际实验用 <=（含自身），正式用 <",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "regime/experiments.py:48-51 docstring「与 features.utils.pct_rank 同口径的滚动分位（<=，含自身）」，实现 (x <= x[-1]).mean()；regime/features/utils.py:13 正式版 (s < s.iloc[-1]).mean()，:29 滚动版同用 <。两口径系统性差约 1/win（<= 含自身恒 ≥1/250，< 可取 0）——数值影响小，但「同口径」的断言确实为假。与 GAPS E14（pct_rank 样本<2 返回 0.5）及漂移表「六种估计器实为 5」都不同条，非 KNOWN_DUP",
+            "fix_hint": "E1 直接调用 features.utils 的共用实现或改 <，并在实验报告标注协议差异"
+          },
+          {
+            "claim": "confirm_states docstring 枚举的 candidate 结构漏掉实际返回且被 agent 消费的 gated 字段",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "regime/classify.py:209-211 docstring 只列 {\"state\",\"count\",\"need\",\"event_win\"}；classify.py:233-240 实际 candidate 还含 \"gated\"（need > 无事件版 need）；regime/agent.py:151-152 cand.get(\"gated\") 驱动「事件窗:未来10日有财报,确认门槛+1根」文案",
+            "fix_hint": "docstring 补 gated: bool（仅 squeeze→trend 受门槛时为真）"
+          },
+          {
+            "claim": "cRSI docstring 返回契约漏掉 confirmed_i / confirmed_bars_ago 两个确认时点字段",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/features/crsi.py:57-60 docstring 写 divergences:[{i,kind}]、last_divergence:{kind,i,bars_ago}；实现 164/168 行 append 含 \"confirmed_i\": i+piv_len，last_div（174-178）含 \"confirmed_bars_ago\" 且行内注释自标「距确认根（回测/告警口径）」。按 docstring 用 i（枢轴根）做回测即引入 piv_len 根前视——正是实现注释想防的",
+            "fix_hint": "docstring 补两字段并写明回测/告警必须用 confirmed_*"
+          },
+          {
+            "claim": "stock_iv_term docstring 称 ATM IV 是 call/put 均值，实际单腿缺失时静默退化为单腿值",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/stock_iv_term.py:109「ATM IV = 同行权价 call/put 的 option_implied_volatility 均值」；实现 137-139：vals=[ivs.get(call),ivs.get(put)] 过滤 None 后 len==1 仍 sum/len 输出——单腿值入库无任何标记，与两腿均值不可区分。非 KNOWN_DUP：漂移表里 stock_iv_term 的条目是「招牌示例把跨源差解释成期限溢价」，与本条不同",
+            "fix_hint": "要求两腿齐全才出值，或落库 n_legs 并在 docstring 写明退化语义"
+          },
+          {
+            "claim": "report.interpret 在 1h 缺失时仍会输出「三周期同向」",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/report.py:43 条件 d1.state.startswith(\"trend\") and d1.state==h4.state and (not h1 or h1.state==d1.state)——not h1 即仅 1d+4h 同向也命中；report.py:44 无条件返回「三周期同向（…），趋势环境明确」。用户面文案在两周期证据下宣称三周期结论",
+            "fix_hint": "h1 缺失走「两周期同向」文案或要求 h1 存在才进该分支"
+          },
+          {
+            "claim": "VVVhermes 注释把 Codex 参数过滤称「白名单」，实现是可被未来新增危险参数绕过的黑名单",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P1",
+            "evidence": "regime/agent.py:590「真正的防线是上面的 _safe_codex_args 白名单」；实现 521-529 只定义 _CODEX_FORBIDDEN 禁项元组，532-545 命中禁项才 continue，其余全部 out.append(a) 放行——语义上是拒绝列表。Codex 未来新增危险 flag 不在禁项即直通，注释的安全承诺超出实现",
+            "fix_hint": "注释如实改「拒绝列表」，或真改为允许参数白名单"
+          },
+          {
+            "claim": "两处注释仍承诺「个股 IV 并入 RULES_VERSION v2」，但全局规则版本已是 v3.1",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "dashboard.py:334「个股 IV 进规则层需并入 RULES_VERSION v2 并过回测」；regime/storage.py:171-174「将来 IV 进规则层（v2）时必须只用 known_at…」；regime/classify.py:44 RULES_VERSION = \"v3.1\"。硬编码的未来版本号 v2 已不可能达成。非 KNOWN_DUP（漂移表/E16 未含此两处；docs/GAPS C1/D2 有同类残留，见 missed_nearby）",
+            "fix_hint": "改为「进规则层须递增当时的 RULES_VERSION 并全量重算」，不写死版本号"
+          },
+          {
+            "claim": "usvol.py 对 CBOE CSV 更新时点同时写 T+1 与当日收盘后即更新，互斥",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "regime/usvol.py:3-4「历史日线 CSV（VIX 自 1990 年，T+1 更新）」；usvol.py:33「实测该 CSV **当日收盘后即更新**（非 T+1）」——同文件两说并存。SQL：五指数 MAX(ts) 均为 2026-08-04（今日 08-05 美股尚未收盘，与「当日收盘后更新」相容但无法在库内单独判别哪个对；内部自相矛盾本身成立，不受时点差影响）",
+            "fix_hint": "文件头采用 backfill_index_history 的实测口径并注明实测日期"
+          },
+          {
+            "claim": "moomoo_iv.fetch_overview 零调用方，其「仍须 RTH 复测」开放项已被同文件 fetch_live 实测推翻",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "grep -RIn 全仓（排除 .git/.venv/__pycache__/regime-spectrum，含 .md/脚本/测试）-w fetch_overview → 仅 regime/moomoo_iv.py:71 定义一处；getattr(moomoo_iv 动态调用 grep 零命中；moomoo_iv.py:74-75 docstring「是否盘中滚动更新须在 RTH 内复测」，而 97-101 在用的 fetch_live docstring 已记「实测该接口**盘中滚动更新**（ET 09:40 后 5 分钟内四个品种全部变动）」——开放项已闭环",
+            "fix_hint": "删除 fetch_overview（3303 协议同款数据 fetch_live 已覆盖）"
+          },
+          {
+            "claim": "get_ref_daily 与 get_breadth 两个读取函数零调用，持续写表但 getter 无消费者",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "定义在 regime/storage.py:482 与 :723；grep 全仓（.py 与非 .py，排除 .venv/.git/regime-spectrum）仅定义一处，getattr(storage 动态调用零命中；写侧活跃：ref_daily 15,331 行（至 2026-08-04，collector.py:529/535 在写）、breadth 2 行（collector.py:143 在写）。注一处口径：breadth「只采不消费」是 collector.py:120 与 upsert_breadth docstring 明示的影子字段设计，故 get_breadth 属预留而非意外孤儿——但两个 getter 本身确实无任何 reserved 标注，报告的处置建议成立",
+            "fix_hint": "删 getter 或在 docstring 标 reserved/no current consumer（breadth 侧注明影子字段配套）"
+          },
+          {
+            "claim": "YEAR_DAYS 常量与 rolling_sign_rate 的 window_frac 参数从未参与任何计算",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "grep -w YEAR_DAYS 全仓仅 regime/binance_opt_iv.py:37 定义一次；grep -w window_frac 全仓仅 regime/coupling.py:210 签名一次，函数体 212-227 无任何引用，调用点 coupling.py:235 rolling_sign_rate(z) 也未传参",
+            "fix_hint": "删除二者；window_frac 若是未完成能力先实现再暴露"
+          },
+          {
+            "claim": "breadth.py 未注明日期地保留「五周期分母同为 2659」，今日库内两槽位已是 2661/2664",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "regime/breadth.py:13「实测 N 不随周期漂移：五个周期同为 2659」；SQL 复现：SELECT slot,denom FROM breadth ORDER BY captured_at → 0945=2661、1559=2664；breadth.py:53 denom 每轮实时取。注明性质：这是时点差——注释的不变量是「同一次采样内五个周期 N 相同」（库内每槽只存一个 denom，无法证伪该不变量本身），2659 只是无日期探针数；且同文件 12 行已写明 N_t 会随市值门缩水，故误导度有限。判 CONFIRMED（数字确已过时、无日期标注属实），报告「中」置信与 P2 定位恰当",
+            "fix_hint": "给 2659 加探针日期，或只保留「分母须随值落库」的不变量表述"
+          }
+        ],
+        "missed_nearby": [
+          "web/app.js:205 还有第三份「38×38 复合相关矩阵」注释（同函数 210 行已改口「74 品种」，头注释没跟上）——且 SYSTEM_LOG_20260805 漂移表括注「X2 后 app.js 的注释更新了」与实情不符，漂移清单本身在此处失准",
+          "regime/breadth.py:5 文件头「我们 38 个品种里 30 个是 AI 链」也是 38 时代的陈旧数字（现 74 品种），与 #6 同族但另一处",
+          "docs/GAPS_20260805.md C1（「v2 进规则层时强制只用 known_at」）与 D2（「IV 进特征层/规则层（v2 升版）」）、A5（「耦合层抑制条件属 v2」）存在与 #13 同款的硬编码 v2 版本号残留——规则版本已到 v3.1，这些文档承诺同样不可能以 v2 兑现"
+        ]
+      },
+      {
+        "route": "路线6：Python 死代码",
+        "verdicts": [
+          {
+            "claim": "fetch_overview() 全仓零调用，生产已改走同一 moomoo 接口的 fetch_live()",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/moomoo_iv.py:71 定义（体至 :94）；grep -RInw --include='*.py' fetch_overview（排除 .venv/.git）→ 仅定义行；collector.py:258 调用 fetch_live；全仓无 getattr/globals()/eval/exec 动态派发（grep 零命中），无被动态调用可能",
+            "fix_hint": "删除 fetch_overview（连同其已被推翻的 docstring，见第 17 条）"
+          },
+          {
+            "claim": "单品种 binance_opt_iv.snapshot() 零调用，生产只用批量版 snapshot_all()",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/binance_opt_iv.py:153-163 定义；grep -RIn '\\.snapshot(' 全仓零命中；snapshot_all 定义于 :56 且不调用 snapshot；唯一生产调用 collector.py:173 snapshot_all(now_ms=now)；tests/test_stock_vol.py 导入该模块但不调 snapshot",
+            "fix_hint": "删除单品种包装，或落一个显式 probe CLI"
+          },
+          {
+            "claim": "ref_daily 持续写入且已存 15,331 行，但唯一读取函数 get_ref_daily() 零调用，目前无程序化消费者",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：SELECT count(*) FROM ref_daily → 15331（与报告一致）；grep -RInw get_ref_daily → 仅 storage.py:482 定义；写端 storage.py:465-479、collector.py:529/535、scripts/backfill_reference.py:63/68/77。注意两点：① Hermes 有临时只读 SQL 通道（agent.py:457-459 明确把 ref_daily 列为可查表，经 scripts/vvvquery.py sql），属人/Agent 驱动的 ad-hoc 消费而非管线消费，claim 的『无程序化消费者』严格成立；② upsert_ref_daily docstring（storage.py:466-470）自述为『耦合研究历史层（回填+日更）』，即有意的 write-ahead 攒历史设计——『暂停维护性写入』的处置建议与设计意图相悖，宜慎采",
+            "fix_hint": "getter 可删或标 future API；写入建议保留（设计即攒历史），但把消费时点登记进 GAPS"
+          },
+          {
+            "claim": "get_breadth() 是零调用的预留读取 API，宽度管线只有采集写入",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "grep -RInw get_breadth → 仅 storage.py:723 定义（体至 :729）；写端 upsert_breadth storage.py:707-721，docstring 明写『影子字段，只采不消费，攒够约 2 年再评审转正』；collector.py:119-120 sync_breadth 同样明写，:142 调用写端；SQL：SELECT count(*) FROM breadth → 2（与报告一致）。注意 vvvquery sql 提示表清单里不含 breadth，连 ad-hoc 读通道都没有",
+            "fix_hint": "getter 删除或加注释标 future API；两年评审点应登记在案而非靠 docstring 记忆"
+          },
+          {
+            "claim": "YEAR_DAYS 是零引用常量，期限计算直接用毫秒到天除数",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "grep -RInw YEAR_DAYS → 仅 regime/binance_opt_iv.py:37 定义；:100 tenor = (exp - now_ms) / 86_400_000.0 直接换算",
+            "fix_hint": "删除该常量"
+          },
+          {
+            "claim": "五个 import 零加载：dashboard.datetime、backfill_earnings.date、exp_event_gate.np、coupling_fsm.field、run_coupling_m2b.FSMParams",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "AST 复核（Name-Load + Attribute 基名扫描）五项全部 UNUSED；逐项 grep：dashboard.py 仅 :16 import、:181 是 pd.to_datetime、:429 另行局部导入 _dt；backfill_earnings.py :42 是 .date() 方法而 timedelta/timezone/datetime 均有真实使用（:44/:65），仅 date 死；exp_event_gate.py grep -nw np 仅 :17；coupling_fsm.py grep -nw field 仅 :15；run_coupling_m2b.py grep -nw FSMParams 仅 :24",
+            "fix_hint": "删除五个 import（backfill_earnings 只删 date，保留其余三个）"
+          },
+          {
+            "claim": "_live_iv_block() 的 settled_last 和 in30 两个形参从未在函数体读取",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "dashboard.py:397 签名含两参；函数体 398-469 内 grep -nwE 'settled_last|in30' 零命中（exit 1），体内另算 in30_now（:423/:442 附近）是不同变量；调用点 dashboard.py:380 传入 last, in30。settled_s 有使用，仅这两参死",
+            "fix_hint": "签名与调用点同步删除两参"
+          },
+          {
+            "claim": "collector.sync_moomoo_history() 内部函数 incr() 的 tag 参数无用途，调用方分别传入 \"iv\"、\"optstat\"",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "死代码",
+            "correction": "tag 参数确实死（collector.py:300 签名含 tag，体 301-315 零读取），但第二个调用点传的是 \"pc\" 不是 \"optstat\"：collector.py:322 传 \"iv\"、collector.py:329 传 \"pc\"（storage.upsert_stock_option_stat 那条）。报告把实参字符串写错了",
+            "evidence": "sed -n '295,330p' collector.py：:300 def incr(sym, getter, fetch, put, tag)，体内无 tag；:322 尾参 \"iv\"；:329 尾参 \"pc\"；grep -n '\"optstat\"' collector.py 零命中",
+            "fix_hint": "删除 tag 形参及 \"iv\"/\"pc\" 两个实参"
+          },
+          {
+            "claim": "rolling_sign_rate() 的 window_frac 默认参数从未被读取，也无调用方传非默认值",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/coupling.py:209-210 签名含 window_frac=1.0，体 211-227 仅用 halflife/seg_hl；全仓 grep window_frac 仅签名一处；全仓 rolling_sign_rate 调用仅 coupling.py:235 rolling_sign_rate(z)",
+            "fix_hint": "删除参数"
+          },
+          {
+            "claim": "e1_estimator_race() 的 tf 参数始终被传入但函数完全不读取",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/experiments.py:54 签名含 tf，体 55-92 无任何 tf 引用（docstring 也不含）；唯一调用 experiments.py:269 e1_estimator_race(df, tf)，全仓无其他调用方",
+            "fix_hint": "删除形参与实参"
+          },
+          {
+            "claim": "run_experiment(..., note=\"\") 的 note 参数不影响 payload/实验 ID，备注实际由 record_experiment() 单独处理",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/backtest.py:347 签名含 note=\"\"，grep note 在 347-420 体内仅签名一处；scripts/run_backtest_p0.py:150 传 note=args.note（冗余）、:156 又独立传给 record_experiment；真正写入在 backtest.py:433 定义/:459 INSERT",
+            "fix_hint": "从 run_experiment 删 note，保留 record_experiment 的"
+          },
+          {
+            "claim": "pair_table() 中 n_rows = len(r) 是零读取死局部变量",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime/coupling.py:236 赋值；grep -n n_rows regime/coupling.py 仅 :236 一处；覆盖率 :247 用 n_joint / min(valid_rows[a],valid_rows[b])。全仓其余 n_rows 命中（dashboard.py:1038、backtest.py:383、run_backtest_p0.py:94）均属不同作用域/字典键",
+            "fix_hint": "删除赋值行"
+          },
+          {
+            "claim": "run_coupling_grid.py 留有三个互不生效残余：REP_PAIRS_IDX、reps、tc",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "grep -nw 各名：REP_PAIRS_IDX 仅 :38 赋值；reps 仅 :106 赋值；tc 仅 :111 赋值；功效计算 :118-119 pw = {... power_one(z, pr, ...) for name, pr in ((\"strong\", strong), (\"edge\", edge))} 直接用 strong/edge；进度耗时 :132/:141 用 t0（:90）",
+            "fix_hint": "删除三处"
+          },
+          {
+            "claim": "run_coupling_m2b.power_test() 先算的小时/位置混合 delay 在读取前被第二套统一算法覆盖",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "scripts/run_coupling_m2b.py:72-74 首次赋值（三元含续行）；:75 注释『统一按 bar 数』、:76-78 pos + delay 重赋值；首值与覆盖之间无读取（:79 delays.append 用的已是新值）；该代码确在 power_test()（def 于 :32，main 于 :91）",
+            "fix_hint": "删 :72-74，保留 bar 位置差算法"
+          },
+          {
+            "claim": "main.py 文件头仍称『市场状态系统 v1』，实际调用现行 v3.1 规则，易误判 CLI 用旧规则",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "main.py:2 『市场状态系统 v1 —— 命令行入口』；main.py:14 from regime.classify import analyze_timeframe、:64 regimes[tf] = analyze_timeframe(df, tf)（即现行规则）；regime/classify.py:44 RULES_VERSION = \"v3.1\"。SYSTEM_LOG_20260805『文档与代码的漂移』11 条表内不含此项，非已知重复",
+            "fix_hint": "删掉硬编码版本字样，指向 RULES_VERSION"
+          },
+          {
+            "claim": "run_coupling_m2.py 用法说明宣称写入 prior-1，实际导入并写入 calibrated-1",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "scripts/run_coupling_m2.py:7-8 docstring『阈值 threshold_version=prior-1——』；:22 导入 THRESHOLD_VERSION；regime/coupling_fsm.py:22 THRESHOLD_VERSION = \"calibrated-1\"；事件经 run_pair_fsm 打印章（coupling_fsm.py:129 threshold_version 字段），:75 把 e[\"threshold_version\"] 写入 ledger（报告说 :75『使用导入的 THRESHOLD_VERSION』措辞不精确——:75 用的是事件体里的值，但该值正来自同一常量，实质结论成立）。另 :49 报告文案『阈值代 {THRESHOLD_VERSION}（先验）』的『先验』标注同样过时。与 GAPS E6（calibrated-1 未跑满额终验）相关但非同一条，非已知重复",
+            "fix_hint": "docstring 与 :49 的『先验』一并改为『按当前阈值代重放』"
+          },
+          {
+            "claim": "已死 fetch_overview() 的 docstring 仍称 3303 等于昨结且『须在 RTH 复测』，同文件 fetch_live 已确认该接口盘中滚动",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "regime/moomoo_iv.py:74-75 『实测该值等于上一交易日结算值……是否盘中滚动更新须在 RTH 内复测』；:97-113 fetch_live 用同一 get_option_underlying_overview（:80 与 :113 同 API），:100 『实测该接口**盘中滚动更新**（ET 09:40 后 5 分钟内四个品种全部变动）』——旧疑问已被同文件实证推翻",
+            "fix_hint": "随第 1 条一并删除；如留史改为带日期的已推翻结论"
+          },
+          {
+            "claim": "参考实现的 calibrate_t_amp() 和 continuous_series() 仓内零调用，连 __main__ 自检/示例也未覆盖",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "regime-spectrum/04-REFERENCE-IMPL.py:174/:196 定义；grep -RInw 两名（含附加目录 /Users/luoyingdong/Downloads/regime-spectrum，排除 __pycache__）→ 均仅定义行；:294-305 __main__ 只调 _selftest/describe_path/spectrum_summary/membership；全仓无动态派发。注意用户已定性 regime-spectrum 为仅参考项目（非设计图非权威），处置优先级应更低——中置信定级恰当",
+            "fix_hint": "参考项目可不动；若要维持『可运行参考实现』口径，把两函数纳入 __main__ 示例"
+          }
+        ],
+        "missed_nearby": [
+          "scripts/run_coupling_m2.py:49 在报告文案里渲染『阈值代 `{THRESHOLD_VERSION}`（先验）』——常量已是 calibrated-1，『（先验）』括注与第 16 条 docstring 同源过时，修第 16 条时应一并改，报告只点了 docstring 未点这处输出文案"
+        ]
+      },
+      {
+        "route": "路线7：前端死代码（web/）——对抗核验",
+        "verdicts": [
+          {
+            "claim": "五状态中文标签双源：规则端带「蓄势/趋势条件未齐」限定语，前端 SM 删掉了它们",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/classify.py:78-79 squeeze=「低波动挤压（蓄势）」、high_vol_chop=「高波动非趋势（趋势条件未齐）」；classify.py:69-73 注释明确该限定语是刻意论证的规则语义。web/app.js:6-10 SM 标签为「低波动挤压」「高波动非趋势」；grep 'SM[' 命中 319,336,340,346,932,947 等处均取本地标签；grep state_label web/app.js=0 行（仅 regime/agent.py:148 消费）。dashboard.py:224 确下发 state_label。注意：SYSTEM_LOG_20260802.md:281,349 早已记录此双源（P2 待办），但不在本轮 KNOWN_DUP 判据文档（SYSTEM_LOG_20260805 漂移表 / GAPS E 组）内，故按 CONFIRMED 报。",
+            "fix_hint": "前端标签统一消费后端 state_label（或 states_map），删除 SM 内第二份文案，颜色保留本地。"
+          },
+          {
+            "claim": "/api/dashboard 顶层 states_map 无任何仓内消费者，纯死负载",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "dashboard.py:995 \"states_map\": STATES；全仓 grep states_map（排除 .venv/.git/.bak）仅命中 dashboard.py:995 与两份旧系统日志。web/app.js 用本地 SM（5-11 行），regime/agent.py:148 用逐周期 state_label。无 getattr/模板字符串等动态取用。SYSTEM_LOG_20260731.md:712 早已指出「states_map 前端从未读取（纯死负载）」，但不在 20260805 漂移表/GAPS E 内，按规则不判 KNOWN_DUP。",
+            "fix_hint": "与发现1合并处置：让前端正式消费它，否则从响应删除。"
+          },
+          {
+            "claim": ".symlist .dot / .st / .disp 三条 CSS 规则对应元素已不存在",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "web/style.css:70,71,73 三条规则；web/app.js:85-103 renderSymList 只生成 class='active' 按钮和 <span class='sym'>（.sym 规则 style.css:72 存活）。全文件 grep：class 含 dot 的只有 index.html:17（#symDot，.symbtn 下）、app.js:948（.stchip 下）、app.js:1072（.hb 下），均有各自作用域规则（style.css:51,90-95,228），不落入 .symlist；st/disp 作为 class 零命中，无模板字符串动态拼接。小瑕疵：报告说「70-73 定义三个选择器」，该区间实际含 4 条，其中 72 行 .sym 存活——三条死规则的行号准确为 70、71、73。",
+            "fix_hint": "删 style.css:70,71,73 三条规则，保留 72 行 .sym。"
+          },
+          {
+            "claim": "「翻转明细只列4h/1d」实为「全周期先截40条再前端丢1h」，旧 4h/1d 翻转会被近期 1h 噪音挤出，且「API/Hermes 可查全量」不实",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "dashboard.py:851-867 _flips：三周期全部汇总、按 ts 降序、return flips[:40]（867 行）——1h 翻转频率最高，40 条硬顶下会挤掉更旧的 4h/1d。web/app.js:1012 收到响应后才 filter(f.tf!=='1h')；web/index.html:94 注释「1h 翻转噪音多不列（Hermes 与 API 仍可查全量）」——API 顶 40 条并非全量；regime/agent.py:291-292 又只取 flips[:6]，该 6 条含 1h，Hermes 摘要可被 1h 噪音占满。两侧证据独立复现，断言成立。",
+            "fix_hint": "后端按用途过滤再限额：面板请求排除 1h，Hermes/API 提供带 tf/limit 参数的查询；同步改 index.html:94 注释。"
+          },
+          {
+            "claim": "实时个股IV响应中的 pc_volume_ratio 被计算传输但面板与 Hermes 均不读",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "dashboard.py:463-465（_live_iv_block 返回 dict 内）输出 pc_volume_ratio；web/app.js:791-793 只读 lv.iv/chg/chg_pct/rank_preview；regime/agent.py:206-214 同样只读这四项；grep pc_volume_ratio web/app.js regime/agent.py=0 行。报告正确地把断言限定在响应副本（DB 列 pc_volume_ratio 在 storage.py/moomoo_iv.py/tests 中活跃）。",
+            "fix_hint": "在持仓/期权卡展示 Put/Call 成交比，或从 _live_iv_block 响应中删除该键。"
+          },
+          {
+            "claim": "_xopt_block 与 _live_iv_block 下发的两个 captured_at 均无消费者",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "dashboard.py:249（_xopt_block）与 dashboard.py:459（_live_iv_block）输出 captured_at；grep captured_at web/app.js regime/agent.py=0 行。前端 xopt 只读 iv/tenor_days/method/n_expiries/age_min（app.js:675-677,823-824），live 只读四项（791-793）；Hermes 只读 xopt.iv/tenor_days（agent.py:266-267）与 live 四项。age_min 已由服务端从同一 ts 算出，captured_at 是冗余副本。",
+            "fix_hint": "要么用 captured_at 统一显示精确更新时刻，要么删除两处响应副本只留 age_min。"
+          },
+          {
+            "claim": "/api/coupling 至少 9 个叶字段（n_symbols/n_rows/global.dispersion/global.blocks/pair 的 rho_slow/c/dz/last_event/matrix.themes）仓内无人读取",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "构造侧：dashboard.py:1038（n_symbols/n_rows）、1042-1043（dispersion/blocks）、1054-1057（rho_slow/c/dz/last_event）、regime/coupling.py:128（themes）。消费侧：app.js:157-171 只读 g.market_mode/mean_corr、status_counts.INSUFFICIENT、pair 的 a/b/state/rho_fast；矩阵渲染（app.js:219-243 + COUP_LAST 仅回放 matrix）只读 symbols/pools/cells/min_eff；agent.py:439-447 只读 pairs 的 a/b/state/rho_fast、blocks 摘要与 threshold_version。grep 9 个字段名于 app.js/agent.py 均 0 命中（app.js:173 的 j.blocks 是顶层块投票，非 panel.global.blocks，不构成消费）。注意 app.js:205 注释声称「轴按主题块排序」，排序实际在服务端完成，themes 前端仍未用。",
+            "fix_hint": "先明确 /api/coupling 是否兼任研究调试接口：只服务 UI/Hermes 则裁掉 9 字段，保留则接入诊断视图。"
+          },
+          {
+            "claim": "collector.counts.deriv 每轮统计并下发，但面板与 Hermes 都不读",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "regime/storage.py:1054-1057 counts() 对含 deriv 的四表 COUNT(*)；dashboard.py:885 完整放入响应。web/app.js:1038-1040 只渲染 ohlcv/dvol/regime_history 三行；agent.py:293-296 只用 interval 与错误数；grep deriv 于两消费者=0。但处置建议需修正一半：storage.counts() 另有调用方 collector.py:812（每轮日志「库=%s」含 deriv 计数，且该日志经 log_tail 在面板可见），从 counts() 本体移除会连带改掉采集器日志——只应从响应侧或前端侧处理。",
+            "fix_hint": "在采集器卡补一行「衍生品行数」（最低成本），不要按报告备选方案改 counts() 本体。"
+          },
+          {
+            "claim": "SYSTEM_LOG_20260805 漂移表称「app.js 注释已更新、只有 dashboard.py 没跟上」不实：三处代码注释（app.js:205/coupling.py:67/dashboard.py:1061）仍写 38×38",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "grep '38×38'（排除 .venv/.git）恰命中三处：dashboard.py:1061、web/app.js:205、regime/coupling.py:67；SYSTEM_LOG_20260805.md:318 原文「X2 后 app.js 的注释更新了，dashboard.py 的没跟上」。app.js:210-211 确已按 m.symbols.length 动态算高度（注释提到 74 品种）——日志作者可能据此误判整个 app.js 已更新。SQL 复现：SELECT COUNT(DISTINCT symbol) FROM ohlcv → 74。此条是对漂移表已知条目的更正而非重复（已知条目只登记 dashboard.py 一处且对 app.js 的陈述相反），不判 KNOWN_DUP。",
+            "fix_hint": "三处注释改为「按当前宇宙动态构造的 N×N 矩阵」，并更正 SYSTEM_LOG_20260805.md:318。"
+          },
+          {
+            "claim": "折叠区把「26列」写成「26 项特征」，其中 4 列实为 TF/确认态/原始态/置信度标识列",
+            "status": "CONFIRMED",
+            "kind": "干扰",
+            "severity": "P2",
+            "evidence": "web/index.html:121 summary 显示「26 项特征」；web/app.js:954-961 表头分组：标识4＋结构4＋波动率6＋量能3＋cRSI4＋路径几何5=26 列（报告的 4+6+3+4+5=22 即去掉标识组后的指标列数，算术成立）；app.js:977-994 表体 cells 数组逐项数同为 26，头体一致。「标识」组 ['TF','状态','原始','conf(原始)'] 确非特征。",
+            "fix_hint": "改为「26 列（22 项指标＋4 项标识/输出）」，或由列定义数组动态生成 summary 文字。"
+          }
+        ],
+        "missed_nearby": [
+          "_live_iv_block 还有 4 个报告未列的死叶字段：series（dashboard.py:466-467，每 symbol 每次刷新下发 ~120 个盘中点，是该块体积最大的死负载）、pre_iv（455）、in30_now（460）、preview（462）——app.js:791-793 与 agent.py:206-214 均只读 iv/chg/chg_pct/rank_preview；尤其 preview 字段旁注释写「前端必须据此标注未结算」，而前端实际是硬编码「实时(未结算)」文案、从未读该标志，注释承诺的契约并不存在。",
+          "web/ 目录下 app.js.bak / index.html.bak / style.css.bak 三个备份文件仍在（会被静态服务出去）——此项与 GAPS_20260805.md E15 实质相同，属已知，不再单列。",
+          "报告发现8的处置建议有一处会引发回归：storage.counts() 除 dashboard 外另有 collector.py:812 每轮日志调用（含 deriv 计数并经 log_tail 显示在面板），「从 counts() 中移除」这一备选修法不可采。"
+        ]
+      },
+      {
+        "route": "路线8：数据库死物与写读不对称",
+        "verdicts": [
+          {
+            "claim": "storage.py 文件头“collector 写、dashboard 读”已非实际拓扑：19 张业务表含脚本写入、Hermes 读写、四张零读表",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "regime/storage.py:1 原文属实；sqlite_master 业务表=19（20-sqlite_sequence）；抽查账本全部命中：collector.py:577/592/599/631/665/689/694/721/402/422/498/510/580/322/220/178/260/339/617/765、dashboard.py:78/109/141/176/277/300/336/405/425/498/529/617/646/667/689/854/885/1100/1159/1164、regime/agent.py:379/421、regime/backtest.py:300/308/338、vvvhermes.py:47/55、regime/coupling.py:142，逐行验证无一错位",
+            "fix_hint": "改文件头为真实角色描述，并生成机器可检验的表级 W/R 清单（SYSTEM_LOG 漂移表未含此条，非重复）"
+          },
+          {
+            "claim": "storage.py 仅 get_ref_daily 和 get_breadth 两个存取函数零调用",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "grep 全仓（排除 .venv/.git/regime-spectrum，含 *.py/*.sh/*.js/*.md）仅命中定义行 storage.py:482/723；getattr(storage 动态调用 grep 为 0；独立全函数扫描：storage.py 全部 def 中外部零引用者恰为这两个（_assert_grid 有内部调用 storage.py:308）",
+            "fix_hint": "删除或给出消费计划；“仅有两个”的全称断言经独立扫描成立"
+          },
+          {
+            "claim": "ref_daily 已存 15,331 行且每日续写，全仓零硬编码消费者；耦合层实际读 ohlcv",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL COUNT=15331/15331/15331 与报告完全一致；写入 collector.py:529,535 + scripts/backfill_reference.py:63/68/77；唯一 SELECT 在死函数 storage.py:482-487；regime/coupling.py:142 实际调 storage.get_ohlcv",
+            "fix_hint": "接入或停更；注意 agent.py:458 把 ref_daily 列入 Hermes 只读 SQL 可查表，存在人工/LLM 动态查询通道——“零硬编码消费”的措辞因此精确且必要"
+          },
+          {
+            "claim": "bbo、universe_snapshot 所有列均无读者（含主键与全部属性列）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "grep 全仓仅命中写入 collector.py:454(universe)/478(bbo) 与建表 storage.py:56/66，零 SELECT；SQL 现值 bbo=22,665（报告 22,517，活体时点差）四列全非空，universe_snapshot=224 四属性列全非空",
+            "fix_hint": "暂停写入或设保留期；注意基础事实（无消费者+位置式 INSERT）已在 SYSTEM_LOG_20260805 剩余风险表 P3-7 登记（不在题设的漂移表/E 组内，故不判 KNOWN_DUP），本条增量为列级完备性"
+          },
+          {
+            "claim": "breadth 的 11 个指标列全部落库但零消费，读取函数本身也是死代码",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：2 行、11 列各 2 非空，完全一致；写入 collector.py:143（upsert_breadth）；get_breadth 仅定义于 storage.py:723，外部引用 grep=0；collector.py:120 docstring 自称“影子字段，只采不消费”",
+            "fix_hint": "按影子字段补消费者/转正日期，或删死 accessor；注意“只采不消费”是代码内声明的设计意图，属采而不用而非意外死代码"
+          },
+          {
+            "claim": "stock_option_stat 八个指标列不进 payload/判定/实验，生产读取仅 ts 水位",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：46,432 行，volume 三列 46,432、pc_volume_ratio 46,416、OI 四列 46,352 非空——与报告逐位一致；调用仅 collector.py:327-329、backfill_moomoo_iv.py:49/51、测试；incr()（collector.py:300-315）只用 have[\"ts\"].iloc[-1]；collector.py:326 注释“纯采集，不进判定”",
+            "fix_hint": "登记研究入口与保留期；注意采而不用是 docstring 明示的刻意设计（storage.py:673-678），非疏漏"
+          },
+          {
+            "claim": "regime_history.rules 236,830 行全有 JSON 但从未被任何读路径消费",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：236830/236830 完全一致；写入 storage.py:398-404（INSERT）+ classify.py:317 json.dumps(r.rules)；get_states(storage.py:424)选 ts,state,confidence,raw_state、get_states_audit(storage.py:490)选七列均无 rules；dashboard/agent/backtest/experiments/exp_event_gate/app.js/vvvquery grep rules（排除 rules_version）=0；storage.py:162 仅为 ALTER TABLE 迁移非读取",
+            "fix_hint": "接入 get_states_audit/vvvquery，或停写该列"
+          },
+          {
+            "claim": "deriv.oi_notional 65,224 非空值闲置，面板/回测只消费 oi/premium/taker_ratio/iv30/funding",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL 现值 92,363/65,372（报告 92,215/65,224，活体时点差）；生产 deriv.py:42/83、列 storage.py:117 均属实；dashboard.py:757-760 cols 循环与 backtest.py:338 只取所列列；全仓 oi_notional grep 仅 deriv.py/storage.py 定义侧；kind 确在 storage.py:590-593 结算行过滤中活跃",
+            "fix_hint": "用作跨品种可比 OI 或停止落库；补充：dashboard.py:646 的 get_deriv(storage.py:561)整宽表读也带出 oi_notional 但仅用 iv30，读路径比报告多一条、同样未消费"
+          },
+          {
+            "claim": "stock_vol.underlying_price 47,185 行全非空，落库后无任何生产消费",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：47185/47185 完全一致；写 storage.py:631-637、读 storage.py:660 进 DataFrame；dashboard.py:336 起仅用 ts/iv/hv；全仓 grep underlying_price 仅 moomoo_iv.py 采集侧、storage.py、tests",
+            "fix_hint": "接入 IV/标的同日对账或停止持久化"
+          },
+          {
+            "claim": "opt_iv_near.index_price 56 行全非空，从未进入近端 IV payload 或实验",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：56/56 完全一致；写 storage.py:761-766、get_opt_iv_near(storage.py:771-777)返回该列；dashboard.py:237-249 payload 仅 iv/tenor_days/method/n_expiries/age_min/ts；全仓 grep 下游=0（仅 binance_opt_iv.py 生产侧与 tests）",
+            "fix_hint": "进健康检查或从存储接口移除"
+          },
+          {
+            "claim": "stock_vol_live 的 hv_30d/vendor_iv_rank/vendor_iv_pct/call_volume/put_volume 五列满存零消费；pc_volume_ratio 不算死列",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：1,766 行五列各 1,766 非空，与报告一致；_LIVE_COLS storage.py:780-781、写 collector.py:260；dashboard.py:405-467 全块细读仅用 ts/iv/pre_iv/pc_volume_ratio（后者确于 463-465 进 payload）；五列 grep 仅 moomoo_iv.py 采集侧",
+            "fix_hint": "裁剪 _LIVE_COLS 或把 vendor rank/HV 接入对照审计"
+          },
+          {
+            "claim": "earnings.pub_type/period/known_at 均不被生产读取；known_at 23 个非空值不参与任何过滤",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：602/602/602/23 完全一致；写 storage.py:825-833（known_at 首见不刷新）；生产 SELECT 逐处核实均仅 ts 或 symbol,ts（storage.py:850,933,966-967、dashboard.py:425,498）；storage.py:843-847 docstring 明文“本函数不按 known_at 过滤——记录在案的先验而非疏漏”，报告已如实引用，断言与设计声明不冲突",
+            "fix_hint": "known_at 留待严格 as-of；pub_type/period 明确用途或停采"
+          },
+          {
+            "claim": "meta 只有 15 个已知硬死键；新增死物是 status.symbols 字段；stock_iv_term_last='0' 不是死键",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：meta 总数=338；死键实点：v1 deriv_backfilled_*（非 v2）恰 10 个、regime_audit_* 恰 5 个，活代码仅用 v2 前缀（collector.py:662），死键命中全为注释（storage.py:180/375、repair_time_alignment.py:13）；status.symbols 每轮写（collector.py:804-810）、dashboard._collector_info 仅取 interval/cycle_sec/errors（dashboard.py:882-884）、json_array_length=74；stock_iv_term_last='0' 实测，_should(collector.py:80-88) 中 '0' 为真且 now-0>3600 必放行并自覆写——判“非死键”正确。细节核对：usvol_csv_% 实为 16 键（含 gate_v2），报告“at/max/ok 各5”=15 与其“12 个单键族”账目自洽",
+            "fix_hint": "删 15 死键；status.symbols 停写或让健康页消费"
+          },
+          {
+            "claim": "counts() 只统计 4 张表，前端只展示 3 张（连已算的 deriv 都不显示）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "storage.py:1054-1058 元组恰为 ohlcv/dvol/regime_history/deriv；dashboard.py:885 \"counts\": storage.counts(conn)；web/app.js:1037-1040 仅渲染 K线/DVOL/状态 三行，无 deriv；SQL 佐证行数 stock_vol=47,185、vol1h=201,866、usvol=25,896 均与报告一致，皆不在 counts 内",
+            "fix_hint": "改名 core_counts 或动态覆盖全部采集表"
+          },
+          {
+            "claim": "Hermes 只读 SQL 提示只列 8 张表，遗漏 11 张，且列出的 ref_daily 是零硬编码消费表",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "regime/agent.py:458-459 原文：ohlcv/regime_history/deriv/vol1h/usvol/dvol/stock_vol/ref_daily 恰 8 张；sqlite_master 业务表 19 张，差集恰为报告所列 11 张（bbo/breadth/chat/earnings/live_bars/meta/opt_iv_near/stock_iv_term/stock_option_stat/stock_vol_live/universe_snapshot）；ref_daily 零硬编码消费已于第 3 条独立确认",
+            "fix_hint": "提示改为示例表并由 sqlite_master 自动生成"
+          }
+        ],
+        "missed_nearby": [
+          "storage.py:561 get_deriv 以 _DERIV_COLS 整宽表 SELECT，dashboard.py:646 由此把 oi_notional 全列读入内存后只用 iv30——#8 的死列多一条实际读入路径（读而不用），报告只写了 757-760 的按列请求路径",
+          "meta 键 usvol_csv_gate_v2：#13 的族清单未显式点名（可归入其『12 个单键族』，账目自洽但清单不完整）",
+          "agent.py:458 将零消费表 ref_daily 写进 Hermes 提示，等于主动邀请 LLM 查询一张无人维护口径的表——#3 与 #15 各说了一半，两条合看才是完整风险：动态消费通道存在但通向死数据"
+        ]
+      },
+      {
+        "route": "路线9：术语与命名口径",
+        "verdicts": [
+          {
+            "claim": "最新系统日志 SYSTEM_LOG_20260805.md:19 仍称 high_vol_chop 为「高波动无序」，与 classify.py 正式改名「高波动非趋势（趋势条件未齐）」矛盾",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "SYSTEM_LOG_20260805.md:19 实见「高波动无序」（全文唯一处）；regime/classify.py:69-80 注释明写「没有证明无序」且 STATES['high_vol_chop']='高波动非趋势（趋势条件未齐）'。该条不在同日志漂移表（那里只收 classify.py:71-72 数字过期）也不在 GAPS E 组，非 KNOWN_DUP",
+            "fix_hint": "改系统日志:19 的五态列举为现行标签；旧日志保留旧称时加「当时术语」注记"
+          },
+          {
+            "claim": "dashboard payload 的 states_map 键全仓无消费者，前端独立维护硬编码 SM，状态中文名双源",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "生产点 dashboard.py:995；grep 全仓（排除 .venv/.git/.bak/.pyc/__pycache__）无任何消费；web/app.js:5-11 硬编码 SM 且已再漂移（squeeze 缺「蓄势」、high_vol_chop 缺「趋势条件未齐」括注）。注：SYSTEM_LOG_20260731.md:712 与 SYSTEM_LOG_20260802.md:281,349 早已记录此双源问题（P2 待办），但按本次规则的 KNOWN_DUP 范围（限 20260805 两文件）不算重复",
+            "fix_hint": "前端改为消费 states_map（颜色留前端），或删死键并注明标签前端自治"
+          },
+          {
+            "claim": "moomoo 厂商聚合 iv 被 payload 与 Hermes 提升为严格「30天/iv30」，同名承载 moomoo 聚合 IV 与 CBOE 常数期限 IV30 两种概念",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "dashboard.py:573-587 _iv30_fields 将 moomoo 值返回为键 iv30；regime/agent.py:61 称「30 天隐含波动率（moomoo 口径）」；regime/moomoo_iv.py:6-8 与 docs/RESEARCH_IV_PLATFORMS_20260804.md:30 均明写「非严格常数期限 IV30」。需注明既有缓解：payload 带 iv30_src 区分源、stock_vol 表 source 进主键、agent 文本带「moomoo 口径」限定，误导距离有限，故 P2 而非 P1。与 GAPS E12（deriv 无 source 列）角度不同，非重复",
+            "fix_hint": "主线键改 stock_iv/vendor_iv，iv30 留给 CBOE；Hermes 措辞改「标的级聚合 IV（非严格 30d）」"
+          },
+          {
+            "claim": "opt_iv_near 会保存 <3d 的 nearest IV，历史 payload 丢弃 tenor_days 改名 iv3，前端曲线统一标「IV3/3d隐含」",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "regime/binance_opt_iv.py:94-95,148-151（nearest 记真实 tenor）；dashboard.py:300-315（历史只复制 ts,iv → iv3）；web/app.js:754,757 系列固定「3d 隐含/IV3」、:732 spread3 标「3dIV−RV3」。SQL 实跑：DOGE 8 行 2.05–2.21d nearest、XAU/XAG 各 8 行 2.59–2.75d nearest（报告的 2.07/2.61 为活体时点差、口径一致）。缓解：同卡 meta（app.js:677,824）对最新点如实显示 ~X.Xd·单点/插值，库内 tenor_days/method 完整保留，误标限于历史曲线图例与 spread3 名，故 P2",
+            "fix_hint": "历史 payload 逐点带 tenor_days/method；曲线改名「近端IV」，仅 interp∧3d 标 IV3"
+          },
+          {
+            "claim": "footer 宣称「时间均为 UTC」，但同页采集器日志尾用宿主本地时间（JST）无时区标识",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "collector.py:69-79 logging 仅 %(asctime)s 无 UTC converter；dashboard.py:874-886 原样下发 log_tail；web/index.html:143 footer「时间均为 UTC」。实跑：日志尾 2026-08-05 15:46:48 vs 宿主 15:49 JST / 06:49 UTC，相差 9 小时确认为本地时",
+            "fix_hint": "formatter 固定 UTC 加 Z 后缀（或标 JST），footer 加限定语"
+          },
+          {
+            "claim": "deriv.ts 同表承载墙钟采样、资金费结算、统计点、K 线开盘四种时刻语义，无统一契约",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "不一致",
+            "correction": "四义事实成立（deriv.py:39 快照 time.time / :70 fundingTime / :78 接口 timestamp / :104 premium k[0] 开盘刻，共用 storage.py:32-35 的 deriv(symbol,ts) 主键），但报告把它呈现为无契约的裸不一致——实际 regime/storage.py:575-578 已明文列出四种网格语义（funding 8h 结算格 / OI·premium·taker 1h 回填格 / 快照 5m 墙钟格 / iv30 30 分钟格），且全部读取走 get_deriv_col 逐指标窗 + hourly_grid 过滤（含 ±60s 容差处理 fundingTime 抖动），多义是已知且已运维化的设计。真实缺口只是：语义契约写在读取函数 docstring 而非 schema/文档层",
+            "evidence": "regime/deriv.py:39,70,78,104；regime/storage.py:32-35,571-590",
+            "fix_hint": "把 get_deriv_col docstring 的网格语义提升为 schema 注释/文档契约即可，不必急于拆表"
+          },
+          {
+            "claim": "同为「接口无时间戳记本地采样刻」，breadth 用 captured_at 而近端 IV、盘中个股 IV 用 ts，观测时刻列命名无统一口径",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "regime/breadth.py:16,75（captured_at）+ storage.py:104-110（breadth 表 ts 为交易日锚、另存 captured_at）；regime/moomoo_iv.py:105,111（『ts 用采集时刻（本地墙钟）』）；regime/binance_opt_iv.py:60,79（ts=now 墙钟）+ storage.py:87-98 表结构。补充语境：breadth 的 ts 已被交易日锚占用故必须另立列，快照表采样刻即有效刻故径用 ts——各模块 docstring 均已自证口径，但跨表 ts 语义（日锚 vs 墙钟）确实不统一，join/对齐时有踩坑面",
+            "fix_hint": "在 schema 文档列出每表 ts 语义；新表遵循 ts=有效刻、captured_at=采集墙钟"
+          },
+          {
+            "claim": "dashboard 为近端 IV 与盘中个股 IV 输出的两个 captured_at payload 字段无前端/Hermes/测试消费者",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "生产点 dashboard.py:249（xopt）与 :459（盘中 IV，报告写 244-249/454-462 范围正确）；grep captured_at 于 web/regime/tests/scripts/collector.py/main.py/vvvhermes.py 仅命中 breadth 模块与两生产点，前端确实只消费 age_min（web/app.js:824）。仓外 API 客户端不可排除（报告盲区已自注）",
+            "fix_hint": "删两死键（保留 age_min），或前端接入显示精确 as-of"
+          }
+        ],
+        "missed_nearby": [
+          "web/app.js:5-11 的 SM 标签已相对 classify.py STATES 再次漂移：squeeze 缺「（蓄势）」、high_vol_chop 缺「（趋势条件未齐）」括注——这是 #2 双源风险已兑现的实例，报告只说了双源未说现值已漂",
+          "web/index.html:143 footer 数据源列举含 OKX，但 SYSTEM_LOG_20260805 明写 OKX/Hyperliquid 兜底「从未触发」，与 data.py 文件头漂移（已在漂移表）同族，footer 一侧未被登记",
+          "dashboard.py:732 一处衍生细节：spread3 对 DOGE/XAU/XAG 实为 ~2.1-2.75d IV 减 3d RV 的跨期限差，标签「3dIV−RV3」——属 #4 的直接后果，报告建议里未点名这个具体读数"
+        ]
+      },
+      {
+        "route": "路线10：面板文案与 Hermes 上下文对后端口径",
+        "verdicts": [
+          {
+            "claim": "耦合面板把 all247 写成“加密+商品”，实际还含国际股永续 SKHY",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "web/app.js:156 `all247: '24/7（加密+商品）'`；regime/coupling.py:43-57 将 intl_stock_perp 归 all247；instruments.json:175-176 SKHY-USDT class=intl_stock_perp、pool=core；实跑 panel_members(conn,'all247') 返回 10 个成员且含 SKHY-USDT",
+            "fix_hint": "文案改“24/7（加密+商品+国际股永续）”或由后端下发面板成员说明"
+          },
+          {
+            "claim": "可见符号 ° 在矩阵表示观察池、在波动率卡表示未确权，页面无可见图例",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "grep '°' web/app.js web/index.html 恰四处：app.js:206(源码注释)、219(观察池打标)、806/808(index_settled/term.fast.settled===false 打标)；dashboard.py:706 注释定义其为“盘中延迟报价（未确权）”；index.html 零命中即无图例",
+            "fix_hint": "两种语义用不同符号，并各加可见 tooltip/图例"
+          },
+          {
+            "claim": "美股持仓卡把 moomoo 长史 IV 值/分位配上 CBOE 影子列的短史跨度",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "web/app.js:870-871 meta 无条件显示 `sp.iv30` 天；app.js:883-885 指标区显示 dr.iv30/iv30_rank；dashboard.py:573-588 _iv30_fields 有 moomoo 即用其值与分位，dashboard.py:792-799 spans.iv30 仍= span_of(deriv.iv30)。SQL 复现：deriv QQQ iv30 跨度 4.6 天/172 点（报告写 171 点为采集时点差，口径一致），stock_vol moomoo QQQ 1135.0 天/780 行——meta 当前实际显示“iv30 4.6d”而值来自 1135 天序列",
+            "fix_hint": "iv30 三元组随 source 一并返回 span/n/rank_kind，meta 跟随最终选中 source"
+          },
+          {
+            "claim": "个股期限曲线出数后 UI/Hermes 会把实际到期天数固定写成 3d/9d/30d（dormant）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "web/app.js:811-814 固定“（3d/9d/30d…）”；regime/agent.py:248-253 固定“个股期限3d/9d/30d=”；dashboard.py:675-683 已下发 t3/t9/t30，grep t3|t9|t30 于 app.js 零消费、agent.py 亦只读 iv3/iv9/iv30；stock_iv_term.py:25-37 明确允许不同目标落同一到期；SQL COUNT(stock_iv_term)=0，首采后才触发",
+            "fix_hint": "显示实际 t3/t9/t30，目标桶只作括号说明；数据落库后升 P1"
+          },
+          {
+            "claim": "IV 分位可能是 504 日条件分位，PANEL_LEGEND 仍统一说 252 日，前端窗外只写“分位”",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "regime/agent.py:62 图例“其分位是与自己历史比（252 交易日窗）”；dashboard.py:346-350 优先条件分位（rank_kind=cond）、EARN_COND_WIN=504（dashboard.py:477）；web/app.js:773-776 仅 cond&&earn_in30 时加“·财报窗内”，窗外条件分位只显示“分位”。注：Hermes 正文（agent.py:217-218）已按 rank_kind 标“同财报状态内分位(2年窗)”，与图例自相矛盾更坐实不一致",
+            "fix_hint": "图例与前端统一显示 rank_kind+窗口（同财报状态·504日 / 原始·252日）"
+          },
+          {
+            "claim": "PANEL_LEGEND 迟滞说明漏掉 v3.1 事件窗内 squeeze→trend 加一根的例外",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "regime/agent.py:50-51 只说“一般 2 根、恢复震荡 3 根、高波立即”；regime/classify.py:183-203 _confirm_need：event_win 且 squeeze→trend_up/down 时 need+=1（v3 A1 门槛）",
+            "fix_hint": "图例补事件门槛，最好由 _confirm_need 的结构化配置生成"
+          },
+          {
+            "claim": "无 DVOL 品种（SOL）前端有近端 IV，Hermes <panel> 却输出 DVOL=None 且丢近端 IV 值/期限",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "web/app.js:675-682 读 d.xopt 显示近端 IV/tenor/方法/到期数；regime/agent.py:181-190 dvol 段只输出 iv_last/iv_rank/RV/spread3、零处读 xopt；实跑 vvvquery panel SOL-USDT 输出“DVOL隐含=None(一年分位None) RV30=35.8 RV3=34.03 3dIV−RV3=+10.0pt”，无近端 IV 数值。SQL：SOL 最新 opt_iv_near=44.07/3.0d/interp/3 到期（报告的 44.48、+10.4pt 为活体时点差，口径一致）",
+            "fix_hint": "无 DVOL 品种改写“近端IV=xx（实际x.xd）”，有 DVOL 时两层并列"
+          },
+          {
+            "claim": "五条分管线心跳只进前端，未进 Hermes <panel>，数据健康问答盲区",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "dashboard.py:1003 下发 heartbeat（_heartbeat 定义于 909）；web/app.js:1060-1073 renderHeartbeat 显示正常/迟滞/断流/盘外+最后落库；grep heartbeat regime/agent.py 零命中（exit=1）。Hermes 只有“采集器: 间隔300s 最近错误N个”整体信息，单管线静默断流不可见",
+            "fix_hint": "<panel> 注入各 lane 的 state/age/note，至少注入非 ok/idle 项"
+          },
+          {
+            "claim": "Hermes 无条件称个股 IV 为“昨结算”，丢弃后端 asof/age_days/stale",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "不一致",
+            "correction": "核心成立：agent.py:219-224 固定“个股IV(昨结算)=”且 iv30_txt 不含 asof/age_days/stale；dashboard.py:371-380 下发 asof/age_days/stale(>4天)；web/app.js:800 陈旧时显示“⚠N天前”。但报告的 grep 证据不实：grep 'age_days|stale' regime/agent.py 命中 2 行（397、407）——那是 overview_brief 里 regime_history 行的陈旧标记，与 iv 块的 stale 无关，“0 行”表述错误",
+            "evidence": "agent.py:219-224、397/407；dashboard.py:376-379；app.js:800",
+            "fix_hint": "改“最近结算 YYYY-MM-DD／N天前”，stale 注入健康警告"
+          },
+          {
+            "claim": "Hermes 丢弃指数 IV 与期限结构的 settled 状态，盘中未确权值被当正式数值",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "不一致",
+            "correction": "核心成立：dashboard.py:549-560 term 的 settled、dashboard.py:623-624 index_settled 均下发，前端 app.js:806/808 以 ° 标记；agent.py:242-243（期限比）、257-258（指数值）确不读取。但报告称 grep -nE 'index_settled|settled' regime/agent.py 输出 0 行不实——实际 1 命中（agent.py:284 funding_settled_pct 的“上期结算”，属 funding 概念，与 IV settled 无关）",
+            "evidence": "dashboard.py:559、624；agent.py:242-243、257-258、284",
+            "fix_hint": "未确权值在文本中标“盘中延迟报价/未确权”"
+          },
+          {
+            "claim": "vvvquery overview 给 Hermes 的表清单只列 8 张，实际库有 19 张业务表",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "regime/agent.py:458-459 列 ohlcv/regime_history/deriv/vol1h/usvol/dvol/stock_vol/ref_daily 共 8 张；SQL：sqlite_schema type='table' 非 sqlite_% 共 19 张，缺 breadth/chat/earnings/live_bars/meta/opt_iv_near/stock_iv_term/stock_option_stat/stock_vol_live/universe_snapshot/bbo",
+            "fix_hint": "由 sqlite_schema 动态生成，或标明“常用表举例”"
+          },
+          {
+            "claim": "vvvquery states 自称“状态+审计”，实际只投影 5 个审计特征且不显示 rules/version/audit_version",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "scripts/vvvquery.py:6 注释“最近 N 行状态+审计”；vvvquery.py:63-77 SELECT 仅 ts/state/raw_state/confidence/features，打印 dir/er_rank/atr_rank/bbw_rank/warmup 共 5 项；classify.py:274-310 audit 字典恰 25 键，SQL 复现最新 BTC 4h 行 DISTINCT json key=25；regime_history 表含 rules/version/audit_version 列均未选",
+            "fix_hint": "改称“状态+5项审计摘要”或加 --full/--json"
+          },
+          {
+            "claim": "preview payload 的 bar_ts/age_sec 只有生产方，无任何消费者",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "dashboard.py:194、196 写入；grep -RIn（排除 .venv/.git）全仓仅命中生产处 + SYSTEM_LOG_20260731.md:204（文档）+ regime/storage.py:860（无关注释里的同名局部变量）；消费方 app.js:335-337/435-437 与 agent.py:155-156 只读 preview.state/confidence；无 getattr/模板串等动态访问路径",
+            "fix_hint": "删两字段，或补预览新鲜度展示后保留"
+          },
+          {
+            "claim": "源码宣称“1h 翻转 Hermes/API 可查全量”，实际 API 上限 40 条、Hermes 注入上限 6 条",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "web/app.js:1010-1011、web/index.html:93-94 注释“Hermes 与 API 仍可查全量”；dashboard.py:866 _flips 全周期合并后 return flips[:40]；regime/agent.py:291-292 注入 flips[:6]。注：Hermes 理论上可经 vvvquery sql 自查 regime_history 重建全量，但 flips API 字段本身确非全量",
+            "fix_hint": "改“可查最近记录”，或提供按 TF 分页的 flips 接口"
+          },
+          {
+            "claim": "商品（XAU/XAG）剪刀差标成“个股IV−RV”，把代理 GLD/SLV 说成商品自身个股 IV",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "不一致",
+            "correction": "标签错配成立：instruments.json:378-390 XAU class=commodity、vol_proxy=GLD；dashboard.py:713-715 有 iv 即 spread_src='stock'；web/app.js:803-804 与 agent.py:197-199 据此写“个股IV−RV”；SQL 复现 XAU stock_vol 最新为 moomoo 23.557（GLD 代理序列）。但报告对 Hermes 侧描述不完整：agent.py:191-200 该行标题是“商品波动率:”且紧跟“[IV为代理GLD期权口径(30天)]”标注，app.js:796 亦标“结算IV(代理GLD)”——误导范围仅限 spread 标签与“个股IV(昨结算)”字样本身，非整段冒充",
+            "evidence": "dashboard.py:713-715；agent.py:191-200、219；app.js:796、803-804",
+            "fix_hint": "spread_src 枚举扩为 self/index/proxy，商品统一显示“代理GLD IV−RV”"
+          }
+        ],
+        "missed_nearby": [
+          "preview payload 的 label 与 close 字段同样无消费者（dashboard.py:191、195 写入；app.js:336/436 用 SM[state].label 自查映射而非 preview.label，close 全仓零读取）——与第 13 条同源，可一并删除",
+          "agent.py:47 PANEL_LEGEND 统一写“IV=Deribit DVOL 隐含波动率”，对无 DVOL、走币安近端 IV 的品种（SOL 等 6 币）该图例定义落空——与第 7 条同根但属图例层"
+        ]
+      },
+      {
+        "route": "路线11：测试与代码的漂移（out11.md 对抗核验）",
+        "verdicts": [
+          {
+            "claim": "test_usvol_authority 把周六 2026-08-01 当\"新交易日\"写入并断言保留，同一文件⑧节又声明\"不得造出周末行\"且脏值只验 isinstance(date)。",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "tests/test_usvol_authority.py:25 定义 D01=2026-08-01（`date -j` 复核为 Saturday）；:69-71/:76-79/:86 以\"当日/新交易日\"注释断言 16.4、16.1 落在 D01 行；:109-114 ⑧节声明\"周末/盘后…不得造出周末行\"但脏值只 `isinstance(fallback, date)`；regime/usvol.py:53-65 脏值兜底 `return datetime.now(ET).date()` 确实可能返回周末；SQL 复核 usvol 周末行 COUNT=0，真库尚无污染。",
+            "fix_hint": "D01 改为真实交易日；用可控时钟钉住周末脏值必须回退上一交易日，写入层拒绝非交易日。"
+          },
+          {
+            "claim": "符号翻转测试的 docstring 承诺\"全程无 decoupled\"，实际断言允许途经 decoupled 且 :62 注释反称这是诚实记录。",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "tests/test_coupling_fsm.py:53-55 docstring 写\"且全程无 decoupled\"；:59-63 仅断言 reasons 含 sign_reversal 或 eligibility_lost+regained、终态 coupled，无任何否定 decoupled 的断言；:62 注释\"旧关系破裂途经 decoupled 是诚实记录\"与 docstring 直接互斥。",
+            "fix_hint": "先裁决 FSM 语义，再让测试名/docstring 与断言二选一对齐。"
+          },
+          {
+            "claim": "文件头称\"稳态零误报\"，稳态测试只禁最终级 decoupled，误入 decoupling 仍全绿。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "tests/test_coupling_fsm.py:1 头部含\"稳态零误报\"；:45-50 只断言 `to_state==\"decoupled\"` 不出现且终态 coupled；regime/coupling_fsm.py:318-341 把 p_false_decoupling 与 p_false_decoupled 均定义为误报率（:333-336 两级分开计数），两级都算误报，测试只钉了一级。",
+            "fix_hint": "稳态样本加 `to_state!=\"decoupling\"` 断言，或把头部改成\"零确认脱耦\"。"
+          },
+          {
+            "claim": "test_coupling.py 头部所称\"EWMA 手算对照\"不存在，实际是 4000 随机样本、容差 0.08 的总体相关收敛冒烟。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "tests/test_coupling.py:1 头部写\"EWMA 手算对照\"；:18-27 `test_ewma_corr_converges_to_true_rho` 仅 `abs(rho-0.6)<0.08`；全文件 5 个测试逐一读过，无任何短序列固定数值逐步对拍。",
+            "fix_hint": "补短序列固定数值精确对拍，或改头部为\"总体相关收敛测试\"。"
+          },
+          {
+            "claim": "财报条件分位测试 docstring 仍写\"今天 IV=80、应落中间\"，fixture 已改为 IV=70、同组最低、断言 rank==0.0。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "tests/test_stock_vol.py:309-311 docstring 写\"今天(窗内, IV=80)…正确做法只与窗内日子比，应落在中间\"；:326-328 实际追加 iv=70.0（注释\"IV 居中偏低\"）；:336-337 断言 `rank == 0.0`。",
+            "fix_hint": "按现 fixture 重写 docstring（条件组最低值 + rank_raw 污染对拍）。"
+          },
+          {
+            "claim": "实时 IV 预览测试 :392 旧注释称无财报时预览分位应回退 None，现行断言与生产代码都要求回退全集≈0.127。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "tests/test_stock_vol.py:392 注释\"无财报记录 → in30 为 None，预览分位应回退为 None\"；:401-404 断言 `pr0 is not None and 0.10 < pr0 < 0.15`（≈0.127）；dashboard.py:450-453 elif 分支注释\"无财报记录…与结算全集比\"并计算 prev_rank。断言本身会拦住\"修回 None\"，故降为 P2。",
+            "fix_hint": "删除或改正 :392 注释后半句。"
+          },
+          {
+            "claim": "两个半日市测试在 half is None 时直接 return，目标断言静默变通过。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "tests/test_stock_vol.py:293-299 `test_settled_only_uses_real_close_not_hardcoded_1600` 在 :298-299 `return  # 该年无半日市表则跳过`；:658-664 `test_breadth_slot_respects_half_day_close` 同结构在 :663-664 return；`grep -RE 'pytest\\.(skip|mark\\.skip)' tests` 确认无显式 skip。",
+            "fix_hint": "先断言 2026-11-27 收 13:00，找不到半日市应 fail 或 pytest.skip 而非静默 return。"
+          },
+          {
+            "claim": "test_backtest_causality 头部只列\"四件事\"、test_stock_vol 头部只列\"三件事\"，实际分别 12/34 个用例。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "tests/test_backtest_causality.py:3-9 头部\"钉死四件事\"；tests/test_stock_vol.py:3-4 头部\"钉三件事\"；`grep -c '^def test_'` 复核分别为 12、34；后者实测覆盖财报窗、实时双轨、期限曲线、宽度槽、心跳等头部未列职责。",
+            "fix_hint": "更新文件头职责目录，或按主题拆分 test_stock_vol.py。"
+          },
+          {
+            "claim": "test_confirm_states 文件头仍无条件写\"一般态 2 根\"，遗漏 v3.1 事件窗内 squeeze→趋势 3 根的例外。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "tests/test_confirm_states.py:7-8 头部\"一般态 2 根、恢复 range 3 根、high_vol_chop 1 根\"未提事件例外；regime/classify.py:199-201 事件窗内 squeeze→trend `need += 1`；同文件 :83-84 自己断言 `_confirm_need(T, from_state=S, event_win=True) == 3`（报告引 :82-87，实断言在 83-88，偏差 1 行不影响结论）。",
+            "fix_hint": "文件头补写 v3 事件门控例外。"
+          },
+          {
+            "claim": "test_pathgeom 已降格为确定性测试，:50 失败信息仍写\"analyze 因果性失败\"。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "tests/test_pathgeom.py:5-6 与 :35-39 明确\"只验证确定性，因果性由 test_causality.py 负责\"；:45 消息已正确改为\"pathgeom 确定性失败\"，但 :48-50 同类断言消息仍是 `\"analyze 因果性失败\"`，且两侧输入为同一前缀切片。",
+            "fix_hint": ":50 消息改为\"analyze 确定性失败\"。"
+          },
+          {
+            "claim": "系统日志\"265 条 assert\"把 3 个 docstring 里的 assert 单词算进去了，真实静态 assert 语句 262 条。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "SYSTEM_LOG_20260805.md:214 写\"69 个用例 / 265 条 assert\"；复跑 `grep -RE '\\bassert\\b' tests --include='*.py' | wc -l`=265，`grep -RE '^[[:space:]]*assert\\b'`=262；差值恰为 tests/test_pathgeom.py:125、test_session_ds.py:165、test_usvol_authority.py:124 三行 docstring（逐行核对）。69 个用例数复核正确。",
+            "fix_hint": "日志改 262，计数改用 AST 或行首语句匹配。"
+          },
+          {
+            "claim": "四组死脚手架：FakeConn 定义未实例化、FSMParams 导入未用、tempfile 导入未用、total 累加无读取。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "tests/test_coupling.py:51-52 定义 FakeConn，:69 实传 None（`grep -Rnw FakeConn tests` 仅定义 1 行）；tests/test_coupling_fsm.py:11 导入 FSMParams 全文件无使用（-w 仅 1 行）；tests/test_stock_vol.py:11 tempfile 仅导入行；tests/test_causality.py:80,84 total 仅初始化与 `+=`，无后续读取/打印/断言。均查过无 getattr/字符串动态引用。",
+            "fix_hint": "删除四处；FakeConn 若要表达接口约束应真正传入 panel_returns。"
+          },
+          {
+            "claim": "除已知 upsert_ohlcv 外，另有 12 个生产模块（agent/breadth/deriv/experiments/crsi/structure/utils/volume/instruments/report/main/vvvhermes）零直接单测引用。",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "复跑报告的精确 grep（`from regime\\.(agent|breadth|deriv|…)` 等）在 tests/ 下输出为空（exit=1）；逐行列出 tests 全部项目 import，直接目标恰为报告所列 16 个（含 test_stock_vol.py 体内 :437 binance_opt_iv——报告写 :438 偏 1 行、:575 stock_iv_term、:654 collector、:673 dashboard）；12 个零直接模块在 regime/ 与根目录逐一确认存在。报告已自限\"零直接单测≠零覆盖\"，与 GAPS E8（upsert_ohlcv）不重复。证据B里 \"regime/agent.py:71\" 式行号无实义，但不影响核心断言。",
+            "fix_hint": "在测试治理文档建立直接/间接/零覆盖矩阵，优先补 agent、deriv 清洗、breadth、CLI 白名单。"
+          }
+        ],
+        "missed_nearby": [
+          "两个半日市测试的候选日期表互不一致：tests/test_stock_vol.py:294 用 (2026-11-27, 2026-07-03, 2026-12-24)，:659 用 (2026-11-27, 2026-07-02, 2026-12-24)；且 2026-07-04 为周六、07-03 是补休全休日而非半日市，候选表本身含无效项——修第 7 条静默 return 时应一并统一并验证候选日。",
+          "SYSTEM_LOG_20260805.md:214 同句宣称 GitHub Actions '68 次运行 100% 绿'，报告自查盲区已声明未核历史日志——该数字在本轮同样未被任何一方复核，属日志中紧邻的未验证活体数字。"
+        ]
+      },
+      {
+        "route": "路线12：治理件与脚本（对抗复核 out12.md）",
+        "verdicts": [
+          {
+            "claim": "collector X1 注释写 37 品种（29 core+8 obs），硬编码 X1 段实为 38 个（30 core+8 obs）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "collector.py:49-51 注释原文复现；sed -n '52,60p' collector.py | grep -oE '[A-Z0-9]+-USDT' | wc -l → 38；按 instruments.json pool 统计该 38 个恰为 core=30, observation=8（Counter 复现，无缺登记）",
+            "fix_hint": "注释改 38/30+8 或删掉硬编码数字，改由代码打印计数"
+          },
+          {
+            "claim": "backfill_moomoo_iv.py 注释按 31 个标的估时，实际默认处理 63 个",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "scripts/backfill_moomoo_iv.py:7 原文'31 个标的全量约 3-4 分钟'；:23-28 选 us_stock_perp∪vol_proxy；jq 计数=63；SQL SELECT COUNT(DISTINCT symbol) FROM stock_vol WHERE source='moomoo' → 63",
+            "fix_hint": "docstring 去固定数，运行时按 len(symbols) 报数并折算估时"
+          },
+          {
+            "claim": "probe_moomoo_iv.py:91 注释'一次拿全 31 个标的'，实际动态取全部 61 个 us_stock_perp",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "scripts/probe_moomoo_iv.py:91 原文复现；:38-45 us_symbols() 按 class=='us_stock_perp' 动态选；jq class 分布 us_stock_perp=61",
+            "fix_hint": "注释去固定数字，打印 len(codes)"
+          },
+          {
+            "claim": "probe_moomoo_iv 仍把'能否回溯≥3年/是否采纳'写成待决未知，但结论已落地生产",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "scripts/probe_moomoo_iv.py:4-6 '唯一承重未知'、:137-143 仍输出'进入回填实施/退回 ORATS'判决；regime/moomoo_iv.py:3-4 已记录实测 3.10 年/778 交易日/零缺口；collector.py:730-733 sync_moomoo_iv 已是日频主线（3600s 节流）",
+            "fix_hint": "docstring 顶部标注'历史探针，2026-08 已裁决采纳'，保留巡检功能"
+          },
+          {
+            "claim": "run_coupling_grid 文档写每组合 11 资格对，按现库实算为 37",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "scripts/run_coupling_grid.py:10 '稳态零模型，11 资格对'；:93-99 动态取 all247 资格对；只读复算（storage.connect_ro + panel_members/panel_returns/pair_table）输出 members=10, pairs=45, eligible=37，与报告逐字一致。属活体数字但口径一致，按规则判 CONFIRMED。误报预算与耗时估计随之失真约 3.4 倍，会误导下次校准",
+            "fix_hint": "docstring 去固定数，运行时打印 len(pairs) 并按其折算路数/耗时"
+          },
+          {
+            "claim": "regime/instruments.py docstring 的 class 说明只列 crypto 与 us_stock_perp，遗漏已上线的 commodity 与 intl_stock_perp",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "regime/instruments.py:5-9 仅两类；instruments.json:4 _v2说明明确'class 新增 intl_stock_perp…与 commodity'；jq 现算分布 crypto=7, us_stock_perp=61, commodity=5, intl_stock_perp=1，与报告完全一致",
+            "fix_hint": "docstring 补齐四类及各自交易时钟/功能边界"
+          },
+          {
+            "claim": "'注册表热读、改完即生效'未注明成员例外：新增 JSON 品种不会进入运行中或默认启动的 collector",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "instruments.json:2 '品种注册表（热读）'、regime/instruments.py:3 '每次调用热读，改完即生效'；collector.py:52-88 另存硬编码 DEFAULT_SYMBOLS（实测 74 个、无重复），:775 default=DEFAULT_SYMBOLS、:787 仅启动时解析一次，主循环不重读。当前两集合逐一比对差集为空（74=74），但属性热读≠成员热读",
+            "fix_hint": "注释明确'成员非热读'，或让 collector 每轮从注册表安全刷新成员"
+          },
+          {
+            "claim": "requirements.txt 注释称每个测试文件保留直跑入口，实际 12 个文件仅 7 个有 __main__",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "requirements.txt:6 'pytest>=7  # …（每个文件保留 python 直跑的 main()）'；grep -RIl '__main__' tests --include='test_*.py' → 7 个；find tests -name 'test_*.py' → 12 个；缺的正是 backtest_causality/calendar_nyse/coupling/coupling_fsm/vwap 五个，与报告名单逐一吻合",
+            "fix_hint": "注释改'部分文件支持直跑'或统一补 __main__ 入口"
+          },
+          {
+            "claim": "根 requirements 装不出仓内标注'可执行'的参考实现所需的 SciPy",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "requirements.txt 全文无 scipy；regime-spectrum/04-REFERENCE-IMPL.py:4 '依赖: numpy, pandas, scipy'、:12 'from scipy import stats'，且该目录 6 个文件均在 git 跟踪中（非 Downloads 那份外部副本）；.venv/bin/python -c 'import scipy' → ModuleNotFoundError 复现。注意：用户已定性 regime-spectrum 为仅供参考项目，故修法宜在其 README 标注'需自备 scipy'而非往根依赖加包",
+            "fix_hint": "在 regime-spectrum 内声明独立依赖，勿污染根 requirements"
+          },
+          {
+            "claim": "moomoo 依赖注释要求最低 10.8.6808，但约束只写 >=10.8，表达不了该下限",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "requirements.txt:7 'moomoo-api>=10.8  # …10.8.6808 起才有'；regime/moomoo_iv.py:1 'SDK ≥10.8.6808'；pip show 实装 10.9.6908（本机恰好满足）。10.8.0~10.8.6807 均满足 >=10.8 却缺协议 3303/3304",
+            "fix_hint": "改为 moomoo-api>=10.8.6808"
+          },
+          {
+            "claim": "REP_PAIRS_IDX 是零消费者的遗留常量",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "scripts/run_coupling_grid.py:38 定义；grep -RInw 'REP_PAIRS_IDX'（排除 .git/.venv/data）仅命中定义行；扩查 'REP_PAIRS' 前缀亦无其它命中；该脚本无外部导入方（grep run_coupling_grid 仅文档提及），无 getattr/字符串动态引用可能",
+            "fix_hint": "删除；如原意限制代表对数，接入 strong/edge 构造处"
+          },
+          {
+            "claim": "backfill_history._fetch_deribit_range 的 fetch_tf 赋值后被 `_ = fetch_tf` 显式丢弃，不参与请求",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "scripts/backfill_history.py:43 赋值、:65 `_ = fetch_tf`；grep -RInw fetch_tf 全文件仅此两处；实际 resolution 用 :48 的 _DERIBIT_RES[tf]，而 regime/data.py:54 定义 {'1h':'60','4h':'60','1d':'1D'}——4h 走 1h 取数由该映射承担，与报告建议一致",
+            "fix_hint": "删 43 与 65 两行，行为零变化"
+          }
+        ],
+        "missed_nearby": [
+          "collector.py:49-51 的 X1 注释只描述前 38 个，但同一 DEFAULT_SYMBOLS 元组已并入 X2 共 74 个品种——修注释时应同步给出总量 74（=X1 38 + X2 36），否则读者会把整个元组当成 37/38 个",
+          "以上 12 条均不在 SYSTEM_LOG_20260805.md「文档与代码的漂移」11 处清单及 docs/GAPS_20260805.md E 组（E1-E16）内，无 KNOWN_DUP；E16 的 11 处漂移与本报告零重叠，说明治理件/脚本注释是漂移盘点的又一盲区，可考虑并入 E16 根因项"
+        ]
+      },
+      {
+        "route": "路线13：重复实现与单一事实点 violation（对抗复核）",
+        "verdicts": [
+          {
+            "claim": "生产分位用严格 `<`，E1/E2 实验私有 `_rolling_rank` 用 `<=` 却声称同口径；并列值时 0.0 vs 1.0",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/features/utils.py:13 `(s < s.iloc[-1]).mean()`、:29 滚动版同 `<`；regime/experiments.py:47-51 docstring 写「与 features.utils.pct_rank 同口径…（<=，含自身）」而实现为 `(x <= x[-1]).mean()`，:74/110/111 被 E1/E2 实际使用。手推 [1,1,1]：`<` 得 0.0，`<=` 得 1.0。即使无并列，`<=` 含自身也恒偏高 ≥1/win",
+            "fix_hint": "删私有实现改调公共 rolling_pct_rank；如坚持 <= 须改名并写进实验协议版本",
+            "correction": "补一细节：docstring 本身自相矛盾——既称「同口径」又括注「<=，含自身」，而公共实现是严格 <；另有第二处口径差见 missed_nearby（min_periods）。与 GAPS E14（pct_rank 样本<2 返回 0.5）不是同一条，非重复"
+          },
+          {
+            "claim": "settled_only 把只覆盖 2025–2027 的 NYSE 日历复用于 2023 起的历史清洗，新建/全量回填时 2023–2024 工作日全被丢弃",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/calendar_nyse.py:37-43 `_YEARS={2025,2026,2027}`，表外年份 is_trading_day 恒 False；regime/moomoo_iv.py:22 DATA_FLOOR='2023-06-26'（周一），:196-199 settled_only 对每行 `if not is_trading_day(d): continue`；collector.py:305-312（表空时 begin=DATA_FLOOR）与 scripts/backfill_moomoo_iv.py:59-69（--full）都全量走 settled_only。SQL：stock_vol 现有 47,185 行 2023-06-26 起、其中 22,384 行早于 2025——说明现存历史是过滤加入前灌入的，损失是前瞻性的（新品种如 E13 的 CL/XPT/XPD 配 proxy 后回填即触发，分位分母被静默截短）",
+            "fix_hint": "历史合法性与实时 RTH fail-closed 拆成两个 API，历史侧只拒周末+已知假日"
+          },
+          {
+            "claim": "backfill_moomoo_iv 用宿主机 date.today()，而 collector/财报回填已统一 ET 日期，东京宿主每天约 13 小时相差一天",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "scripts/backfill_moomoo_iv.py:44 `today = date.today()`（无时区）；collector.py:292-294 注释明言必须取 ET 并用 ZoneInfo('America/New_York')；scripts/backfill_earnings.py:41-42 同走 ET。时点差算术成立（01:00Z=东京 08-05/ET 08-04）",
+            "fix_hint": "抽公共 et_today() 三处共用",
+            "correction": "断言成立但实际危害有限：该 today 只做取数终点与「已最新」跳过判断，settled_only 内部自取 ET now 兜底，未结算行不会入库；错向是多拉一天重叠而非漏数。故定 P2 而非报告隐含的高危"
+          },
+          {
+            "claim": "fetch_ohlcv 的 drop_unclosed 不判断是否未收线而无条件删末行，与 fetch_binance_vol1h 的 ts+周期<=now 判据语义不同",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/data.py:384-385 docstring「默认丢弃最后一根未收盘 K 线」，:398 实现恒为 `closed = df.iloc[:-1]`，全程无时间比较；:306-308 fetch_binance_vol1h 用 `ts + 3_600_000 > now` 精确过滤。若某源只返回已收线数据，最后一根好 bar 会被静默丢弃",
+            "fix_hint": "统一为 bar_close_ms<=now 判据，或把「末行必为形成中」的契约下沉进各源适配器",
+            "correction": "补充：现行 deribit/okx/binance 类 K 线接口惯例含形成中末行，故当前生产未发生实际损失（报告盲区一已自认）；属潜伏语义缺陷+误导性 docstring，非在产错误读数"
+          },
+          {
+            "claim": "CLI 把单根规则树原始态直接标为 state，面板展示 v3.1 迟滞确认态；两入口对「当前状态」语义不同，最新 180 序列中 24 个不一致",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "main.py:64 直接 analyze_timeframe，全文件无 confirm_states；regime/report.py:87-88 打印 r.state 无任何「原始/未确认」标注；dashboard.py:108-123 从库取确认态并单列 raw_state/candidate。SQL 复现：WITH latest AS (SELECT symbol,tf,MAX(ts)…) SUM(raw_state<>state) → 180|24，与报告数字一致",
+            "fix_hint": "CLI 标注「原始即时判定」或改读库内确认态；若 CLI 仍被用于盘中判定应升 P0"
+          },
+          {
+            "claim": "deriv.funding_interval_h 规定未知必须返回 None，面板却 get_meta(...,8.0) 默认 8h 并年化，前端再 `|| 8` 回退",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P1",
+            "evidence": "regime/deriv.py:121-136 失败/无品种返回 None，docstring 明言「不是伪装成 8.0」；dashboard.py:810 `float(storage.get_meta(conn, f'funding_interval_{symbol}', 8.0) or 8.0)` 并据此算 per_year；web/app.js:879、:915 `dr.funding_interval_h || 8`。SQL：meta 现有 74 个 funding_interval_<SYM> 键（另 74 个 _at_ 时间戳键，共 148 行）——当前满覆盖故无在产错读，缺键/新品种冷启动即按 8h 伪年化",
+            "fix_hint": "缺键时 interval 与年化都出 None，前端显示「周期未知」"
+          },
+          {
+            "claim": "Web 与 CLI 各自实现价格格式化，<0.01 时一个 toPrecision(4)、一个 .10f 去尾零，同价显示不同精度",
+            "status": "CONFIRMED",
+            "kind": "不一致",
+            "severity": "P2",
+            "evidence": "web/app.js:44-49 fmtPrice `v < 0.01 → v.toPrecision(4)`；regime/report.py:8-18 _fmt_price `p < 0.01 → f\"{p:.10f}\".rstrip(\"0\")`。0.000123456 → JS '0.0001235' vs Py '0.000123456'，复现成立。SQL 复核宇宙最低最新价：DOGE-USDT 1h 收盘 0.06991，确未触发该分支（报告数字精确吻合）",
+            "fix_hint": "冻结统一精度规范 + 跨语言固定样例测试"
+          },
+          {
+            "claim": "moomoo_iv.fetch_overview 是旧 3303 聚合读取，全仓无调用方，现行管线走 fetch_live——死代码",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "regime/moomoo_iv.py:71 定义；grep -RIn（排除 .venv/.git，含 py/js/sh）仅命中定义行；无 getattr 类动态分发（全仓非测试代码 grep getattr 为空）；现行实时路径为 collector.py:258 `moomoo_iv.fetch_live(...)`。docstring 里的开放项（盘中是否滚动）已被 fetch_live:100-102 的实测结论取代",
+            "fix_hint": "删除或移入 probe 脚本并标注非生产 API"
+          },
+          {
+            "claim": "binance_opt_iv 的单品种 snapshot 及其专属 fetch_chain 构成零入口调用岛，已被 snapshot_all 取代",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "regime/binance_opt_iv.py:47 fetch_chain、:153-163 snapshot（唯一调用 fetch_chain 处 :159）；grep 全仓 `\\bsnapshot\\(|fetch_chain\\(` 仅此三处命中；snapshot_all(:56-83) 自建 by_u 字典不经 fetch_chain；生产入口 collector.py:173 调 snapshot_all；tests/test_stock_vol.py:436-500 只测纯函数 synth_near_iv，不触 snapshot/fetch_chain",
+            "fix_hint": "删除，或让 snapshot 包装 snapshot_all(symbols=[symbol]) 留作调试"
+          },
+          {
+            "claim": "ref_daily 持续写入但无固定应用消费者，唯一读取器 get_ref_daily 自身零引用；15,331 行/9 序列/2020-01-01~2026-08-04 未进任何耦合/回测/面板",
+            "status": "CONFIRMED",
+            "kind": "死代码",
+            "severity": "P2",
+            "evidence": "regime/storage.py:465-479 upsert（docstring 称「耦合研究历史层」）、:482-487 get_ref_daily；grep 全仓（py/js/sh）`get_ref_daily|FROM ref_daily` 仅命中定义两行，测试仅 test_stock_vol.py:87 注释提及；写路径 collector.py:529/535、scripts/backfill_reference.py:63/68/77。SQL：15331|9|2020-01-01|2026-08-04，三数字全部复现。动态残口：regime/agent.py:458-459 声明 agent 可用通用 SQL 手查（报告已自认），不构成固定消费者。与 GAPS E12（ref_daily 缺 source 主键纪律）是不同断言，非重复",
+            "fix_hint": "明确标注冷存储/手工研究层，或接入具体实验消费者，否则停日更"
+          }
+        ],
+        "missed_nearby": [
+          "同区域第二处口径差（报告第 1 条漏）：experiments.py:51 `s.rolling(win).apply(...)` 默认 min_periods=win，前 249 根全 NaN；而 utils.rolling_pct_rank:26-29 从 2 个有效值起就出数、pct_rank 用 tail(window) 不足额也算——窗口不足语义三处各不相同，实验与生产的分位序列起点相差约 248 根",
+          "dashboard.py:811 `per_year = 365*24.0/interval_h if interval_h else 3*365.0`：else 分支隐含 8h 假设且因上一行 `or 8.0` 兜底恒不可达——死分支，且与第 6 条同根（8h 伪默认写了两遍）",
+          "meta 表中 74 个 funding_interval_at_<SYM> 时间戳键（共 148 行）无任何读取方消费其新鲜度——记录了「上次更新时刻」却没人检查过期，interval 改制（8h→4h）后若 fundingInfo 拉取失败会无限期沿用旧值且无告警"
+        ]
+      },
+      {
+        "route": "路线14：端到端对拍——同一个数字的所有出口",
+        "verdicts": [
+          {
+            "claim": "BTC DVOL 值各出口一致为 34.0，但分位 payload/Hermes 为 0.003、前端四舍五入成 0.00",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "SQL 复算：34.04 / 0.0027397（365 点严格小于，与 dashboard.py:287 pct_rank(…,365) 同口径）；dashboard.py:308-309 round(iv_rank,3)=0.003；web/app.js:680 fmtN(d.iv_rank,2)→'0.00'（fmtN=toFixed，app.js:51-55）；regime/agent.py:183 直接输出 0.003；collector.log 'DVOL BTC 最新 34.0' 实见",
+            "fix_hint": "前端 DVOL 分位改 fmtN(…,3) 或统一显示为百分数，与 Hermes 口径一致"
+          },
+          {
+            "claim": "NVDA IV 正式分位实为 504 日窗同财报状态条件分位，Hermes 固定图例仍称普通 252 日分位",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "dashboard.py:504(s.tail(EARN_COND_WIN=504))、511(剔除当日同状态比较)、381-388(rank/rank_raw/rank_kind/earn_in30)；SQL 复算：780 行全史、当前 in30=1、185 peers、17 below→0.0919≈payload 0.092，rank_raw 252 窗=0.6111≈0.611；regime/agent.py:61-62 PANEL_LEGEND 仍写'与自己历史比（252交易日窗）'，正文 217-218 才正确标'同财报状态内分位(2年窗)'；web/app.js:771-776 仅显示'分位 0.09·财报窗内'",
+            "fix_hint": "改 PANEL_LEGEND 为'优先504日同财报状态条件分位，样本不足回退252日原始分位'，前端把 rank_kind 译成中文标签"
+          },
+          {
+            "claim": "BTC 近端 IV(~3d) 从库到前端、collector 全通，但 Hermes 加密分支丢掉 IV/tenor/method，只留 RV3 与 spread3",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "dashboard.py:237-249 _xopt_block（docstring 明写'method/n_expiries 必须出到消费方'）、313-319 入 payload；web/app.js:675-677 显示'近端IV …（~3.0d·插值·10到期）'；SQL 最新 opt_iv_near BTC-USDT=29.74/3.0/interp/10（报告 29.68 为时点差）；grep xopt regime/agent.py 仅 266-267（uv 商品/美股分支），dv 加密分支 180-190 无 xopt 消费者；collector.log 实见 'BTC=29.7(~3.0d)'",
+            "fix_hint": "加密 Hermes 行补输出 xopt 的 iv/tenor/method/n_expiries/age，兑现 _xopt_block 自己声明的消费方契约"
+          },
+          {
+            "claim": "RV30/RV3 可复算且各出口一致，但 README 仍写旧的'指数IV vs RV30 + 9D/3M'单卡描述",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "复算逐位一致：NVDA RV30=48.461136（30×1d,√365）、BTC RV3=28.779479、NVDA RV3=42.224347（72×1h,√(24×365)），与 payload 48.46/28.78/42.22 吻合；volatility.py:37-40 realized_vol 定义、dashboard.py:634-644/252-265 实见；web/index.html:68-74 确已分两卡；README.md:74 实见旧描述。不在 SYSTEM_LOG_20260805:311-323 漂移表 11 条与 GAPS E 组内（E16 为泛指，未列此条）→ 非 KNOWN_DUP",
+            "fix_hint": "README.md:74 改写为现行四层架构并写明 RV30=30×日收益、RV3=72×小时收益"
+          },
+          {
+            "claim": "代码与活体文案把 IV−历史HV 直接称'方差风险溢价'，与仓内研究文档'IV−过去RV 不是严格 VRP'的结论相悖",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "不一致",
+            "evidence": "dashboard.py:353 '方差风险溢价（VRP = IV − HV）'、357-364 实算 iv-hv；SQL：NVDA 47.285/42.092/5.193→payload vrp=5.19；regime/agent.py:48 'IV−RV 为波动率风险溢价'、64 'VRP=IV−HV…方差风险溢价'；web/app.js:781,801 同称 VRP；docs/research/20260803/topic3-iv-vrp.md:43 实见'`IV−过去RV` 不是严格 VRP；严格定义是风险中性预期方差减物理测度下的未来方差预测'",
+            "fix_hint": "活体出口统一改称'IV−HV 剪刀差'或'VRP proxy'，保留解读文案不变"
+          },
+          {
+            "claim": "9D/30D 双速期限结构各出口一致，但 README 仍写旧的单一 9D/3M 口径",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "干扰",
+            "evidence": "复算逐位一致：fast=VIX9D/VIX=0.911515、csv_max 截断后 3918 参照点、rank=0.367534，与报告及 payload 0.912/0.368 吻合（dashboard.py:541-570，legacy=VIX9D/VIX3M 仅作兼容字段）；web/app.js:807-810、regime/agent.py:242-243 均输出双速；README.md:74 实见'9D/3M期限结构（>1倒挂=近端恐慌）'。不在漂移表/GAPS E 组 → 非 KNOWN_DUP",
+            "fix_hint": "README 改为'9D/30D 急性端 + 30D/3M 制度端'，ts_ratio 明标 legacy"
+          },
+          {
+            "claim": "stock_option_stat 的 NVDA put/call 历史链（780 行）停在库内，dashboard/前端/Hermes/只读查询提示均无消费者",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "SQL：NVDA-USDT/moomoo 780 行，2023-06-26~2026-08-04，最新 pc_volume_ratio=0.4495、pc_oi_ratio=NULL；全仓 grep（排除 .venv/.git/.bak）仅命中 collector.py:327-329（采集水位）、storage、backfill 脚本、测试、文档；regime/agent.py:458-459 只读 SQL 表清单确无 stock_option_stat。注：SYSTEM_LOG_20260731.md:604 已定性'纯采集不进判定'——是刻意影子数据而非遗忘，但确无任何审计出口，且未见于 20260805 漂移表/E 组",
+            "fix_hint": "至少把表加进 vvvquery 表清单并标注'研究中、不进判定'，或由用户裁决是否停采"
+          },
+          {
+            "claim": "盘中 stock_vol_live.pc_volume_ratio 进入 _live_iv_block payload，但前端与 Hermes 零引用，是死 payload 键",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死代码",
+            "evidence": "dashboard.py:463-465 实见输出该键；regime/moomoo_iv.py:132 生产；SQL 最新 NVDA live 2026-08-04 19:55:04 / 0.454732；grep pc_volume_ratio 全仓仅命中 moomoo_iv/dashboard/storage/tests，web/app.js、regime/agent.py、vvvhermes.py、main.py 零行；无 getattr/字符串拼接类动态取用（前端取键为字面 lv.xxx）",
+            "fix_hint": "要么在 IV 实时区渲染'盘中P/C成交比'，要么从 live payload 删键"
+          },
+          {
+            "claim": "OI 分位计算一致，但前端标注约 25.7 天参照窗，Hermes 在跨度≥21 天后永久不提窗口长度",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "复算（每小时末值+严格小于，dashboard.py:731-742/817）：BTC oi=108194.7、617 小时点、span 25.7d、rank 0.818——与报告 108281/0.828 为分钟级活体漂移、口径一致；web/app.js:870-871 显示'历史 OI 25.7d'；regime/agent.py:280 仅输出'OI=…(分位0.82)'，287 只在 warmup 时附注，而 dashboard.py:840 warmup=spans.oi<21 → ≥21 天即永久静默；README.md:40 附近确认 Binance OI 历史仅约 30 天",
+            "fix_hint": "Hermes 恒输出 spans.oi（如'近25.7日小时分位'），不要用 21 天闸门吞掉窗口信息"
+          },
+          {
+            "claim": "margin 按 raw_state 规则树计算，却与迟滞后的 confirmed state 并排展示；两态不同时方向文本自相矛盾",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "不一致",
+            "evidence": "regime/classify.py:178 _boundary_margin(state=当次原始分类,…)、89-120 按态枚举可达翻转、295-296 入审计快照；dashboard.py:109-110 取 confirmed state 而 229 返回 raw 重算的 reg.features（含 margin）；SQL 实证：CAT-USDT 1h 最新行 state=trend_up、raw_state=range、margin=0.02、m_near=to_trend——Hermes（agent.py:148-166 + _pathgeom_str）实际生成'状态=趋势上行…[原始判定=range]…margin=0.02(to_trend)'，已处趋势态却提示'距进入趋势仅0.02'；web/app.js:349-354/440-445 只标'边界过渡/margin'未说明基于原始态",
+            "fix_hint": "payload 键改名 raw_margin 并在图例/前端标明'相对原始判定态的边界'；需要 confirmed 态 margin 则按 confirmed state 另算"
+          }
+        ],
+        "missed_nearby": [
+          "dashboard.py:829-834 分位的\"当前值\"口径不统一：taker_rank 用小时重采样后的末值作当前值，而 oi_rank/premium_rank 用原始 5m 末值与小时参照集比——同一函数内两种口径，5m 噪声大时同一时刻两类分位的可比性不同（P2）",
+          "regime/agent.py:44-68 PANEL_LEGEND 完全没有描述 3d 持仓前端层的字段（近端IV/RV3/spread3/个股期限3d9d30d）——正文已在输出这些数字（agent.py:188-189,252-253,269-271），图例却只解释 30d 层，与发现2同根因：固定图例落后于分层升级（P2）"
+        ]
+      }
+    ]
+  },
+  "workflowProgress": [
+    {
+      "type": "workflow_phase",
+      "index": 1,
+      "title": "核验"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "核验:t1",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a1ff40e000afd9489",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912193734,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线1：常量与阈值的多处呈现（对抗复核，11/11 条逐条独立查证…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out1.md（主题：常量与阈值多处呈现），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECT…",
+      "lastProgressAt": 1785912537531,
+      "tokens": 81352,
+      "toolCalls": 33,
+      "durationMs": 343795,
+      "resultPreview": "{\"route\":\"路线1：常量与阈值的多处呈现（对抗复核，11/11 条逐条独立查证）\",\"verdicts\":[{\"claim\":\"前端六条分位条把 ATR/BBW 统一按 <0.15 挤压、>0.85 高波配色，实际规则是 BBW<0.15、ATR<0.30 共判挤压，高波只看 ATR\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"不一致\",\"evidence\":\"web/app.js:399-417 renderVolRanks 对六条条统一 `val < 0.15 ? squeeze : val > 0.85 ? chop : accent`；web/app.js:653-656 历史图 markLine 只画 0.15/0.85 两条线；web/style.css:156 只有 .t15/.t85 两个刻度类，全前端 grep 无 …"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "核验:t2",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a6431f9bb618673db",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912192766,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线2：README.md 全文逐节对现实",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out2.md（主题：README 对现实），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORREC…",
+      "lastProgressAt": 1785912542770,
+      "tokens": 91920,
+      "toolCalls": 30,
+      "durationMs": 350003,
+      "resultPreview": "{\"route\":\"路线2：README.md 全文逐节对现实\",\"verdicts\":[{\"claim\":\"confidence 并非统一的“子信号一致程度”，而是按状态各用不同强度公式，squeeze/high-vol 各只看一个分位\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"不一致\",\"evidence\":\"README.md:16 vs regime/classify.py:160-174：trending conf=0.45|d|+0.35·er_rank+0.20·vol_confirm（165）；squeeze=1-bbw_rank（168）；high_vol=atr_rank（171）；range=0.5(1-er_rank)+0.5(1-|d|)（174）。行号与公式与报告完全一致\",\"fix_hint\":\"README …"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 3,
+      "label": "核验:t3",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a8aa8bdb794827be5",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912201267,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线3：两份 SYSTEM_LOG 互查 + 对代码（对抗复核）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out3.md（主题：两份 SYSTEM_LOG），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- COR…",
+      "lastProgressAt": 1785912489804,
+      "tokens": 87183,
+      "toolCalls": 25,
+      "durationMs": 288537,
+      "resultPreview": "{\"route\":\"路线3：两份 SYSTEM_LOG 互查 + 对代码（对抗复核）\",\"verdicts\":[{\"claim\":\"20260805:160「只有两个阈值真正决定状态」与实际五个状态边界不符，且回退了 0731 附录已订正的结论\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"不一致\",\"evidence\":\"SYSTEM_LOG_20260805.md:160 原文复核属实；classify.py:141-174 中 trending 用 er_rank_trend/direction_trend 两阈值，squeeze 分支由 vol['squeeze']（volatility.py:129 = bbw_rank<0.15 and atr_rank<0.30）、high_vol 分支由 vol['high_vol']（vola…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 4,
+      "label": "核验:t4",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a1522eb5be81b16f1",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912193511,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线4：docs/ 目录 20 份文档互查（对抗核验）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out4.md（主题：docs 互查），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED…",
+      "lastProgressAt": 1785912597167,
+      "tokens": 90658,
+      "toolCalls": 29,
+      "durationMs": 403656,
+      "resultPreview": "{\"route\":\"路线4：docs/ 目录 20 份文档互查（对抗核验）\",\"verdicts\":[{\"claim\":\"GAPS 已标 A1 完成（v3.1），结尾却仍把\\\"实施 A1、走 v2 升版\\\"列为唯一优先事项；过期 v2 指令散落三份 IV 文档\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"不一致\",\"evidence\":\"GAPS_20260805.md:34（A1 已完成 v3.1）vs :69（D2\\\"A1 一起做\\\"）、:77-79（\\\"若只做一件事：A1…v2 升版\\\"）；EARNINGS_IV_CONTAMINATION_20260804.md:38、RESEARCH_IV_PERSTOCK_20260804.md:59、RESEARCH_IV_PLATFORMS_20260804.md:133 均硬编码\\\"并入 v…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 5,
+      "label": "核验:t5",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "aaef23bd88cc7e581",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912192713,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线5：regime/ 全模块注释与 docstring 对实现 —— 对抗复核（1…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out5.md（主题：注释对实现），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方…",
+      "lastProgressAt": 1785912555399,
+      "tokens": 83255,
+      "toolCalls": 34,
+      "durationMs": 362686,
+      "resultPreview": "{\"route\":\"路线5：regime/ 全模块注释与 docstring 对实现 —— 对抗复核（18/18 条逐条独立查证）\",\"verdicts\":[{\"claim\":\"dashboard.py 文件头自称只读 SQLite，但助手聊天/清空历史从面板进程写 chat 表\",\"status\":\"CONFIRMED\",\"kind\":\"不一致\",\"severity\":\"P2\",\"evidence\":\"dashboard.py:2「只读 SQLite（collector 负责写入）」；dashboard.py:1155-1166 connect_rw_nomigrate()+add_chat×2，1169-1173 clear_chat；regime/storage.py:146-153 connect_rw_nomigrate docstring 自认「面板的 chat 表读写专用」\"…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 6,
+      "label": "核验:t6",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a4641599be2bbebc1",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912193111,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线6：Python 死代码",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out6.md（主题：Python 死代码），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORREC…",
+      "lastProgressAt": 1785912535692,
+      "tokens": 78663,
+      "toolCalls": 38,
+      "durationMs": 342581,
+      "resultPreview": "{\"route\":\"路线6：Python 死代码\",\"verdicts\":[{\"claim\":\"fetch_overview() 全仓零调用，生产已改走同一 moomoo 接口的 fetch_live()\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"死代码\",\"evidence\":\"regime/moomoo_iv.py:71 定义（体至 :94）；grep -RInw --include='*.py' fetch_overview（排除 .venv/.git）→ 仅定义行；collector.py:258 调用 fetch_live；全仓无 getattr/globals()/eval/exec 动态派发（grep 零命中），无被动态调用可能\",\"fix_hint\":\"删除 fetch_overview（连同其已被推翻的 docstring…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 7,
+      "label": "核验:t7",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a35879736bf03eb45",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912194278,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线7：前端死代码（web/）——对抗核验",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out7.md（主题：前端死代码），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方…",
+      "lastProgressAt": 1785912544171,
+      "tokens": 82178,
+      "toolCalls": 35,
+      "durationMs": 349893,
+      "resultPreview": "{\"route\":\"路线7：前端死代码（web/）——对抗核验\",\"verdicts\":[{\"claim\":\"五状态中文标签双源：规则端带「蓄势/趋势条件未齐」限定语，前端 SM 删掉了它们\",\"status\":\"CONFIRMED\",\"kind\":\"不一致\",\"severity\":\"P1\",\"evidence\":\"regime/classify.py:78-79 squeeze=「低波动挤压（蓄势）」、high_vol_chop=「高波动非趋势（趋势条件未齐）」；classify.py:69-73 注释明确该限定语是刻意论证的规则语义。web/app.js:6-10 SM 标签为「低波动挤压」「高波动非趋势」；grep 'SM[' 命中 319,336,340,346,932,947 等处均取本地标签；grep state_label web/app.js=0 行（仅 regime/ag…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 8,
+      "label": "核验:t8",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a55b256c127e1ea54",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912194118,
+      "queuedAt": 1785912190265,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线8：数据库死物与写读不对称",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out8.md（主题：数据库死物），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方…",
+      "lastProgressAt": 1785912616856,
+      "tokens": 90093,
+      "toolCalls": 46,
+      "durationMs": 422738,
+      "resultPreview": "{\"route\":\"路线8：数据库死物与写读不对称\",\"verdicts\":[{\"claim\":\"storage.py 文件头“collector 写、dashboard 读”已非实际拓扑：19 张业务表含脚本写入、Hermes 读写、四张零读表\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"不一致\",\"evidence\":\"regime/storage.py:1 原文属实；sqlite_master 业务表=19（20-sqlite_sequence）；抽查账本全部命中：collector.py:577/592/599/631/665/689/694/721/402/422/498/510/580/322/220/178/260/339/617/765、dashboard.py:78/109/141/176/277/300/336/405/4…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 9,
+      "label": "核验:t9",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a492b26c75a448644",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912495449,
+      "queuedAt": 1785912190266,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线9：术语与命名口径",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out9.md（主题：术语命名），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方向…",
+      "lastProgressAt": 1785912782731,
+      "tokens": 70038,
+      "toolCalls": 22,
+      "durationMs": 287282,
+      "resultPreview": "{\"route\":\"路线9：术语与命名口径\",\"verdicts\":[{\"claim\":\"最新系统日志 SYSTEM_LOG_20260805.md:19 仍称 high_vol_chop 为「高波动无序」，与 classify.py 正式改名「高波动非趋势（趋势条件未齐）」矛盾\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"干扰\",\"evidence\":\"SYSTEM_LOG_20260805.md:19 实见「高波动无序」（全文唯一处）；regime/classify.py:69-80 注释明写「没有证明无序」且 STATES['high_vol_chop']='高波动非趋势（趋势条件未齐）'。该条不在同日志漂移表（那里只收 classify.py:71-72 数字过期）也不在 GAPS E 组，非 KNOWN_DUP\",\"fix_hint…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 10,
+      "label": "核验:t10",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "af55d5b8b5a3adf50",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912540536,
+      "queuedAt": 1785912190266,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线10：面板文案与 Hermes 上下文对后端口径",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out10.md（主题：面板/Hermes 文案），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- COR…",
+      "lastProgressAt": 1785912931818,
+      "tokens": 87910,
+      "toolCalls": 36,
+      "durationMs": 391282,
+      "resultPreview": "{\"route\":\"路线10：面板文案与 Hermes 上下文对后端口径\",\"verdicts\":[{\"claim\":\"耦合面板把 all247 写成“加密+商品”，实际还含国际股永续 SKHY\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"不一致\",\"evidence\":\"web/app.js:156 `all247: '24/7（加密+商品）'`；regime/coupling.py:43-57 将 intl_stock_perp 归 all247；instruments.json:175-176 SKHY-USDT class=intl_stock_perp、pool=core；实跑 panel_members(conn,'all247') 返回 10 个成员且含 SKHY-USDT\",\"fix_hint\":\"文案改“24/7（加密+商品…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 11,
+      "label": "核验:t11",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "abe030be04a3d4e93",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912541857,
+      "queuedAt": 1785912190266,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线11：测试与代码的漂移（out11.md 对抗核验）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out11.md（主题：测试漂移），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方…",
+      "lastProgressAt": 1785912814165,
+      "tokens": 75639,
+      "toolCalls": 24,
+      "durationMs": 272307,
+      "resultPreview": "{\"route\":\"路线11：测试与代码的漂移（out11.md 对抗核验）\",\"verdicts\":[{\"claim\":\"test_usvol_authority 把周六 2026-08-01 当\\\"新交易日\\\"写入并断言保留，同一文件⑧节又声明\\\"不得造出周末行\\\"且脏值只验 isinstance(date)。\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"不一致\",\"evidence\":\"tests/test_usvol_authority.py:25 定义 D01=2026-08-01（`date -j` 复核为 Saturday）；:69-71/:76-79/:86 以\\\"当日/新交易日\\\"注释断言 16.4、16.1 落在 D01 行；:109-114 ⑧节声明\\\"周末/盘后…不得造出周末行\\\"但脏值只 `isinstance(fa…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 12,
+      "label": "核验:t12",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "aef88764884961333",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912547079,
+      "queuedAt": 1785912190266,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线12：治理件与脚本（对抗复核 out12.md）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out12.md（主题：治理件），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方向…",
+      "lastProgressAt": 1785912804395,
+      "tokens": 60068,
+      "toolCalls": 23,
+      "durationMs": 257316,
+      "resultPreview": "{\"route\":\"路线12：治理件与脚本（对抗复核 out12.md）\",\"verdicts\":[{\"claim\":\"collector X1 注释写 37 品种（29 core+8 obs），硬编码 X1 段实为 38 个（30 core+8 obs）\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"不一致\",\"evidence\":\"collector.py:49-51 注释原文复现；sed -n '52,60p' collector.py | grep -oE '[A-Z0-9]+-USDT' | wc -l → 38；按 instruments.json pool 统计该 38 个恰为 core=30, observation=8（Counter 复现，无缺登记）\",\"fix_hint\":\"注释改 38/30+8 或删掉硬编码数字，改由代…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 13,
+      "label": "核验:t13",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a3f88fe7ac93f46c0",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912548378,
+      "queuedAt": 1785912190266,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线13：重复实现与单一事实点 violation（对抗复核）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out13.md（主题：重复实现），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：方…",
+      "lastProgressAt": 1785912891938,
+      "tokens": 85156,
+      "toolCalls": 33,
+      "durationMs": 343560,
+      "resultPreview": "{\"route\":\"路线13：重复实现与单一事实点 violation（对抗复核）\",\"verdicts\":[{\"claim\":\"生产分位用严格 `<`，E1/E2 实验私有 `_rolling_rank` 用 `<=` 却声称同口径；并列值时 0.0 vs 1.0\",\"status\":\"CONFIRMED\",\"kind\":\"不一致\",\"severity\":\"P1\",\"evidence\":\"regime/features/utils.py:13 `(s < s.iloc[-1]).mean()`、:29 滚动版同 `<`；regime/experiments.py:47-51 docstring 写「与 features.utils.pct_rank 同口径…（<=，含自身）」而实现为 `(x <= x[-1]).mean()`，:74/110/111 被 E1/E2 实际使用。手推 [1…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 14,
+      "label": "核验:t14",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a8a89e71236d37b75",
+      "model": "claude-fable-5",
+      "state": "done",
+      "startedAt": 1785912559995,
+      "queuedAt": 1785912190266,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线14：端到端对拍——同一个数字的所有出口",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的一致性/死代码审查报告。报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/consistency/out14.md（主题：端到端对拍），先完整读它。\n\n默认怀疑每一条：逐条回到代码/数据库里独立查证。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。严格只读，不得修改任何文件。\n\n判定规则：\n- CONFIRMED：你独立复现了两侧证据，断言成立\n- CORRECTED：…",
+      "lastProgressAt": 1785912928783,
+      "tokens": 100744,
+      "toolCalls": 27,
+      "durationMs": 368788,
+      "resultPreview": "{\"route\":\"路线14：端到端对拍——同一个数字的所有出口\",\"verdicts\":[{\"claim\":\"BTC DVOL 值各出口一致为 34.0，但分位 payload/Hermes 为 0.003、前端四舍五入成 0.00\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"不一致\",\"evidence\":\"SQL 复算：34.04 / 0.0027397（365 点严格小于，与 dashboard.py:287 pct_rank(…,365) 同口径）；dashboard.py:308-309 round(iv_rank,3)=0.003；web/app.js:680 fmtN(d.iv_rank,2)→'0.00'（fmtN=toFixed，app.js:51-55）；regime/agent.py:183 直接输出 0.003；co…"
+    }
+  ],
+  "totalTokens": 1164857,
+  "totalToolCalls": 435
+}
