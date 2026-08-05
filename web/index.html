@@ -63,8 +63,13 @@
     </div>
     <div class="col span4">
       <div class="card">
-        <div class="card-h"><h3>IV vs RV（30d + 3d）</h3><span class="sub" id="dvolMeta"></span></div>
+        <div class="card-h"><h3>IV vs RV30 <span class="sub">制度层</span></h3><span class="sub" id="dvolMeta"></span></div>
         <div id="dvolChart" class="chart iv"></div>
+      </div>
+      <!-- 3d 持仓前端独立成卡：RV3 尖峰（崩盘日可到 90%+）与 30d 序列同轴会把后者压平 -->
+      <div class="card">
+        <div class="card-h"><h3>IV vs RV3 <span class="sub">3d 持仓前端</span></h3><span class="sub" id="iv3Meta"></span></div>
+        <div id="iv3Chart" class="chart iv"></div>
       </div>
       <div class="card">
         <div class="card-h"><h3>持仓与杠杆（Binance 永续）</h3><span class="sub" id="derivMeta"></span></div>
@@ -83,9 +88,12 @@
       </div>
       <div class="hist">
         <div id="strips"></div>
-        <div class="hist-flips">
+        <!-- 翻转明细默认折叠：横向时间线本身已可见状态变化，逐条表只在追查时才需要；
+             1h 翻转噪音多不列（Hermes 与 API 仍可查全量） -->
+        <details class="flips-box">
+          <summary id="flipsSummary">翻转明细</summary>
           <div class="tablewrap"><table id="flipTable"></table></div>
-        </div>
+        </details>
       </div>
     </div>
   </section>

@@ -646,6 +646,7 @@ function renderDvol() {
   if (!d) {
     meta.textContent = '该品种无期权 IV 数据';
     if (c) c.clear();
+    renderIv3({});   // 同步清空 3d 卡
     return;
   }
   // 近端 IV（币安期权，1-3 天期限，24/7）：持仓前端层，与 30 天口径的 DVOL 分开标注
@@ -655,13 +656,12 @@ function renderDvol() {
   meta.textContent = [
     d.iv_last == null ? null
       : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 2)}）`,
-    xTxt,
     `RV30 ${fmtN(d.rv_last, 1)}`,
     d.spread == null ? null : `IV−RV ${fmtN(d.spread, 1, true)}pt`,
-    d.rv3_last == null ? null : `RV3 ${fmtN(d.rv3_last, 1)}`,
-    // 3d 剪刀差 = 近端IV − RV3：同期限对照，1-3 天仓的"保险贵不贵"
-    d.spread3 == null ? null : `3dIV−RV3 ${fmtN(d.spread3, 1, true)}pt`,
   ].filter(Boolean).join(' · ');
+  // 3d 持仓前端独立成卡（RV3 尖峰与 30d 序列不同量级，同轴互相压平）
+  renderIv3({ iv3: d.iv3, rv3: d.rv3, iv_txt: xTxt,
+              rv3_last: d.rv3_last, spread3: d.spread3 });
   if (!c) return;
   c.setOption({
     animation: false,
@@ -686,15 +686,52 @@ function renderDvol() {
       { name: 'RV30 已实现', type: 'line', data: d.rv, symbol: 'none',
         lineStyle: { width: 2 },
         endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 } },
-      // 3d 持仓前端对：同色配对（金），IV 实线 / RV 虚线。IV3 自 2026-08-05 自攒，
-      // 初期只在图右缘生长；RV3（72×1h）历史即刻可用
-      ...(d.iv3 && d.iv3.length ? [{ name: '3d 隐含', type: 'line', data: d.iv3,
-        symbol: 'none', itemStyle: { color: COL.gold },
-        lineStyle: { width: 2, color: COL.gold },
+    ],
+  }, true);
+}
+
+// 3d 持仓前端卡：IV3（自攒序列，2026-08-05 起在图右缘生长）vs RV3（72×1h 年化，
+// 历史即刻可用）。与 30d 卡分图的原因：RV3 崩盘日尖峰可到 90%+，同轴会把 30d 序列压平。
+// 色彩沿用 30d 卡语义：蓝=隐含、琥珀=已实现，读图习惯直接迁移。
+function renderIv3(o) {
+  const meta = $('iv3Meta');
+  const c = chart('iv3Chart');
+  const has = (o.rv3 && o.rv3.length) || (o.iv3 && o.iv3.length);
+  if (!meta) return;
+  if (!has) {
+    meta.textContent = '暂无 3d 数据';
+    if (c) c.clear();
+    return;
+  }
+  meta.textContent = [
+    o.iv_txt,
+    o.rv3_last == null ? null : `RV3 ${fmtN(o.rv3_last, 1)}`,
+    // 3d 剪刀差：同期限对照，"这笔 1-3 天仓的保险贵不贵"
+    o.spread3 == null ? null : `3dIV−RV3 ${fmtN(o.spread3, 1, true)}pt`,
+  ].filter(Boolean).join(' · ');
+  if (!c) return;
+  c.setOption({
+    animation: false,
+    useUTC: true,
+    color: [COL.blue, COL.amber],
+    tooltip: {
+      trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
+      textStyle: { color: COL.ink, fontSize: 11.5 },
+      valueFormatter: (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`),
+    },
+    legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
+      itemWidth: 12, itemHeight: 3, icon: 'rect' },
+    grid: { left: 38, right: 44, top: 22, bottom: 20 },
+    xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
+      axisLabel: { color: COL.muted, fontSize: 9.5 } },
+    yAxis: { scale: true, splitLine: { lineStyle: { color: COL.grid } },
+      axisLabel: { color: COL.muted, fontSize: 9.5, formatter: '{value}%' } },
+    series: [
+      ...(o.iv3 && o.iv3.length ? [{ name: '3d 隐含', type: 'line', data: o.iv3,
+        symbol: 'none', lineStyle: { width: 2 },
         endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
-      ...(d.rv3 && d.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: d.rv3,
-        symbol: 'none', itemStyle: { color: COL.gold },
-        lineStyle: { width: 1.5, color: COL.gold, type: 'dashed', opacity: 0.75 },
+      ...(o.rv3 && o.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: o.rv3,
+        symbol: 'none', lineStyle: { width: 1.5 },
         endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
     ],
   }, true);
@@ -735,16 +772,11 @@ function renderUsvol(uv, meta, c) {
   const bits = [
     lv ? liveTxt : null,
     iv ? `${ivLabel}${iv.stale ? `⚠${fmtN(iv.age_days, 0)}天前` : ''} ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
-    uv.xopt
-      ? `币安近端IV ${fmtN(uv.xopt.iv, 1)}（~${fmtN(uv.xopt.tenor_days, 1)}d·${uv.xopt.n_expiries === 1 ? '单到期' : (uv.xopt.method === 'interp' ? '插值' : '近邻')}·${fmtN(uv.xopt.age_min, 0)}分前）` : null,
     iv && iv.vrp != null
       ? `VRP ${fmtN(iv.vrp, 1, true)}pt（分位 ${fmtN(iv.vrp_rank, 2)}）` : null,
     `RV30 ${fmtN(uv.rv_last, 1)}`,
     uv.spread == null ? null
       : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,
-    uv.rv3_last == null ? null : `RV3 ${fmtN(uv.rv3_last, 1)}`,
-    // 3d 剪刀差：美股=期限曲线 iv3−RV3，商品=币安近端IV−RV3（同期限对照）
-    uv.spread3 == null ? null : `3dIV−RV3 ${fmtN(uv.spread3, 1, true)}pt`,
     uv.index == null ? null
       : `${uv.index}${uv.index_settled === false ? '°' : ''} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
     t.fast && t.slow
@@ -757,6 +789,15 @@ function renderUsvol(uv, meta, c) {
         + `（3d/9d/30d${uv.term_stock.inverted ? '·倒挂' : ''}）`,
   ];
   meta.textContent = bits.filter(Boolean).join(' · ');
+  // 3d 持仓前端独立成卡：美股 IV3 来自期限曲线自攒，商品来自币安近端 IV
+  const ts3 = uv.term_stock;
+  renderIv3({
+    iv3: uv.iv3_hist, rv3: uv.rv3, rv3_last: uv.rv3_last, spread3: uv.spread3,
+    iv_txt: ts3 && ts3.iv3 != null
+      ? `IV3 ${fmtN(ts3.iv3, 1)}（期限曲线3d·RTH自攒）`
+      : (uv.xopt
+        ? `币安近端IV ${fmtN(uv.xopt.iv, 1)}（~${fmtN(uv.xopt.tenor_days, 1)}d·${uv.xopt.n_expiries === 1 ? '单到期' : (uv.xopt.method === 'interp' ? '插值' : '近邻')}·${fmtN(uv.xopt.age_min, 0)}分前）` : null),
+  });
   if (!c) return;
   c.setOption({
     animation: false,
@@ -785,16 +826,6 @@ function renderUsvol(uv, meta, c) {
       // 商品无指数锚（uv.index 为空即不画）
       ...(uv.index ? [{ name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none',
         lineStyle: { width: 1, type: 'dashed', opacity: 0.55 } }] : []),
-      // 3d 持仓前端对：同色配对（金），IV 实线 / RV 虚线。美股 IV3 来自期限曲线自攒
-      //（2026-08-05 起），商品来自币安近端 IV——初期只在图右缘生长
-      ...(uv.iv3_hist && uv.iv3_hist.length ? [{ name: '3d 隐含', type: 'line',
-        data: uv.iv3_hist, symbol: 'none', itemStyle: { color: COL.gold },
-        lineStyle: { width: 2, color: COL.gold },
-        endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
-      ...(uv.rv3 && uv.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: uv.rv3,
-        symbol: 'none', itemStyle: { color: COL.gold },
-        lineStyle: { width: 1.5, color: COL.gold, type: 'dashed', opacity: 0.75 },
-        endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
     ],
   }, true);
 }
@@ -952,10 +983,16 @@ function renderFeatTable() {
 
 function renderFlips() {
   const flips = S.data.flips || [];
-  const rows = flips.map((f) =>
+  // 1h 翻转本身就多（噪音层），不进明细表——横向时间线仍画 1h，Hermes/API 可查全量
+  const shown = flips.filter((f) => f.tf !== '1h');
+  const rows = shown.map((f) =>
     `<tr><td>${fmtTs(f.ts, '4h')}</td><td>${esc(f.tf)}</td>` +
     `<td style="text-align:left">${stchip(f.from)} → ${stchip(f.to)}</td>` +
     `<td>${fmtN(f.confidence, 2)}</td></tr>`);
+  // summary 只更新文字，不重建 <details>——保持用户手动展开/收起状态
+  const sum = $('flipsSummary');
+  if (sum) sum.textContent =
+    `翻转明细 ${shown.length} 条（4h/1d · 1h 不列 · 点击展开）`;
   $('flipTable').innerHTML =
     '<thead><tr><th>时间 UTC</th><th>TF</th><th>变化</th><th>conf</th></tr></thead>' +
     `<tbody>${rows.join('') || '<tr><td colspan="4">暂无翻转记录</td></tr>'}</tbody>`;
