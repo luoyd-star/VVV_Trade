@@ -294,7 +294,7 @@ function renderAll() {
   if (!d.tfs[S.tf]) S.tf = tfs[0];
 
   // 每个区块独立 try：单个卡片的数据异常只坏它自己，不把整页渲染拖死
-  [renderMktBadge, renderStateCards, renderVolRanks, renderAlerts, renderTfPicker,
+  [renderMktBadge, renderStateCards, renderPolicy, renderVolRanks, renderAlerts, renderTfPicker,
    renderPriceChart, renderDvol, renderVolRank, renderDeriv, renderStrips,
    renderFeatTable, renderFlips, renderCollector, renderFresh].forEach((fn) => {
     try { fn(); } catch (e) { console.error(`渲染区块 ${fn.name} 失败:`, e); }
@@ -401,6 +401,98 @@ function renderStateCards() {
     host.appendChild(el);
   });
   setActiveTab(); // 顶栏圆点跟随 1d 状态色
+}
+
+function policyZoneMatches(zone, hit) {
+  if (!zone || !hit) return false;
+  return ['lo', 'hi'].every((key) => Number.isFinite(Number(zone[key]))
+    && Number.isFinite(Number(hit[key])) && Math.abs(Number(zone[key]) - Number(hit[key])) < 1e-9);
+}
+
+function renderPolicy() {
+  const p = S.data.policy;
+  const rowsHost = $('policyZoneRows');
+  if (!p) {
+    $('policyMeta').textContent = 'policy payload 不可用';
+    $('policyConclusion').textContent = '建议关注 · 政策测量不可用';
+    $('policySignal').textContent = '共振不可判定';
+    $('policySignal').className = 'badge';
+    rowsHost.innerHTML = '<tr><td colspan="6">关键位不可用</td></tr>';
+    $('policyApproach').textContent = '路径不可计算';
+    $('policyVolNotes').textContent = '暂无可计算提示';
+    $('policyStop').textContent = '止损宽度不可计算';
+    $('policyDegraded').textContent = '';
+    return;
+  }
+
+  $('policyMeta').textContent = `${p.tf || '4h'} · ${p.regime_4h || '状态不可用'}`
+    + (p.regime_1d ? ` · 1d ${p.regime_1d}` : ' · 1d 不可用');
+  const location = p.location || {};
+  let conclusion = p.play;
+  if (!conclusion && location.at === 'middle_zone') conclusion = '中间区域，默认观望';
+  $('policyConclusion').textContent = `建议关注 · ${conclusion || '暂无匹配剧本'}`;
+  const sig = $('policySignal');
+  if (p.signal_ok === true) {
+    sig.textContent = '位置 + 信号共振'; sig.className = 'badge ok';
+  } else if (p.signal_ok === false) {
+    sig.textContent = '位置已到 · 信号未共振'; sig.className = 'badge warn';
+  } else {
+    sig.textContent = '共振不可判定'; sig.className = 'badge';
+  }
+
+  const hit = location.zone;
+  const zones = p.zones || [];
+  rowsHost.innerHTML = zones.map((zone) => {
+    const matched = policyZoneMatches(zone, hit);
+    const cls = `${matched ? 'matched ' : ''}${zone.eligible ? '' : 'ineligible'}`.trim();
+    const role = zone.role_now === 'support' ? '支撑'
+      : zone.role_now === 'resistance' ? '压力' : '不可判定';
+    const flipped = zone.role_flipped ? ' · 已翻转' : '';
+    const eligible = zone.eligible
+      ? '<span class="yes">是</span>'
+      : '<span class="no" title="当前 regime 未采纳该来源与当前角色的组合">否 · regime/来源不匹配</span>';
+    return `<tr class="${cls}">
+      <td>${fmtN(zone.dist_atr, 2)}</td>
+      <td class="mono">[${fmtPrice(zone.lo)}, ${fmtPrice(zone.hi)}]</td>
+      <td style="text-align:left">${(zone.kinds || []).map(esc).join(' · ') || '—'}</td>
+      <td>${zone.touches == null ? '—' : esc(zone.touches)}</td>
+      <td>${role}${flipped}</td><td>${eligible}${matched ? ' · 命中' : ''}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6">没有可用关键位区间</td></tr>';
+
+  const approachName = {
+    from_above: '从区间上方回踩而来',
+    from_below: '从区间下方反弹而来',
+  }[location.approach] || '来向不可判定';
+  let required = null;
+  if (p.regime_4h === 'trend_up' && location.at === 'at_support') required = 'from_above';
+  if (p.regime_4h === 'trend_down' && location.at === 'at_resistance') required = 'from_below';
+  let pathCheck = '该剧本不设方向路径门槛';
+  if (required) {
+    pathCheck = location.approach === required
+      ? '满足该剧本的来向要求'
+      : `未满足该剧本要求（需要${required === 'from_above' ? '从上方回踩' : '从下方反弹'}）`;
+  }
+  $('policyApproach').textContent = `${approachName}；${pathCheck}`;
+
+  const notes = p.vol_notes || [];
+  $('policyVolNotes').innerHTML = notes.length
+    ? `<ul class="policy-notes">${notes.map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
+    : '暂无可计算的波动率或事件提示';
+
+  const stop = p.stop_check;
+  if (stop) {
+    const verdict = {
+      too_tight: '严重提示：偏紧', tight: '提示：偏紧', ok: '宽度充足',
+    }[stop.verdict] || stop.verdict;
+    $('policyStop').textContent = `${stop.side === 'long' ? '多头' : '空头'}结构失效参考 ${fmtPrice(stop.stop_price)}`
+      + ` · 距现价 ${fmtN(stop.stop_dist_pct, 2)}% · 持仓期预期波动 ${fmtN(stop.expected_move_pct, 2)}%`
+      + ` · 比值 ${fmtN(stop.ratio, 2)} · ${verdict}（${stop.note}）`;
+  } else {
+    $('policyStop').textContent = '结构位或 IV3 缺失，止损宽度校验不可计算';
+  }
+  const degraded = p.degraded || [];
+  $('policyDegraded').textContent = degraded.length ? `降级标注：${degraded.join(' · ')}` : '';
 }
 
 // 六条分位条：挤压侧 ATR<0.30 且 BBW<0.15；高波只由 ATR>0.85 判定。
@@ -1211,7 +1303,7 @@ async function hermesSend() {
     const r = await fetch('/api/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: S.symbol, message: text }),
+      body: JSON.stringify({ scope: 'symbol', symbol: S.symbol, message: text }),
     });
     const j = await r.json();
     busyEl.remove();

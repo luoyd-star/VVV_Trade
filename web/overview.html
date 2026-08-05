@@ -7,7 +7,8 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
 <style>
-  .overview-main { width: min(1480px, 100%); margin: 0 auto; padding: 20px 24px 32px; }
+  .overview-main { width: min(1480px, 100%); min-width: 0; flex: 1; margin: 0 auto;
+                   padding: 20px 24px 32px; }
   .overview-headnote { color: var(--muted); font-size: var(--fs-lbl); }
   .overview-section { margin-bottom: 18px; }
   .overview-title { display: flex; align-items: baseline; gap: 8px; margin-bottom: 9px;
@@ -71,9 +72,11 @@
     <span id="updated" class="badge">加载中…</span>
     <span id="clock" class="mono muted"></span>
     <span id="countdown" class="mono muted"></span>
+    <button id="hermesToggle" class="hbtn">VVVhermes</button>
   </div>
 </header>
 
+<div class="layout">
 <main class="overview-main">
   <div class="banner load-error" id="loadError" hidden></div>
 
@@ -105,6 +108,29 @@
     <div class="compact-list" id="unavailable"></div>
   </details>
 </main>
+
+<aside id="hermes" class="hermes">
+  <div class="h-head">
+    <b>VVVhermes</b>
+    <span class="sub" id="hermesMeta">…</span>
+    <button id="hermesClear" class="hbtn" title="清空对话，开始新会话">清空</button>
+    <button id="hermesClose" class="hbtn" title="收起">×</button>
+  </div>
+  <div class="h-note">每次提问自动附带总览的 policy 横截面；与详情页、终端共享同一条对话</div>
+  <div class="h-chips" id="hermesChips">
+    <button class="chipbtn" type="button">当前有哪些位置与信号共振？</button>
+    <button class="chipbtn" type="button">哪些风险标注最值得关注？</button>
+    <button class="chipbtn" type="button">为什么大多数品种仍在观望？</button>
+  </div>
+  <div class="h-msgs" id="hermesMsgs">
+    <div class="msg bot">你好，我是 VVVhermes。我能读到总览当前的机会、接近、风险与观望横截面。</div>
+  </div>
+  <div class="h-input">
+    <textarea id="hermesText" rows="2" placeholder="问总览 VVVhermes…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="hermesSend" class="hbtn primary">发送</button>
+  </div>
+</aside>
+</div>
 
 <footer>关键位置与 cRSI 仅供研究参考 · 系统不下单 · 不构成投资建议</footer>
 <script src="/overview.js"></script>

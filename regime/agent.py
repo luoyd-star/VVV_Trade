@@ -81,6 +81,9 @@ age 是最后落库年龄（OpenD 为网关探活、无落库年龄）；采集�
 时间语义：<panel> 首行是**当前时刻**，面板数据均为此刻快照；历史对话每条开头的
 [MM-DD HH:MM UTC·距今] 前缀是**该消息的发生时刻**——历史回答里引用的读数只在其时点有效，
 与当前 <panel> 数字冲突时以 <panel> 为准，引用历史结论必须显式说明其时点。
+总览 scope 的 <panel> 是 4h 决策/1d 底座的横截面：counts 为机会/接近/风险/观望/不可用数量；
+opportunity 逐条含 symbol、regime、位置、cRSI 共振、剧本和波动率提示；risk 只列风险标注，
+middle（观望）只给数量，不应把 WAIT 误读成数据缺失。
 </panel_legend>"""
 
 
@@ -383,6 +386,64 @@ def render_context(p: dict) -> str:
     return "\n".join(lines)
 
 
+def render_overview_context(ov: dict) -> str:
+    """把 overview_payload 压缩成给模型看的横截面文本。"""
+    now = time.gmtime()
+    weekday = "一二三四五六日"[now.tm_wday]
+    counts = ov.get("counts") or {}
+
+    def count_text(key: str) -> str:
+        value = counts.get(key)
+        return f"{value} 个" if isinstance(value, int) and value >= 0 else "不可用"
+
+    lines = [
+        f"当前时刻: {time.strftime('%Y-%m-%d %H:%M', now)} UTC（周{weekday}）"
+        "——下方全部数据为此刻横截面快照",
+        f"总览口径: {ov.get('tf') or '不可用'} 决策 · 1d 底座",
+        "分层统计: "
+        f"机会 {count_text('opportunity')} · "
+        f"接近 {count_text('near')} · "
+        f"风险 {count_text('risk')} · "
+        f"观望 {count_text('middle')} · "
+        f"不可用 {count_text('unavailable')}",
+    ]
+    opportunities = ov.get("opportunity") or []
+    if opportunities:
+        lines.append("机会位（逐条）:")
+        for item in opportunities:
+            crsi = item.get("crsi") or {}
+            signal = (
+                "位置+信号共振" if item.get("signal_ok") is True
+                else "信号未共振" if item.get("signal_ok") is False
+                else "信号不可判定"
+            )
+            distance = item.get("dist_atr")
+            dist_text = f"{distance:.2f}ATR" if isinstance(distance, (int, float)) else "不可用"
+            line = (
+                f"- {item.get('symbol')} | 4h={item.get('regime_4h')} "
+                f"1d={item.get('regime_1d')} | 位置={item.get('at')}"
+                f"({item.get('meaning')},距{dist_text},来向{item.get('approach')}) | "
+                f"信号=cRSI {crsi.get('zone')}({crsi.get('crsi')})/{signal} | "
+                f"剧本={item.get('play') or '无匹配剧本'}"
+            )
+            if item.get("vol_note"):
+                line += f" | 波动率提示={item['vol_note']}"
+            lines.append(line)
+    else:
+        lines.append(f"机会位: {count_text('opportunity')}（WAIT 是常态）")
+
+    risks = ov.get("risk") or []
+    if risks:
+        lines.append("风险位（只作标注）:")
+        for item in risks:
+            notes = item.get("notes") or []
+            lines.append(f"- {item.get('symbol')}: {'；'.join(str(note) for note in notes)}")
+    else:
+        lines.append(f"风险位: {count_text('risk')}可计算标注")
+    lines.append(f"观望区: {count_text('middle')}（按约定不逐条列，WAIT 是常态）")
+    return "\n".join(lines)
+
+
 def system_brief() -> str:
     """自动生成的系统能力简报——Hermes 的系统认知随升级自动更新。
 
@@ -583,11 +644,13 @@ def _time_tag(ts_ms: int, now_ms: int) -> str:
 CHAT_GAP_NOTICE_MIN = 15
 
 
-def chat(payload: dict, messages: list) -> dict:
+def chat(payload: dict, messages: list, scope: str = "symbol") -> dict:
     cfg = load_config()
     now_ms = int(time.time() * 1000)
-    context = render_context(payload)
-    ov = overview_brief()
+    overview_scope = scope == "overview"
+    context = render_overview_context(payload) if overview_scope else render_context(payload)
+    # 总览上下文本身已是 policy 横截面；详情 scope 才补旧的全品种状态摘要。
+    ov = "" if overview_scope else overview_brief()
     # 时间跳变横幅：历史最后一条距今超阈值时，明示"旧数字不代表现状"。
     # 判据用**倒数第二条之前的历史**（最后一条通常是本轮刚追加的提问，无 ts）。
     hist_ts = [int(m["ts"]) for m in messages[:-1] if m.get("ts")]
@@ -609,6 +672,8 @@ def chat(payload: dict, messages: list) -> dict:
         {"role": m["role"],
          # 时间前缀加在截断**之后**：前缀绝不能被 8000 字符上限截掉
          "content": (_time_tag(int(m["ts"]), now_ms) if m.get("ts") else "")
+                    + ("[scope:overview] " if m.get("scope") == "overview" else
+                       "[scope:symbol] " if m.get("scope") == "symbol" else "")
                     + str(m.get("content", ""))[:8000]}
         for m in messages
         if m.get("role") in ("user", "assistant") and str(m.get("content", "")).strip()

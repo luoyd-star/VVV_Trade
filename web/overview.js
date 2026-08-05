@@ -22,7 +22,10 @@ const MEANING = {
 };
 
 const $ = (id) => document.getElementById(id);
-const view = { data: null, nextRefresh: Date.now() + REFRESH_MS, loadSeq: 0 };
+const view = {
+  data: null, nextRefresh: Date.now() + REFRESH_MS, loadSeq: 0,
+  hermes: { busy: false, lastId: 0, syncSeq: 0 },
+};
 const pad = (n) => String(n).padStart(2, '0');
 
 function stateMeta(state) {
@@ -188,11 +191,11 @@ function renderHeartbeat(lanes) {
 function render(data) {
   view.data = data;
   const counts = data.counts || {};
-  $('oppCount').textContent = counts.opportunity || 0;
-  $('nearCount').textContent = counts.near || 0;
-  $('riskCount').textContent = counts.risk || 0;
-  $('middleCount').textContent = counts.middle || 0;
-  $('unavailableCount').textContent = counts.unavailable || 0;
+  $('oppCount').textContent = counts.opportunity ?? '—';
+  $('nearCount').textContent = counts.near ?? '—';
+  $('riskCount').textContent = counts.risk ?? '—';
+  $('middleCount').textContent = counts.middle ?? '—';
+  $('unavailableCount').textContent = counts.unavailable ?? '—';
   renderOpportunity(data.opportunity || []);
   renderCompact('near', data.near || [], '当前无接近但尚未满足门槛的关键位');
   renderRisk(data.risk || []);
@@ -214,6 +217,7 @@ async function load() {
     if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
     if (seq !== view.loadSeq) return;
     render(data);
+    hermesSync();
     $('loadError').hidden = true;
   } catch (error) {
     if (seq !== view.loadSeq) return;
@@ -226,6 +230,135 @@ async function load() {
   }
 }
 
+/* ---------- Hermes：总览 scope，共享服务端对话流 ---------- */
+const OPEN_KEY = 'vvvhermes_open';
+const HERMES_INTRO = '你好，我是 VVVhermes。我能读到总览当前的机会、接近、风险与观望横截面。历史与详情页、终端共享。';
+
+function hermesAdd(cls, text) {
+  const el = document.createElement('div');
+  el.className = `msg ${cls}`;
+  el.textContent = text;
+  $('hermesMsgs').appendChild(el);
+  $('hermesMsgs').scrollTop = $('hermesMsgs').scrollHeight;
+  return el;
+}
+
+function hermesRenderAll(messages) {
+  $('hermesMsgs').replaceChildren();
+  hermesAdd('bot', HERMES_INTRO);
+  messages.forEach((message) =>
+    hermesAdd(message.role === 'user' ? 'user' : 'bot', message.content));
+}
+
+async function hermesSync(force) {
+  if (view.hermes.busy) return;
+  const seq = ++view.hermes.syncSeq;
+  try {
+    const response = await fetch('/api/agent/history?limit=60');
+    if (!response.ok) return;
+    const data = await response.json();
+    if (!Array.isArray(data.messages) || seq !== view.hermes.syncSeq || view.hermes.busy) return;
+    const lastId = data.messages.length ? data.messages[data.messages.length - 1].id : 0;
+    if (force || lastId !== view.hermes.lastId) {
+      view.hermes.lastId = lastId;
+      hermesRenderAll(data.messages);
+    }
+  } catch (error) { /* 服务不可达时保留当前消息 */ }
+}
+
+function hermesRestore() {
+  if (localStorage.getItem(OPEN_KEY) === '0') $('hermes').classList.add('hidden');
+  hermesSync(true);
+}
+
+async function hermesInfo() {
+  try {
+    const response = await fetch('/api/agent/info');
+    const data = await response.json();
+    const custom = data.custom_system ? ' · 提示词:hermes_system.md' : '';
+    $('hermesMeta').textContent = data.config_error
+      ? `⚠ agent.json 解析失败：${data.config_error}（已退回 mock）`
+      : (data.provider === 'mock' ? 'mock · 未配置模型' : `${data.provider} · ${data.model}`) + custom;
+  } catch (error) {
+    $('hermesMeta').textContent = '状态未知';
+  }
+}
+
+async function hermesClear() {
+  if (view.hermes.busy) {
+    hermesAdd('err', '回答生成中，暂不能清空（否则在途回答会重新入库）。');
+    return;
+  }
+  try {
+    const response = await fetch('/api/agent/clear', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok || data.ok !== true) throw new Error(data.error || `HTTP ${response.status}`);
+    view.hermes.lastId = 0;
+    hermesRenderAll([]);
+    hermesAdd('bot', '已开始新会话（总览、详情页与终端的共享历史已清空）。');
+  } catch (error) {
+    hermesAdd('err', `清空失败：${error.message || error}`);
+  }
+}
+
+async function hermesSend() {
+  const input = $('hermesText');
+  const message = input.value.trim();
+  if (!message || view.hermes.busy) return;
+  input.value = '';
+  const optimistic = hermesAdd('user', message);
+  view.hermes.busy = true;
+  $('hermesSend').disabled = true;
+  const busy = hermesAdd('bot busy', 'VVVhermes 思考中…（codex 后端通常需要 1-3 分钟）');
+  let ok = false;
+  try {
+    const response = await fetch('/api/agent/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'overview', message }),
+    });
+    const data = await response.json();
+    busy.remove();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    hermesAdd('bot', data.reply);
+    ok = true;
+  } catch (error) {
+    busy.remove();
+    hermesAdd('err', `请求失败：${error.message || error}`);
+    optimistic.classList.add('unsent');
+    optimistic.title = '发送失败：此条未入共享历史';
+  } finally {
+    view.hermes.busy = false;
+    $('hermesSend').disabled = false;
+    input.focus();
+    if (ok) hermesSync(true);
+  }
+}
+
+function hermesToggle(show) {
+  const panel = $('hermes');
+  const open = show != null ? show : panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !open);
+  try { localStorage.setItem(OPEN_KEY, open ? '1' : '0'); } catch (error) { /* 忽略 */ }
+}
+
+$('hermesSend').onclick = hermesSend;
+$('hermesClear').onclick = hermesClear;
+$('hermesClose').onclick = () => hermesToggle(false);
+$('hermesToggle').onclick = () => hermesToggle();
+$('hermesText').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    hermesSend();
+  }
+});
+$('hermesChips').addEventListener('click', (event) => {
+  const button = event.target.closest('.chipbtn');
+  if (!button) return;
+  $('hermesText').value = button.textContent;
+  hermesSend();
+});
+
 setInterval(() => {
   const now = new Date();
   $('clock').textContent = `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} UTC`;
@@ -234,4 +367,5 @@ setInterval(() => {
   if (left === 0) load();
 }, 1000);
 
-load();
+hermesRestore();
+Promise.all([load(), hermesInfo()]);

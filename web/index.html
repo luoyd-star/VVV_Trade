@@ -6,6 +6,26 @@
 <title>VVV 市场状态面板</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
+<style>
+  .policy-section { margin-top: 14px; }
+  .policy-top { display: flex; align-items: center; flex-wrap: wrap; gap: 9px;
+                padding: 5px 0 12px; border-bottom: 1px solid var(--grid); }
+  .policy-conclusion { font-size: var(--fs-title); font-weight: 650; color: var(--ink); }
+  .policy-table tr.matched td { background: rgba(56,97,251,.08); }
+  .policy-table tr.ineligible { opacity: .5; }
+  .policy-table .yes { color: var(--accent); font-weight: 650; }
+  .policy-table .no { color: var(--muted); }
+  .policy-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+                        gap: 14px; padding-top: 13px; }
+  .policy-detail { min-width: 0; padding: 10px 12px; background: var(--card2);
+                   border: 1px solid var(--grid); }
+  .policy-detail b { display: block; margin-bottom: 6px; font-size: var(--fs-lbl);
+                     letter-spacing: .5px; }
+  .policy-detail div { color: var(--sub); font-size: 12px; line-height: 1.55; }
+  .policy-notes { margin: 0; padding-left: 17px; }
+  .policy-degraded { padding-top: 8px; color: var(--muted); font-size: var(--fs-lbl); }
+  @media (max-width: 800px) { .policy-detail-grid { grid-template-columns: 1fr; } }
+</style>
 </head>
 <body>
 <header>
@@ -51,6 +71,35 @@
         <div class="board-lbl">待确认切换与原始树边界</div>
         <div class="alerts" id="alerts"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- ①b 政策判断：把总览结论拆回可审计的位置、信号、路径与风险依据 -->
+  <section class="row policy-section">
+    <div class="card span12">
+      <div class="card-h">
+        <h3>政策判断 <span class="sub">4h 决策 · 1d 底座 · 位置 + 信号共振</span></h3>
+        <span class="sub" id="policyMeta">测量中…</span>
+      </div>
+      <div class="policy-top">
+        <span class="policy-conclusion" id="policyConclusion">建议关注 · 测量中…</span>
+        <span class="badge" id="policySignal">共振不可判定</span>
+      </div>
+      <div class="tablewrap">
+        <table class="policy-table" id="policyZoneTable">
+          <thead><tr>
+            <th>距现价 ATR</th><th>区间 [lo, hi]</th><th>来源</th><th>触碰次数</th>
+            <th>当前角色</th><th>eligible</th>
+          </tr></thead>
+          <tbody id="policyZoneRows"><tr><td colspan="6">测量中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="policy-detail-grid">
+        <div class="policy-detail"><b>APPROACH 路径</b><div id="policyApproach">—</div></div>
+        <div class="policy-detail"><b>波动率提示</b><div id="policyVolNotes">—</div></div>
+        <div class="policy-detail"><b>止损宽度校验</b><div id="policyStop">—</div></div>
+      </div>
+      <div class="policy-degraded" id="policyDegraded"></div>
     </div>
   </section>
 

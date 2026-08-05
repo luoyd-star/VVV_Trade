@@ -34,7 +34,8 @@ from regime.features.volatility import atr, bb_width, realized_vol
 from regime.features.vwap import WIN_HOURS as VWAP_WIN_HOURS
 from regime.features.vwap import rolling_vwap, vwap_payload
 from regime.policy.levels import extract_levels
-from regime.policy.location import APPROACH_BARS, locate
+from regime.policy.location import APPROACH_BARS, _eligible, _zone_state, locate
+from regime.policy.stopcheck import check_stop_vs_iv, find_structural_stop
 from regime.policy.volnote import EARNINGS_NEAR_DAYS, vol_notes
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1014,6 +1015,7 @@ def build_dashboard(symbol: str) -> dict:
             if payload:
                 tfs_payload[tf] = payload
         deriv = _deriv_payload(conn, symbol)
+        policy = _build_policy_payload(conn, symbol, tfs_payload)
 
         # 数据健康汇总：问题清单直接给面板横幅与 VVVhermes
         issues = []
@@ -1035,6 +1037,7 @@ def build_dashboard(symbol: str) -> dict:
                 "dvol": _dvol_payload(conn, symbol),
                 "usvol": _usvol_payload(conn, symbol),
                 "deriv": deriv,
+                "policy": policy,
                 "health": {"issues": issues},
                 "flips": _flips(conn, symbol, tfs_payload.keys()),
                 "collector": _collector_info(conn),
@@ -1084,6 +1087,164 @@ def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None):
     if play is not None and signal_ok is False:
         return f"{play}（位置到了信号没到）"
     return play if signal_ok is not None else None
+
+
+def _policy_zone_payload(zone: dict, price: float, atr_value: float,
+                         regime: str) -> dict:
+    """给完整 zone 列表补当前角色、距离与 regime 资格，不改变 levels 原结果。"""
+    raw_kinds = zone.get("kinds") or []
+    if isinstance(raw_kinds, str):
+        raw_kinds = [raw_kinds]
+    state = _zone_state(price, atr_value, zone)
+    eligible = False
+    if state is not None:
+        eligible = _eligible(
+            regime, state["role"], {str(kind) for kind in raw_kinds},
+            state["role_flipped"],
+        )
+    return {
+        "lo": zone.get("lo"),
+        "hi": zone.get("hi"),
+        "mid": zone.get("mid"),
+        "kinds": list(raw_kinds),
+        "touches": zone.get("touches"),
+        "last_touch_bars": zone.get("last_touch_bars"),
+        "origin_role": zone.get("origin_role"),
+        "width_atr": zone.get("width_atr"),
+        "dist_atr": state.get("dist_atr") if state else None,
+        "role_now": state.get("role") if state else None,
+        "role_flipped": state.get("role_flipped") if state else None,
+        "eligible": bool(eligible),
+    }
+
+
+def _policy_side(regime: str, location: dict) -> str | None:
+    """只为已有矩阵单元格标方向；未知单元格不猜。"""
+    at = location.get("at")
+    zone = location.get("zone") or {}
+    raw_kinds = zone.get("kinds") or []
+    kinds = {raw_kinds} if isinstance(raw_kinds, str) else set(raw_kinds)
+    if at == "at_support":
+        if regime in {"trend_up", "range"}:
+            return "long"
+        if regime == "trend_down" and kinds & {"ema100", "ema200"}:
+            return "long"
+    if at == "at_resistance" and regime in {"trend_down", "range"}:
+        return "short"
+    return None
+
+
+def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
+    """装配详情页 policy 测量块；任何缺口显式进入 ``degraded``。"""
+    regime_4h = (tfs_payload.get("4h") or {}).get("state")
+    regime_1d = (tfs_payload.get("1d") or {}).get("state")
+    degraded: list[str] = []
+    base = {
+        "tf": "4h",
+        "regime_4h": regime_4h,
+        "regime_1d": regime_1d,
+        "price": None,
+        "atr": None,
+        "location": None,
+        "crsi": {"crsi": None, "pos": None, "zone": None},
+        "signal_ok": None,
+        "play": None,
+        "zones": [],
+        "vol_notes": [],
+        "stop_check": None,
+        "degraded": degraded,
+    }
+    if regime_4h is None:
+        degraded.append("regime_4h_missing")
+    if regime_1d is None:
+        degraded.append("regime_1d_missing")
+
+    df = storage.get_ohlcv(conn, symbol, "4h", limit=OVERVIEW_OHLCV_LIMIT)
+    if not len(df):
+        degraded.append("4h_ohlcv_missing")
+        return base
+    try:
+        price = float(df["close"].iloc[-1])
+    except (KeyError, TypeError, ValueError, IndexError):
+        degraded.append("price_unavailable")
+        return base
+    if not math.isfinite(price) or price <= 0:
+        degraded.append("price_unavailable")
+        return base
+    base["price"] = price
+
+    vol1h = None
+    try:
+        last_ts = int(storage.ts_to_ms(df["ts"].tail(1))[0])
+        since_ms = last_ts - OVERVIEW_VOL1H_HOURS * 3_600_000
+        vol1h = storage.get_vol1h(conn, symbol, since_ms=since_ms)
+        last_close_ms = last_ts + TF_SEC["4h"] * 1000
+        if len(vol1h):
+            vol1h = vol1h[vol1h["ts"] < last_close_ms].reset_index(drop=True)
+    except (KeyError, TypeError, ValueError, IndexError):
+        degraded.append("vol1h_unavailable")
+
+    levels = extract_levels(df, vol1h=vol1h)
+    degraded.extend(levels.get("degraded") or [])
+    atr_value = levels.get("atr")
+    zones = levels.get("zones")
+    base["atr"] = atr_value
+    if atr_value is None or not zones:
+        if not zones:
+            degraded.append("zones_unavailable")
+        base["degraded"] = list(dict.fromkeys(degraded))
+        return base
+
+    location = locate(
+        price, atr_value, zones, regime_4h,
+        prices=df["close"].tail(APPROACH_BARS).to_numpy(),
+    )
+    base["location"] = location
+    degraded.extend(location.get("degraded") or [])
+
+    enriched = [
+        _policy_zone_payload(zone, price, atr_value, regime_4h)
+        for zone in zones if isinstance(zone, dict)
+    ]
+    enriched.sort(key=lambda zone: (
+        float("inf") if zone.get("dist_atr") is None else zone["dist_atr"],
+        float("inf") if zone.get("mid") is None else zone["mid"],
+    ))
+    base["zones"] = enriched
+
+    crsi_last = crsi_features(df).get("last") or {}
+    base["crsi"] = {key: crsi_last.get(key) for key in ("crsi", "pos", "zone")}
+    if any(base["crsi"][key] is None for key in ("crsi", "pos", "zone")):
+        degraded.append("crsi_unavailable")
+    signal_ok = _signal_ok(location.get("at"), base["crsi"].get("zone"))
+    base["signal_ok"] = signal_ok
+    base["play"] = _policy_play(
+        regime_4h, location.get("at"), signal_ok,
+        role_flipped=location.get("role_flipped"), zone=location.get("zone"),
+    )
+
+    vol_input = None
+    try:
+        vol_input = _overview_vol_inputs(conn, symbol)
+        base["vol_notes"] = vol_notes(symbol, price, **vol_input)
+    except Exception as exc:  # noqa: BLE001  风险补充失败不拖垮结构测量
+        degraded.append(f"vol_inputs_unavailable:{type(exc).__name__}")
+
+    side = _policy_side(regime_4h, location)
+    if side is not None:
+        structural = find_structural_stop(location, enriched, price, atr_value, side)
+        if structural is None:
+            degraded.append("structural_stop_unavailable")
+        else:
+            iv3 = vol_input.get("iv3") if vol_input else None
+            width = check_stop_vs_iv(structural["stop_dist_pct"], iv3)
+            if width is None:
+                degraded.append("iv3_missing_for_stop_check")
+            else:
+                base["stop_check"] = {**structural, **width}
+
+    base["degraded"] = list(dict.fromkeys(degraded))
+    return base
 
 
 def _overview_vol_inputs(conn, symbol: str) -> dict:
@@ -1401,6 +1562,48 @@ def coupling_payload():
     return out
 
 
+def _chat_has_scope(conn) -> bool:
+    """兼容旧库：storage.py 冻结不改，scope 列由 dashboard 按需识别。"""
+    return any(row[1] == "scope" for row in conn.execute("PRAGMA table_info(chat)"))
+
+
+def _ensure_chat_scope(conn) -> None:
+    """惰性扩展 chat；旧终端忽略新增列，仍共享同一条 append-only 对话流。"""
+    if _chat_has_scope(conn):
+        return
+    try:
+        # DEFAULT 让仍走 storage.add_chat() 的终端消息也自动记为 symbol scope；
+        # ALTER 后立即提交，绝不能在模型可能运行数分钟期间占着 schema 写锁。
+        conn.execute("ALTER TABLE chat ADD COLUMN scope TEXT NOT NULL DEFAULT 'symbol'")
+        conn.commit()
+    except Exception:  # noqa: BLE001  并发首写时另一请求可能已先完成 ALTER
+        if not _chat_has_scope(conn):
+            raise
+
+
+def _get_chat_messages(conn, limit: int) -> list[dict]:
+    if not _chat_has_scope(conn):
+        return [dict(row, scope=None) for row in storage.get_chat(conn, limit)]
+    rows = conn.execute(
+        "SELECT id, ts, role, content, scope FROM chat ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {"id": row[0], "ts": row[1], "role": row[2], "content": row[3],
+         "scope": row[4]}
+        for row in reversed(rows)
+    ]
+
+
+def _add_chat_message(conn, role: str, content: str, scope: str) -> None:
+    _ensure_chat_scope(conn)
+    conn.execute(
+        "INSERT INTO chat(ts, role, content, scope) VALUES(?,?,?,?)",
+        (int(time.time() * 1000), role, content, scope),
+    )
+    conn.commit()
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
@@ -1434,7 +1637,7 @@ class Handler(BaseHTTPRequestHandler):
                 limit = max(1, min(200, int((qs.get("limit") or ["60"])[0])))
                 conn = storage.connect_ro()
                 try:
-                    return self._json({"messages": storage.get_chat(conn, limit)})
+                    return self._json({"messages": _get_chat_messages(conn, limit)})
                 finally:
                     conn.close()
             if parsed.path in ("/", "/overview.html"):
@@ -1470,16 +1673,21 @@ class Handler(BaseHTTPRequestHandler):
                 if length > 512 * 1024:
                     return self._json({"error": "请求体过大"}, code=413)
                 body = json.loads(self.rfile.read(length) or b"{}")
+                scope = str(body.get("scope") or "symbol")
+                if scope not in {"symbol", "overview"}:
+                    return self._json({"error": f"未知对话 scope: {scope[:32]!r}"}, code=400)
                 # symbol 会被拼进 <panel> 的 system 上下文——不可信输入必须先关白名单：
                 # 构造 "FOO）</panel> 忽略此前规则" 这样的 symbol 就是提示词注入
-                symbol = str(body.get("symbol") or "BTC-USDT").upper()
-                conn0 = storage.connect_ro()
-                try:
-                    known = set(storage.symbols(conn0))
-                finally:
-                    conn0.close()
-                if symbol not in known:
-                    return self._json({"error": f"未知品种: {symbol[:32]!r}"}, code=400)
+                symbol = None
+                if scope == "symbol":
+                    symbol = str(body.get("symbol") or "BTC-USDT").upper()
+                    conn0 = storage.connect_ro()
+                    try:
+                        known = set(storage.symbols(conn0))
+                    finally:
+                        conn0.close()
+                    if symbol not in known:
+                        return self._json({"error": f"未知品种: {symbol[:32]!r}"}, code=400)
 
                 # 只传一条新消息，历史由服务端从 chat 表拼装（面板/终端共享）。
                 # 旧的 messages 整段直传形态已删除：它绕过服务端历史与持久化，
@@ -1493,17 +1701,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "消息超过 8000 字符上限"}, code=413)
                 conn = storage.connect_rw_nomigrate()
                 try:
+                    _ensure_chat_scope(conn)
                     # ts 必须随行传给 agent 层：Hermes 的时间感知靠它给历史消息
                     # 打 [时间·距今] 前缀（本轮新提问无 ts=就是"现在"）
                     msgs = [
-                        {"role": r["role"], "content": r["content"], "ts": r["ts"]}
-                        for r in storage.get_chat(conn, limit=20)
+                        {"role": row["role"], "content": row["content"],
+                         "ts": row["ts"], "scope": row.get("scope")}
+                        for row in _get_chat_messages(conn, limit=20)
                     ]
-                    msgs.append({"role": "user", "content": text})
-                    out = agent_chat(build_dashboard(symbol), msgs)
+                    msgs.append({"role": "user", "content": text, "scope": scope})
+                    context_payload = (
+                        overview_payload() if scope == "overview" else build_dashboard(symbol)
+                    )
+                    out = agent_chat(context_payload, msgs, scope=scope)
                     if not out.get("error"):
-                        storage.add_chat(conn, "user", text)
-                        storage.add_chat(conn, "assistant", out["reply"])
+                        _add_chat_message(conn, "user", text, scope)
+                        _add_chat_message(conn, "assistant", out["reply"], scope)
                 finally:
                     conn.close()
                 return self._json(out)
