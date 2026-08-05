@@ -100,15 +100,19 @@
     </div>
   </section>
 
-  <!-- ③b 跨资产耦合雷达（M3 诊断层，非交易信号） -->
+  <!-- ③b 跨资产耦合雷达（M3 诊断层，非交易信号）：默认折叠——耦合课题暂停投入中，
+       大矩阵占页高；展开状态记 localStorage，用户开过就保持开 -->
   <section class="row">
     <div class="card span12">
-      <div class="card-h">
-        <h3>跨资产耦合雷达 <span class="sub" id="coupMeta"></span></h3>
-        <span class="sub">诊断输出 · 阈值为先验（校准中）· 不构成方向信号</span>
-      </div>
-      <div id="coupBody" class="coup"></div>
-      <div id="coupMatrix" class="chart matrix"></div>
+      <details class="coup-box" id="coupBox">
+        <summary>
+          <span class="coup-t">跨资产耦合雷达</span>
+          <span class="sub" id="coupMeta"></span>
+          <span class="sub">诊断输出 · 阈值为先验（校准中）· 不构成方向信号 · 点击展开</span>
+        </summary>
+        <div id="coupBody" class="coup"></div>
+        <div id="coupMatrix" class="chart matrix"></div>
+      </details>
     </div>
   </section>
 

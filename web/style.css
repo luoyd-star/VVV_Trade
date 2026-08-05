@@ -196,6 +196,12 @@ main { flex: 1; min-width: 0; padding: 0 0 26px; }
 .flips-box summary:hover { color: var(--ink); }
 .flips-box[open] summary { margin-bottom: 6px; }
 .flips-box .tablewrap { max-height: 260px; overflow-y: auto; max-width: 560px; }
+/* 耦合雷达折叠框：summary 顶替原 card-h 标题行 */
+.coup-box summary { cursor: pointer; user-select: none; display: flex;
+                    align-items: baseline; gap: 10px; padding: 2px 0; }
+.coup-box summary:hover .coup-t { color: var(--blue, #2653d4); }
+.coup-box .coup-t { font-size: var(--fs-title); font-weight: 600; color: var(--ink); }
+.coup-box[open] summary { margin-bottom: 8px; }
 .strip-row { display: flex; align-items: center; gap: 12px; }
 .strip-row .lbl { font-family: var(--mono); font-size: 12px; color: var(--sub); width: 24px; }
 .track { flex: 1; display: flex; height: 28px; background: var(--card2); overflow: hidden; }

@@ -141,6 +141,8 @@ const CSTATE = {
   REBASE_PENDING: { label: '待重锚', color: COL.muted },
   NOT_APPLICABLE: { label: '不适用', color: COL.muted },
 };
+let COUP_LAST = null;  // 最近一次耦合数据：折叠期间不画矩阵，展开时用它补画
+
 async function loadCoupling() {
   let j;
   try {
@@ -149,6 +151,7 @@ async function loadCoupling() {
   } catch (e) { return; }
   const host = $('coupBody');
   if (!host || !j) return;
+  COUP_LAST = j;
   const parts = [];
   const pn = { all247: '24/7（加密+商品）', usrth: '美股RTH', cross: '跨类共同RTH' };
   const pl = Object.entries(j.panels || {}).map(([k, p]) => {
@@ -177,7 +180,26 @@ async function loadCoupling() {
   host.innerHTML = parts.join('');
   $('coupMeta').textContent =
     `阈值代 ${j.threshold_version} · 更新 ${ago(j.updated_at)}`;
-  renderCoupMatrix(j.matrix);
+  // 折叠时跳过矩阵：display:none 容器里 ECharts 初始化是 0×0，展开时 toggle 补画
+  const box = $('coupBox');
+  if (!box || box.open) renderCoupMatrix(j.matrix);
+}
+
+// 折叠框展开状态持久化 + 展开时补画矩阵（折叠期间跳过了渲染）
+function initCoupBox() {
+  const box = $('coupBox');
+  if (!box) return;
+  if (localStorage.getItem('vvv_coup_open') === '1') box.open = true;
+  box.addEventListener('toggle', () => {
+    if (box.open) {
+      localStorage.setItem('vvv_coup_open', '1');
+      if (COUP_LAST) renderCoupMatrix(COUP_LAST.matrix);
+      const inst = window.echarts && echarts.getInstanceByDom($('coupMatrix'));
+      if (inst) inst.resize();
+    } else {
+      localStorage.removeItem('vvv_coup_open');
+    }
+  });
 }
 
 // 38×38 复合相关矩阵：每格用应有时钟（加密24/7 / 美股RTH / 跨类共同RTH），
@@ -1215,6 +1237,7 @@ window.addEventListener('resize', () => {
       if (det.open) Object.values(S.charts).forEach((c) => c && c.resize());
     });
   }
+  initCoupBox();
   const chips = $('hermesChips');
   if (chips) {
     chips.addEventListener('click', (e) => {
