@@ -1182,8 +1182,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "消息超过 8000 字符上限"}, code=413)
                 conn = storage.connect_rw_nomigrate()
                 try:
+                    # ts 必须随行传给 agent 层：Hermes 的时间感知靠它给历史消息
+                    # 打 [时间·距今] 前缀（本轮新提问无 ts=就是"现在"）
                     msgs = [
-                        {"role": r["role"], "content": r["content"]}
+                        {"role": r["role"], "content": r["content"], "ts": r["ts"]}
                         for r in storage.get_chat(conn, limit=20)
                     ]
                     msgs.append({"role": "user", "content": text})

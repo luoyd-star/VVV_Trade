@@ -321,3 +321,72 @@ def test_legend_and_frontend_copy_keep_display_contracts_explicit():
     assert "yAxis: 0.15, label: { formatter: '挤压BBW' }" in app
     assert "高波仅 ATR&gt;0.85" in app
     assert "ATR &lt;0.30 与 BBW &lt;0.15 共判挤压" in index
+
+
+def test_hermes_time_awareness():
+    """Hermes 时间感知三件套：当前时刻行 / 历史消息时间前缀 / 时间跳变横幅。
+
+    用户实际踩到的坑（2026-08-05）：一小时前的对话读数被模型当成现状——
+    此前历史重放只带 role+content，system 里也没有"现在几点"。
+    """
+    from regime import agent
+
+    # ① _age_txt 分档与负值防御
+    now = 1_800_000_000_000
+    assert agent._age_txt(now - 30_000, now) == "刚刚"
+    assert agent._age_txt(now - 74 * 60_000, now) == "74分前"
+    assert agent._age_txt(now - 5 * 3_600_000, now) == "5.0小时前"
+    assert agent._age_txt(now - 3 * 86_400_000, now) == "3.0天前"
+    assert agent._age_txt(now + 60_000, now) == "刚刚", "未来时间戳（时钟漂移）不得输出'未来'"
+
+    # ② 时间前缀格式：[MM-DD HH:MM UTC·距今]
+    tag = agent._time_tag(now - 74 * 60_000, now)
+    assert tag.startswith("[") and "UTC·74分前] " in tag
+
+    # ③ render_context 首行是当前时刻（模型的"现在"锚点）
+    ctx = agent.render_context({"symbol": "TEST-USDT"})
+    assert ctx.startswith("当前时刻: ") and "UTC" in ctx.split("\n")[0]
+
+    # ④ PANEL_LEGEND 声明时间语义（历史读数只在其时点有效）
+    assert "时间语义" in agent.PANEL_LEGEND and "历史" in agent.PANEL_LEGEND
+
+
+def test_hermes_gap_notice_and_prefix_wiring(monkeypatch):
+    """chat() 组装：历史消息带前缀、本轮提问不带；间隔超阈值出横幅、未超不出。"""
+    from regime import agent
+
+    captured = {}
+
+    def fake_provider(cfg, system, msgs):
+        captured["system"] = system
+        captured["msgs"] = msgs
+        return "ok"
+
+    monkeypatch.setattr(agent, "_anthropic", fake_provider)
+    monkeypatch.setattr(agent, "load_config",
+                        lambda: dict(agent.DEFAULTS, provider="anthropic"))
+    monkeypatch.setattr(agent, "overview_brief", lambda: "")
+    monkeypatch.setattr(agent, "system_brief", lambda: "brief")
+
+    import time as _t
+    now_ms = int(_t.time() * 1000)
+    old = now_ms - 60 * 60_000   # 1 小时前 → 超过 CHAT_GAP_NOTICE_MIN
+    out = agent.chat({"symbol": "TEST-USDT"}, [
+        {"role": "user", "content": "老问题", "ts": old},
+        {"role": "assistant", "content": "老回答", "ts": old + 5_000},
+        {"role": "user", "content": "新问题"},
+    ])
+    assert out.get("reply") == "ok", out
+    assert captured["msgs"][0]["content"].startswith("["), "历史 user 须带时间前缀"
+    assert captured["msgs"][1]["content"].startswith("["), "历史 assistant 须带时间前缀"
+    assert not captured["msgs"][2]["content"].startswith("["), "本轮提问不带前缀（它就是现在）"
+    assert "距上一轮对话已过" in captured["system"], "超阈值须出时间跳变横幅"
+
+    # 间隔很近：不出横幅
+    recent = now_ms - 2 * 60_000
+    agent.chat({"symbol": "TEST-USDT"}, [
+        {"role": "user", "content": "刚问过", "ts": recent},
+        {"role": "assistant", "content": "刚答过", "ts": recent + 5_000},
+        {"role": "user", "content": "接着问"},
+    ])
+    assert "距上一轮对话已过" not in captured["system"], "间隔未超阈值不得出横幅"

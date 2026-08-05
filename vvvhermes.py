@@ -42,8 +42,8 @@ def _check_symbol(symbol: str) -> str:
 def ask(symbol: str, text: str) -> bool:
     conn = storage.connect_rw_nomigrate()
     try:
-        msgs = [
-            {"role": r["role"], "content": r["content"]}
+        msgs = [   # ts 随行传：agent 层据此给历史消息打 [时间·距今] 前缀
+            {"role": r["role"], "content": r["content"], "ts": r["ts"]}
             for r in storage.get_chat(conn, limit=20)
         ]
         msgs.append({"role": "user", "content": text})

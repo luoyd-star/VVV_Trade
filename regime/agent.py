@@ -78,6 +78,9 @@ VRP=IV−HV（同源同口径的方差风险溢价）分离"贵"与"波动大"�
 能抓 2008/2020 式冲击、会错过 2022 式慢跌）；⚑财报标记表示该分位含日程驱动成分。
 数据健康警告列出已知受影响读数；采集心跳固定列五路 lane，正常/迟滞/断流/盘外是各管线状态，
 age 是最后落库年龄（OpenD 为网关探活、无落库年龄）；采集器间隔/错误数是整体循环摘要。
+时间语义：<panel> 首行是**当前时刻**，面板数据均为此刻快照；历史对话每条开头的
+[MM-DD HH:MM UTC·距今] 前缀是**该消息的发生时刻**——历史回答里引用的读数只在其时点有效，
+与当前 <panel> 数字冲突时以 <panel> 为准，引用历史结论必须显式说明其时点。
 </panel_legend>"""
 
 
@@ -142,7 +145,14 @@ def _pathgeom_str(
 
 def render_context(p: dict) -> str:
     """把 build_dashboard 的载荷压缩成给模型看的文本。"""
-    lines = [f"品种: {p.get('symbol')}（时间均为 UTC，K线均已收盘）"]
+    _now = time.gmtime()
+    _wd = "一二三四五六日"[_now.tm_wday]
+    lines = [
+        # 当前时刻必须打头：没有它，模型无从判断历史对话里的数字过没过期
+        f"当前时刻: {time.strftime('%Y-%m-%d %H:%M', _now)} UTC（周{_wd}）"
+        "——下方全部数据为此刻快照",
+        f"品种: {p.get('symbol')}（时间均为 UTC，K线均已收盘）",
+    ]
     inst = p.get("instrument") or {}
     if inst.get("class") == "us_stock_perp":
         name = inst.get("display") or ""
@@ -546,17 +556,60 @@ def overview_brief() -> str:
         return ""
 
 
+def _age_txt(ts_ms: int, now_ms: int) -> str:
+    """消息年龄的人读格式。负值（时钟漂移/异常）按 0 处理，不给'未来'字样。"""
+    mins = max(0.0, (now_ms - ts_ms) / 60_000.0)
+    if mins < 1:
+        return "刚刚"
+    if mins < 90:
+        return f"{mins:.0f}分前"
+    if mins < 48 * 60:
+        return f"{mins / 60:.1f}小时前"
+    return f"{mins / 1440:.1f}天前"
+
+
+def _time_tag(ts_ms: int, now_ms: int) -> str:
+    """历史消息的时间前缀：[08-05 07:58 UTC·74分前]。
+
+    Hermes 的时间感知就靠这一处：chat 表存了每条消息的 ts，但此前重放给模型时
+    只带 role+content——模型既不知道现在几点、也不知道两轮对话隔了多久，
+    会把一小时前回答里的读数当成现状（用户实际踩到的坑，2026-08-05）。"""
+    t = time.strftime("%m-%d %H:%M", time.gmtime(ts_ms / 1000))
+    return f"[{t} UTC·{_age_txt(ts_ms, now_ms)}] "
+
+
+# 距上一轮对话超过这个间隔，就在 system 里显式提醒"历史读数已过期"。
+# 15 分钟 ≈ 3 个采集轮：面板数据在这个尺度上已经完整换过一遍。
+CHAT_GAP_NOTICE_MIN = 15
+
+
 def chat(payload: dict, messages: list) -> dict:
     cfg = load_config()
+    now_ms = int(time.time() * 1000)
     context = render_context(payload)
     ov = overview_brief()
+    # 时间跳变横幅：历史最后一条距今超阈值时，明示"旧数字不代表现状"。
+    # 判据用**倒数第二条之前的历史**（最后一条通常是本轮刚追加的提问，无 ts）。
+    hist_ts = [int(m["ts"]) for m in messages[:-1] if m.get("ts")]
+    gap_note = ""
+    if hist_ts and now_ms - hist_ts[-1] > CHAT_GAP_NOTICE_MIN * 60_000:
+        gap_note = (
+            f"\n\n⚠ 距上一轮对话已过 {_age_txt(hist_ts[-1], now_ms).rstrip('前')}。"
+            "历史对话中引用的一切读数都是当时的快照，不代表现状；"
+            "回答一律以本轮 <panel> 为准，且当引用历史结论时必须显式标注其时点"
+            "（历史消息开头的 [时间·距今] 前缀即其时点）。"
+        )
     system = (
         load_system() + "\n\n" + system_brief()
         + (("\n\n" + ov) if ov else "")
+        + gap_note
         + "\n\n" + PANEL_LEGEND + "\n<panel>\n" + context + "\n</panel>"
     )
     msgs = [
-        {"role": m["role"], "content": str(m.get("content", ""))[:8000]}
+        {"role": m["role"],
+         # 时间前缀加在截断**之后**：前缀绝不能被 8000 字符上限截掉
+         "content": (_time_tag(int(m["ts"]), now_ms) if m.get("ts") else "")
+                    + str(m.get("content", ""))[:8000]}
         for m in messages
         if m.get("role") in ("user", "assistant") and str(m.get("content", "")).strip()
     ][-20:]
