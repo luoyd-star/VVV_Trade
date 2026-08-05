@@ -14,7 +14,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,7 +23,9 @@ from collector import sync_vol_index  # noqa: E402
 from regime import storage  # noqa: E402
 from regime.usvol import _quote_trading_day, day_ms  # noqa: E402
 
-D30, D31, D01 = day_ms(date(2026, 7, 30)), day_ms(date(2026, 7, 31)), day_ms(date(2026, 8, 1))
+D30 = day_ms(date(2026, 7, 30))
+D31 = day_ms(date(2026, 7, 31))
+D03 = day_ms(date(2026, 8, 3))  # 周一：真实的新交易日，不能用 2026-08-01（周六）
 
 
 def fresh_db():
@@ -66,24 +69,24 @@ def main() -> None:
     assert got == 15.99, f"官方收盘价被报价覆盖了：{got}"
 
     # ② CSV 未覆盖的当日，报价照常补进来（临时值不能丢）
-    run(conn, [(D30, 18.0), (D31, 15.99)], {"ts": D01, "close": 16.4}, T0 + 60)
-    print(f"② 未覆盖日补值   08-01 库值={close_of(conn, D01)}")
-    assert close_of(conn, D01) == 16.4
+    run(conn, [(D30, 18.0), (D31, 15.99)], {"ts": D03, "close": 16.4}, T0 + 60)
+    print(f"② 未覆盖日补值   08-03 库值={close_of(conn, D03)}")
+    assert close_of(conn, D03) == 16.4
     assert close_of(conn, D31) == 15.99, "补当日不应动到已确权的前一日"
 
     # ③ 进入新交易日会触发补确权（不靠 24h 墙钟碰运气），随后官方值胜出
     calls = []
-    run(conn, [(D31, 15.99), (D01, 16.1)], {"ts": D01, "close": 16.4}, T0 + 7200, calls)
-    print(f"③ 补确权         CSV 重拉={len(calls)} 次 → 08-01 库值={close_of(conn, D01)}")
+    run(conn, [(D31, 15.99), (D03, 16.1)], {"ts": D03, "close": 16.4}, T0 + 7200, calls)
+    print(f"③ 补确权         CSV 重拉={len(calls)} 次 → 08-03 库值={close_of(conn, D03)}")
     assert len(calls) == 1, "报价进入未覆盖交易日后应立即重拉 CSV"
-    assert close_of(conn, D01) == 16.1, "确权后当日应为官方收盘价"
+    assert close_of(conn, D03) == 16.1, "确权后当日应为官方收盘价"
 
     # ④ 1 小时重试下限：刚拉过就不再重拉（防刷 600KB×5）
     calls = []
-    run(conn, [(D31, 15.99)], {"ts": D01, "close": 16.9}, T0 + 7200 + 600, calls)
+    run(conn, [(D31, 15.99)], {"ts": D03, "close": 16.9}, T0 + 7200 + 600, calls)
     print(f"④ 重试下限       10 分钟后 CSV 重拉={len(calls)} 次（应为 0）")
     assert len(calls) == 0
-    assert close_of(conn, D01) == 16.1, "闸关着时不得让报价覆盖已确权的当日"
+    assert close_of(conn, D03) == 16.1, "闸关着时不得让报价覆盖已确权的当日"
 
     # ⑤ 故障隔离：CSV 挂了，报价仍要写进未覆盖的交易日
     conn2 = fresh_db()
@@ -109,9 +112,14 @@ def main() -> None:
     # ⑧ 交易日推断：周末/盘后拉到的是上一交易日，不得造出周末行
     assert _quote_trading_day({"last_trade_time": "2026-07-31T16:15:01"}) == date(2026, 7, 31)
     assert _quote_trading_day({"last_trade_time": "2026-07-31T15:15:01.233000-05:00"}) == date(2026, 7, 31)
-    fallback = _quote_trading_day({"last_trade_time": "垃圾"})
-    print(f"⑧ 交易日推断     ET 时刻/CT 带偏移均归 07-31；脏值回退={fallback}")
-    assert isinstance(fallback, date)
+    weekend_clock = datetime(2026, 8, 1, 12, tzinfo=ZoneInfo("America/New_York"))
+    fallback = _quote_trading_day({"last_trade_time": "垃圾"}, now=weekend_clock)
+    print(f"⑧ 交易日推断     ET 时刻/CT 带偏移均归 07-31；周末脏值回退={fallback}")
+    assert fallback == date(2026, 7, 31), "周六脏时间必须回退到周五，不得造周末行"
+    weekend_rows = conn.execute(
+        "SELECT count(*) FROM usvol WHERE strftime('%w', ts/1000, 'unixepoch') IN ('0','6')"
+    ).fetchone()[0]
+    assert weekend_rows == 0, f"库内不应出现周末行，实有 {weekend_rows} 行"
 
     print("\n全部通过 ✓")
 

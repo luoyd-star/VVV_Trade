@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 
-from regime.classify import analyze_timeframe
+from regime.classify import FEATURE_WINDOW, analyze_timeframe
 from regime.data import demo_ohlcv, fetch_dvol, fetch_ohlcv
 from regime.features.utils import pct_rank
 from regime.report import render
@@ -57,11 +57,14 @@ def main() -> None:
         try:
             for tf in timeframes:
                 if args.demo:
-                    df, sources[tf] = demo_ohlcv(tf), "demo"
+                    df, sources[tf] = demo_ohlcv(tf, n=FEATURE_WINDOW), "demo"
                 else:
-                    df, sources[tf] = fetch_ohlcv(sym, tf, sources=source_order)
-                dfs[tf] = df
-                regimes[tf] = analyze_timeframe(df, tf)
+                    df, sources[tf] = fetch_ohlcv(
+                        sym, tf, limit=FEATURE_WINDOW + 1, sources=source_order
+                    )
+                feat = df.iloc[-FEATURE_WINDOW:].reset_index(drop=True)
+                dfs[tf] = feat
+                regimes[tf] = analyze_timeframe(feat, tf)
         except Exception as e:  # noqa: BLE001
             print(f"[{sym}] 数据获取/计算失败: {e}\n")
             continue

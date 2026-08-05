@@ -4,8 +4,8 @@
 Deribit→OKX→Binance 是未登记或未显式配置 sources 的加密品种兜底链，不是全局优先级。
 
 全部为免费公开接口，无需 API key。返回按时间升序的 DataFrame，
-列为 [ts, open, high, low, close, volume]，并丢弃最后一根未收盘的 K 线
-（未收盘 K 线会让状态在盘中来回闪烁）。
+列为 [ts, open, high, low, close, volume]。默认仅在末根的理论收线时刻仍晚于
+当前时刻时丢弃它（未收盘 K 线会让状态在盘中来回闪烁）。
 
 注意：Deribit 提供的是永续合约价格（BTC/ETH 为币本位，少数主流币有 USDC 永续），
 与现货存在微小基差；品种覆盖窄，Deribit 没有的品种会自动落到 OKX/Binance。
@@ -372,19 +372,35 @@ SOURCES = {
 DEFAULT_SOURCES = ("deribit", "okx", "binance")
 
 
+def closed_ohlcv(df: pd.DataFrame, timeframe: str, now_ms: int | None = None) -> pd.DataFrame:
+    """返回已收线部分；末根仅在 ``open_ts + timeframe > now_ms`` 时剥离。
+
+    严格 ``>`` 与 fetch_binance_vol1h 同义：理论收线时刻等于当前时刻时已算
+    收线。休市期间源只返回已收线历史时，末根会保留而不是按位置猜测后误删。
+    """
+    if df.empty:
+        return df.reset_index(drop=True)
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    last_ts = int(pd.Timestamp(df["ts"].iloc[-1]).value // 10**6)
+    if last_ts + _BAR_MS[timeframe] > now:
+        return df.iloc[:-1].reset_index(drop=True)
+    return df.reset_index(drop=True)
+
+
 def fetch_ohlcv(
     symbol: str,
     timeframe: str,
     limit: int = 300,
     sources=None,
     drop_unclosed: bool = True,
+    now_ms: int | None = None,
 ):
     """按 sources 顺序逐个尝试。sources=None 时按 instruments 注册表逐品种路由；
     未登记或未显式配置 sources 的加密品种才用 deribit -> okx -> binance 兜底链。
     返回 (df, 数据源名)。
 
-    默认丢弃最后一根未收盘 K 线；drop_unclosed=False 时保留（collector 用它
-    存"形成中"的 live bar 供滚动预览——预览永不写入确认历史）。
+    默认按理论收线时刻丢弃未收盘末根；drop_unclosed=False 时保留源返回值
+    （collector 用它提取可能存在的 live bar——预览永不写入确认历史）。
     """
     if sources is None:
         sources = instruments.get(symbol)["sources"]
@@ -399,7 +415,7 @@ def fetch_ohlcv(
         except Exception as e:  # noqa: BLE001
             errors.append(f"{name}: {e}")
             continue
-        closed = df.iloc[:-1].reset_index(drop=True)
+        closed = closed_ohlcv(df, timeframe, now_ms=now_ms)
         if len(closed) < 90:  # 上市较新的美股永续（如 1d 仅 ~130 根）也放行，靠 warmup 标志提示质量
             errors.append(f"{name}: 仅 {len(closed)} 根已收盘 K 线，不足 90")
             continue

@@ -103,6 +103,30 @@ def test_context_includes_oi_span_and_all_heartbeat_lanes():
     assert "OpenD=正常/无落库年龄" in heartbeat_line
 
 
+def test_unknown_funding_interval_is_visible_and_never_falls_back_to_8h():
+    text = render_context(_base_payload(deriv={
+        "oi": 1000.0,
+        "oi_rank": None,
+        "oi_change_4h": None,
+        "oi_change_24h": None,
+        "funding_pct": 0.01,
+        "funding_interval_h": None,
+        "funding_annual_pct": None,
+        "funding_settled_pct": None,
+        "funding_rank": None,
+        "premium_pct": None,
+        "premium_rank": None,
+        "taker_ratio": None,
+        "taker_rank": None,
+        "spans": {"oi": 0.0},
+    }))
+
+    assert "Funding预测=0.0100%/未知周期(年化—%)" in text
+    app = (ROOT / "web/app.js").read_text(encoding="utf-8")
+    assert "funding_interval_h || 8" not in app
+    assert "未知周期" in app
+
+
 def test_stock_iv_freshness_and_unsettled_marks_reach_context():
     asof = int(datetime(2026, 7, 20, tzinfo=timezone.utc).timestamp() * 1000)
     text = render_context(_base_payload(usvol={

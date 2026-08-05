@@ -818,9 +818,16 @@ def _deriv_payload(conn, symbol: str):
         base = float(past["oi"].iloc[-1])
         return round(math.log(oi / base), 4) if base > 0 else None
 
-    # 结算间隔由 collector 从 fundingInfo 接口取回存进 meta，面板只读库不打网络
-    interval_h = float(storage.get_meta(conn, f"funding_interval_{symbol}", 8.0) or 8.0)
-    per_year = 365 * 24.0 / interval_h if interval_h else 3 * 365.0
+    # 结算间隔由 collector 从 fundingInfo 接口取回存进 meta，面板只读库不打网络。
+    # 缺键/坏值表示未知；不得猜成 8h，更不得据此生成伪年化。
+    raw_interval = storage.get_meta(conn, f"funding_interval_{symbol}", None)
+    try:
+        interval_h = float(raw_interval) if raw_interval is not None else None
+        if interval_h is not None and (not math.isfinite(interval_h) or interval_h <= 0):
+            interval_h = None
+    except (TypeError, ValueError):
+        interval_h = None
+    per_year = 365 * 24.0 / interval_h if interval_h is not None else None
 
     return {
         "oi": oi,
@@ -832,7 +839,8 @@ def _deriv_payload(conn, symbol: str):
         # 挂在一起显示会让人把分位读成预测值的分位——实测 AAPL 预测 0 配分位
         # 0.905，而 0 在同一分布里其实只在 0.059。
         "funding_pct": round(funding_pred * 100, 5) if funding_pred is not None else None,
-        "funding_annual_pct": round(funding_pred * per_year * 100, 1) if funding_pred is not None else None,
+        "funding_annual_pct": (round(funding_pred * per_year * 100, 1)
+                               if funding_pred is not None and per_year is not None else None),
         "funding_interval_h": interval_h,
         "funding_settled_pct": round(funding_settled * 100, 5) if funding_settled is not None else None,
         "funding_rank": rank_of(f_settled["funding"], funding_settled, spans["funding"]),

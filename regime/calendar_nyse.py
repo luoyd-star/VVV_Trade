@@ -43,6 +43,18 @@ def is_trading_day(d: date) -> bool:
     return d.weekday() < 5 and d not in HOLIDAYS
 
 
+def is_probable_trading_day(d: date) -> bool:
+    """历史行的防御性交易日筛选，不用于实时 RTH 开关。
+
+    年份在显式假日表内时复用 :func:`is_trading_day` 精确判定；表外年份因
+    无法识别当地假日，仅按 ``weekday() < 5`` 排除周末。该宽松退化只用于
+    避免历史回填被有限年份日历整段误删，不能据此判断市场此刻是否开盘。
+    """
+    if d.year in _YEARS:
+        return is_trading_day(d)
+    return d.weekday() < 5
+
+
 def session_close_et(d: date) -> dtime:
     return dtime(13, 0) if d in EARLY_CLOSE else dtime(16, 0)
 

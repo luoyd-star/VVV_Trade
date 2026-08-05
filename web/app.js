@@ -877,12 +877,13 @@ function renderDeriv() {
       : ''}${dr.warmup ? '（OI<21天，分位仅供参考）' : ''}`;
   const chg = (v) => (v == null ? '—' : fmtN((Math.exp(v) - 1) * 100, 2, true) + '%');
   const rk = (v) => (v == null ? '' : `（分位 ${fmtN(v, 2)}）`);
+  const fundingPeriod = dr.funding_interval_h == null ? '未知周期' : `${dr.funding_interval_h}h`;
   info.innerHTML = [
     [dr.oi == null ? '—' : Math.round(dr.oi).toLocaleString('en-US'), `OI 张数${rk(dr.oi_rank)}`],
     [chg(dr.oi_change_4h), 'OI Δ4h'],
     [chg(dr.oi_change_24h), 'OI Δ24h'],
     [dr.taker_ratio == null ? '—' : fmtN(dr.taker_ratio, 3), `Taker 买卖比${rk(dr.taker_rank)}`],
-    [dr.funding_pct == null ? '—' : `${fmtN(dr.funding_pct * 100, 2)}bp`, `Funding /${dr.funding_interval_h || 8}h（下期预测）`],
+    [dr.funding_pct == null ? '—' : `${fmtN(dr.funding_pct * 100, 2)}bp`, `Funding /${fundingPeriod}（下期预测）`],
     [dr.funding_settled_pct == null ? '—' : `${fmtN(dr.funding_settled_pct * 100, 2)}bp`, `上期结算${rk(dr.funding_rank)}`],
     [dr.funding_annual_pct == null ? '—' : `${fmtN(dr.funding_annual_pct, 1)}%`, 'Funding 年化'],
     [dr.premium_pct == null ? '—' : `${fmtN(dr.premium_pct * 100, 1)}bp`, `Premium${rk(dr.premium_rank)}`],
@@ -919,7 +920,7 @@ function renderDeriv() {
       { name: 'OI', type: 'line', data: dr.oi_series, symbol: 'none',
         lineStyle: { width: 2 }, xAxisIndex: 0, yAxisIndex: 0,
         endLabel: { show: true, formatter: 'OI', color: COL.sub, fontSize: 9 } },
-      { name: `Funding %/${dr.funding_interval_h || 8}h（已结算）`, type: 'bar', data: dr.funding_series,
+      { name: `Funding %/${fundingPeriod}（已结算）`, type: 'bar', data: dr.funding_series,
         xAxisIndex: 1, yAxisIndex: 1, barWidth: 2 },
     ],
   }, true);

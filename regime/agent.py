@@ -310,13 +310,19 @@ def render_context(p: dict) -> str:
     if dr:
         def _f(v, fmt="{:.2f}"):
             return fmt.format(v) if v is not None else "—"
+        try:
+            _interval = float(dr.get("funding_interval_h"))
+            interval_txt = (f"{_interval:g}h"
+                            if math.isfinite(_interval) and _interval > 0 else "未知周期")
+        except (TypeError, ValueError):
+            interval_txt = "未知周期"
         chg4 = _f((math.exp(dr["oi_change_4h"]) - 1) * 100 if dr["oi_change_4h"] is not None else None, "{:+.2f}")
         chg24 = _f((math.exp(dr["oi_change_24h"]) - 1) * 100 if dr["oi_change_24h"] is not None else None, "{:+.2f}")
         oi_days = _f((dr.get("spans") or {}).get("oi"), "{:.1f}")
         lines.append(
             f"持仓(Binance永续): OI={_f(dr['oi'], '{:.0f}')}张(近{oi_days}日小时分位{_f(dr['oi_rank'])}) "
             f"Δ4h={chg4}% Δ24h={chg24}% "
-            f"Funding预测={_f(dr['funding_pct'], '{:.4f}')}%/{dr.get('funding_interval_h') or 8:g}h"
+            f"Funding预测={_f(dr['funding_pct'], '{:.4f}')}%/{interval_txt}"
             f"(年化{_f(dr['funding_annual_pct'], '{:.1f}')}%) "
             f"上期结算={_f(dr.get('funding_settled_pct'), '{:.4f}')}%(分位{_f(dr['funding_rank'])}) "
             f"Premium={_f(dr['premium_pct'], '{:.4f}')}%(分位{_f(dr['premium_rank'])}) "

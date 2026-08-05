@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from regime.calendar_nyse import (  # noqa: E402
-    bar_full_rth, is_rth, is_trading_day,
+    bar_full_rth, is_probable_trading_day, is_rth, is_trading_day,
 )
 
 H = 3_600_000
@@ -21,6 +21,13 @@ def test_holidays_and_weekends():
     assert not is_trading_day(date(2026, 8, 2))    # 周日
     assert is_trading_day(date(2026, 8, 3))        # 周一
     assert not is_trading_day(date(2024, 6, 3))    # 表外年份宁缺毋滥当休市
+
+
+def test_probable_day_is_exact_in_table_and_weekday_only_outside():
+    assert is_probable_trading_day(date(2023, 6, 26))   # 表外周一：历史清洗保留
+    assert is_probable_trading_day(date(2024, 6, 3))    # 表外周一：历史清洗保留
+    assert not is_probable_trading_day(date(2024, 6, 8))  # 表外周六仍拒绝
+    assert not is_probable_trading_day(date(2026, 7, 3))  # 表内假日精确拒绝
 
 
 def test_rth_dst_boundaries():

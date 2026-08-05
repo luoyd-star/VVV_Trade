@@ -30,8 +30,8 @@ from regime.classify import (
     rolling_states_missing,
 )
 from regime.data import (
-    fetch_binance_spot_daily, fetch_binance_vol1h, fetch_dvol, fetch_ohlcv,
-    fetch_yahoo_daily,
+    closed_ohlcv, fetch_binance_spot_daily, fetch_binance_vol1h, fetch_dvol,
+    fetch_ohlcv, fetch_yahoo_daily,
 )
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
@@ -216,6 +216,13 @@ def sync_stock_iv_term(conn, symbols) -> tuple:
         if not codes:
             return None, ["iv_term: 代码表构建为空"]
         rows = stock_iv_term.fetch_term(ctx, codes, now_ms=now)
+        single_legs = [
+            f"{r['symbol']} {tenor}d"
+            for r in rows for tenor, n in (r.get("legs") or {}).items() if n == 1
+        ]
+        if single_legs:
+            log.warning("IV期限曲线 ATM 单腿退化（仅一侧有有效 IV）: %s",
+                        ", ".join(single_legs))
         if rows:
             storage.upsert_stock_iv_term(conn, rows)
         inv = sum(1 for r in rows
@@ -563,7 +570,8 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                 df_full, src = fetch_ohlcv(
                     sym, tf, sources=source_order, drop_unclosed=False
                 )
-                df = df_full.iloc[:-1].reset_index(drop=True)  # 已收盘部分
+                df = closed_ohlcv(df_full, tf)
+                has_live_bar = len(df_full) > len(df)
                 # 序列下限（公司行动/合约重定价断点治理）：源端服务的是未复权
                 # 原始历史，删掉的断点前段会被下一轮 fetch 重新灌回（CRWD 4:1
                 # 重定价实测：4h 每轮拉 50 天、必够到旧口径段）。floor 之前的
@@ -575,15 +583,17 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     if not all(keep):
                         df = df[keep].reset_index(drop=True)
                 storage.upsert_ohlcv(conn, sym, tf, df, src)
-                # 形成中的最后一根另存 live_bars，供面板滚动预览（不入确认历史）
-                live = df_full.iloc[-1]
-                storage.set_live_bar(conn, sym, tf, {
-                    "ts": int(live["ts"].value // 10**6),
-                    "open": live["open"], "high": live["high"],
-                    "low": live["low"], "close": live["close"],
-                    "volume": live["volume"],
-                    "fetched_at": int(time.time() * 1000),
-                })
+                # 只有理论收线时刻尚未来到时，末根才是 live bar。若源在休市期间
+                # 只返回已收线历史，末根进入幂等 OHLCV upsert，不再被按位置误删。
+                if has_live_bar:
+                    live = df_full.iloc[-1]
+                    storage.set_live_bar(conn, sym, tf, {
+                        "ts": int(live["ts"].value // 10**6),
+                        "open": live["open"], "high": live["high"],
+                        "low": live["low"], "close": live["close"],
+                        "volume": live["volume"],
+                        "fetched_at": int(time.time() * 1000),
+                    })
                 # 重算窗 10000 根 + FEATURE_WINDOW-1 根 pre-roll。
                 # 没有 pre-roll 的话，窗口最老的那 399 根会在"上下文不足"的
                 # 情况下被算出来——同一根 bar 全量算与截尾算给出不同 features

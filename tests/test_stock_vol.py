@@ -252,7 +252,7 @@ def test_term_structure_inversion_flags():
 
 
 def test_settled_only_drops_unsettled_today():
-    """当日未收盘的行必须滤掉——与 K 线 iloc[:-1] 同一条纪律。
+    """当日未收盘的行必须滤掉——与 K 线按理论收线时刻裁剪同一条纪律。
 
     实测 3304 会返回当日行且其 iv 随盘滚动（盘中 47.238 vs 3303 实时 47.152）。
     写进去会让分位分母含一个还会变的值：同一天算两次分位得数不同。
@@ -561,6 +561,28 @@ def test_settled_only_drops_weekend_rows():
     assert [r["iv"] for r in kept] == [21.0], "周六行应被丢弃"
 
 
+def test_settled_only_cross_year_history_uses_probable_calendar():
+    """跨年历史清洗：表外工作日保留、周末拒绝、表内假日精确拒绝。
+
+    2026-08-05 前 settled_only 误用实时 fail-closed 日历，2023/2024 的正常
+    工作日会被整段删除；历史防御闸现在只在有假日表的年份做精确判定。
+    """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    rows = [
+        {"ts": moomoo_iv.day_ms(date(2023, 6, 26)), "iv": 23.0},  # 周一
+        {"ts": moomoo_iv.day_ms(date(2023, 6, 24)), "iv": 23.1},  # 周六
+        {"ts": moomoo_iv.day_ms(date(2024, 6, 3)), "iv": 24.0},   # 周一
+        {"ts": moomoo_iv.day_ms(date(2024, 6, 8)), "iv": 24.1},   # 周六
+        {"ts": moomoo_iv.day_ms(date(2026, 7, 3)), "iv": 26.0},   # 表内独立日观察日
+    ]
+    now = datetime.combine(date(2026, 8, 5), dtime(12),
+                           tzinfo=ZoneInfo("America/New_York"))
+    kept = moomoo_iv.settled_only(rows, now=now)
+    assert [r["iv"] for r in kept] == [23.0, 24.0]
+
+
 def test_numeric_cleaners_reject_inf():
     """±inf 必须落 None——inf 进分位分母会吞掉整个分布。"""
     assert storage._f(float("inf")) is None
@@ -587,6 +609,73 @@ def test_iv_term_pick_and_atm():
     call, put, k = t.atm_pair(chain, 211.9)
     assert (call, put, k) == ("C212", "P212", 212.5)
     assert t.atm_pair([], 100.0) is None
+
+
+def test_iv_term_marks_single_leg_degradation(monkeypatch):
+    """ATM 正常为 C/P 均值；缺一腿时保留单腿值并通过内存 legs 标记暴露。"""
+    import sys
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from regime import stock_iv_term as t
+
+    monkeypatch.setitem(sys.modules, "moomoo", SimpleNamespace(RET_OK=0))
+    monkeypatch.setattr(t, "PACE", 0)
+
+    class Ctx:
+        def get_market_snapshot(self, batch):
+            vals = {
+                "C3": 20.0, "P3": 22.0,
+                "C9": 30.0, "P9": float("nan"),
+                "C30": 0.0, "P30": None,
+            }
+            return 0, pd.DataFrame([
+                {"code": code, "option_implied_volatility": vals[code]}
+                for code in batch
+            ])
+
+    entry = {
+        str(tenor): {
+            "call": f"C{tenor}", "put": f"P{tenor}",
+            "tenor": tenor, "expiry": f"2026-08-{tenor:02d}", "strike": 100.0,
+        }
+        for tenor in (3, 9, 30)
+    }
+    rows = t.fetch_term(Ctx(), {"NVDA-USDT": entry}, now_ms=1_785_000_000_000)
+
+    assert len(rows) == 1
+    assert rows[0]["iv3"] == 21.0 and rows[0]["legs"]["3"] == 2
+    assert rows[0]["iv9"] == 30.0 and rows[0]["legs"]["9"] == 1
+    assert rows[0]["iv30"] is None and "30" not in rows[0]["legs"]
+
+
+def test_collector_warns_when_iv_term_uses_one_leg(monkeypatch, caplog):
+    import logging
+
+    import collector
+    from regime import calendar_nyse, stock_iv_term
+
+    class Ctx:
+        def close(self):
+            pass
+
+    conn = _mem_conn()
+    monkeypatch.setattr(calendar_nyse, "is_rth", lambda now: True)
+    monkeypatch.setattr(moomoo_iv, "opend_alive", lambda: True)
+    monkeypatch.setattr(moomoo_iv, "open_ctx", lambda: Ctx())
+    monkeypatch.setattr(collector, "_should", lambda *args: True)
+    monkeypatch.setattr(stock_iv_term, "load_codes_cache", lambda conn: {"cached": {}})
+    monkeypatch.setattr(stock_iv_term, "fetch_term", lambda *args, **kwargs: [{
+        "symbol": "NVDA-USDT", "ts": 1_785_000_000_000,
+        "iv3": 30.0, "t3": 3, "iv9": 31.0, "t9": 9,
+        "iv30": 32.0, "t30": 30, "legs": {"3": 1, "9": 2, "30": 2},
+    }])
+    caplog.set_level(logging.WARNING, logger="collector")
+
+    collector.sync_stock_iv_term(conn, ["NVDA-USDT"])
+
+    assert "ATM 单腿退化" in caplog.text and "NVDA-USDT 3d" in caplog.text
 
 
 def test_iv_term_storage_roundtrip():

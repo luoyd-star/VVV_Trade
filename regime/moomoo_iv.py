@@ -178,7 +178,8 @@ def settled_only(rows: list, now=None) -> list:
 
     实测（2026-08-04 盘中 ET 09:45）：3304 会返回当日行且其 iv 随盘滚动
     （47.238 vs 3303 实时 47.152），若照写入库，分位分母里就混进了一个还会变的值，
-    同一天算两次分位得数不同——这正是 collector.py 对 K 线做 `iloc[:-1]` 要防的事。
+    同一天算两次分位得数不同——这正是 data.closed_ohlcv 按理论收线时刻剥离
+    形成中 K 线要防的事。
 
     判据：某交易日 D 的行，仅当"当前 ET 时刻已过 D 的收盘"才算结算。
     用 NYSE 日历的真实收盘时刻（半日市 13:00），不硬编码 16:00。
@@ -186,7 +187,7 @@ def settled_only(rows: list, now=None) -> list:
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    from .calendar_nyse import is_trading_day, session_close_et
+    from .calendar_nyse import is_probable_trading_day, session_close_et
 
     et = ZoneInfo("America/New_York")
     # 传入的 now 必须统一转 ET——调用方若传 UTC 时刻，now.time() 会拿 UTC 钟点
@@ -195,7 +196,7 @@ def settled_only(rows: list, now=None) -> list:
     out = []
     for r in rows:
         d = _dt.fromtimestamp(r["ts"] / 1000, tz=timezone.utc).date()
-        if not is_trading_day(d):
+        if not is_probable_trading_day(d):
             continue   # 周末/休市日的行属厂商异常，防御性丢弃（codex 审计）
         if d < now.date():
             out.append(r)

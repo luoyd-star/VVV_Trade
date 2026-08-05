@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -50,19 +50,29 @@ def backfill_index_history(name: str) -> list:
     return rows
 
 
-def _quote_trading_day(d: dict) -> date:
+def _quote_trading_day(d: dict, now: datetime | None = None) -> date:
     """报价所属的交易日：优先用 last_trade_time（ET 挂牌时刻），否则退到 ET 当天。
 
     用挂牌时刻而非本机 time.time()，周末/盘后拉到的仍是上一交易日的收盘价——
-    记到那个交易日名下才对，否则会凭空造出周六、周日的行。
+    记到那个交易日名下才对，否则会凭空造出周六、周日的行。时间字段损坏或
+    候选日非交易日时向前回退；``now`` 仅供确定性测试注入。
     """
     lt = d.get("last_trade_time")
+    candidate = None
     if lt:
         try:
-            return datetime.strptime(str(lt)[:10], "%Y-%m-%d").date()
+            candidate = datetime.strptime(str(lt)[:10], "%Y-%m-%d").date()
         except ValueError:
             pass
-    return datetime.now(ET).date()
+    if candidate is None:
+        clock = now.astimezone(ET) if now is not None else datetime.now(ET)
+        candidate = clock.date()
+
+    from .calendar_nyse import is_probable_trading_day
+
+    while not is_probable_trading_day(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
 
 
 def fetch_index_quote(name: str) -> dict:

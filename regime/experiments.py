@@ -13,6 +13,9 @@ E3 去季节化稳健性：现行 48 桶均值因子 vs 中位数+MAD 稳健版 
    ——比 TOD 残余离散度（主题 4：均值易被跳跃污染）。
 E4 迟滞网格：库内 raw_state 离线重放 confirm_states 变体（N_enter/N_exit
    1..4），比确认延迟/翻转率/状态驻留（主题 2：迟滞有据、1/2/3 根无据）。
+
+口径说明：2026-08-05 起 E1/E2 与生产共用 rolling_pct_rank；此前实验用
+``<=``（含自身）且先 dropna，所得历史结论存在系统偏移，既有报告不回写。
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ import pandas as pd
 from . import storage
 from .backtest import LOCKBOX_START_MS, TF_MS, episode_ids, future_rv
 from .classify import RULES_VERSION, AUDIT_VERSION
+from .features.utils import rolling_pct_rank
 from .features.volatility import true_range
 
 MIN_EVENTS = 12  # 事件研究每格最少去重事件数，低于只描述
@@ -44,11 +48,13 @@ def load_series(conn, sym, tf):
 
 # ---------------------------------------------------------------- E1 估计器赛马
 
-def _rolling_rank(s: pd.Series, win: int = 250) -> pd.Series:
-    """与 features.utils.pct_rank 同口径的滚动分位（<=，含自身）。"""
-    def _r(x):
-        return (x <= x[-1]).mean()
-    return s.rolling(win).apply(_r, raw=True)
+def _rank_series(s: pd.Series, win: int = 250) -> pd.Series:
+    """把生产 rolling_pct_rank 的 ndarray 原样装回调用方索引。
+
+    2026-08-05 起与生产同口径；此前实验用 ``<=`` 有系统偏移。
+    此处只适配返回类型，不另行实现比较或 NaN/窗口语义。
+    """
+    return pd.Series(rolling_pct_rank(s, win), index=s.index, dtype=float)
 
 
 def e1_estimator_race(df: pd.DataFrame, tf: str) -> dict:
@@ -71,7 +77,7 @@ def e1_estimator_race(df: pd.DataFrame, tf: str) -> dict:
         "rs": np.sqrt((lh * (lh - lc) + lo_ * (lo_ - lc)).rolling(n).mean()
                       .clip(lower=0)),
     }
-    ranks = {k: _rolling_rank(v.dropna()) for k, v in est.items()}
+    ranks = {k: _rank_series(v) for k, v in est.items()}
     base = ranks["sma_atr"]
     out = {}
     for k, r in ranks.items():
@@ -104,11 +110,10 @@ def e2_squeeze_events(df: pd.DataFrame, tf: str,
     无条件基线：全部 bar 的同一前瞻量。
     """
     from .features.volatility import atr, bb_width
-    from .features.utils import pct_rank as _pct  # noqa: F401  口径参考
     c = df["close"].astype(float)
     atr14 = true_range(df).rolling(14).mean()
-    bbw_rank = _rolling_rank(bb_width(c))
-    atr_rank = _rolling_rank(atr14 / c)
+    bbw_rank = _rank_series(bb_width(c))
+    atr_rank = _rank_series(atr14 / c)
     H = {"1h": 24, "4h": 18, "1d": 10}[tf]
     hi, lo = df["high"].astype(float), df["low"].astype(float)
     fwd_range = pd.concat(

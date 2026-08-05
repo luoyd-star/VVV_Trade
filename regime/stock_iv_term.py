@@ -104,9 +104,11 @@ def build_codes(ctx, symbols) -> dict:
 
 
 def fetch_term(ctx, codes_map: dict, now_ms: int | None = None) -> list:
-    """按日缓存的代码表 → 批量快照 → 每品种 {ts, iv3, t3, iv9, t9, iv30, t30}。
+    """按日缓存的代码表 → 批量快照 → 每品种期限曲线与内存 ``legs`` 标记。
 
-    ATM IV = 同行权价 call/put 的 option_implied_volatility 均值（探针实测两者差 <0.5pt）。
+    ATM IV 正常取同行权价 C/P 的 option_implied_volatility 均值；单腿缺失时
+    如实退化为有效单腿。返回行的 ``legs`` 为 ``{"3": 1|2, ...}``，仅存在
+    IV 的期限会出现，供 collector 告警；该标记只在内存传递，不改存储表结构。
     快照分批 ≤MAX_SNAPSHOT。IV<=0 或缺失按 None，品种整行全空则跳过。
     """
     from moomoo import RET_OK
@@ -129,7 +131,7 @@ def fetch_term(ctx, codes_map: dict, now_ms: int | None = None) -> list:
                 ivs[r["code"]] = float(v)
     out = []
     for sym, entry in codes_map.items():
-        row = {"symbol": sym, "ts": now}
+        row = {"symbol": sym, "ts": now, "legs": {}}
         got = False
         for tgt in TARGETS:
             t = entry.get(str(tgt))
@@ -138,6 +140,8 @@ def fetch_term(ctx, codes_map: dict, now_ms: int | None = None) -> list:
                 vals = [ivs.get(t["call"]), ivs.get(t["put"])]
                 vals = [v for v in vals if v is not None]
                 iv = round(sum(vals) / len(vals), 2) if vals else None
+                if vals:
+                    row["legs"][str(tgt)] = len(vals)
             row[f"iv{tgt}"] = iv
             row[f"t{tgt}"] = t["tenor"] if t else None
             got = got or iv is not None
