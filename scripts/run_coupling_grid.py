@@ -35,7 +35,6 @@ GRID_ELIG = (0.35, 0.40, 0.45)
 GRID_DENTER = (1.5, 2.0, 2.5)
 GRID_DELTA = (0.25, 0.29, 0.35)
 POWER_DELTA = 0.29
-REP_PAIRS_IDX = 2  # 代表对数量：1 强 + 1 边缘
 
 
 def make_params(elig, denter, delta) -> FSMParams:
@@ -103,12 +102,10 @@ def main() -> None:
     strong = next(((a, b) for a, b in pairs if "BTC" in a and "ETH" in b), pairs[0])
     edge = next(((a, b) for a, b in pairs if "XAU" in (a + b) and "ETH" in (a + b)),
                 pairs[-1])
-    reps = [strong, edge]
 
     rows = []
     combos = list(itertools.product(GRID_ELIG, GRID_DENTER, GRID_DELTA))
     for idx, (eg, de, dl) in enumerate(combos, 1):
-        tc = time.time()
         params = make_params(eg, de, dl)
         cal = calibrate_false_alarms(z, pairs, n_paths=args.fa_paths,
                                      params=params)

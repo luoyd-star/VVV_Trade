@@ -1068,14 +1068,27 @@ function renderCollector() {
   else if (age < staleMs) { stat.textContent = `运行中 · ${ago(c.last_run)}`; stat.className = 'badge ok'; }
   else { stat.textContent = `已停止? · ${ago(c.last_run)}`; stat.className = 'badge bad'; }
   const n = c.counts || {};
+  const countText = (key) => n[key] != null ? n[key].toLocaleString('en-US') : '—';
   $('colInfo').innerHTML = [
     ['采集间隔', c.interval ? `${c.interval}s` : '—'],
     ['单轮耗时', c.cycle_sec != null ? `${c.cycle_sec}s` : '—'],
-    ['K线行数', n.ohlcv != null ? n.ohlcv.toLocaleString('en-US') : '—'],
-    ['DVOL行数', n.dvol != null ? n.dvol.toLocaleString('en-US') : '—'],
-    ['状态行数', n.regime_history != null ? n.regime_history.toLocaleString('en-US') : '—'],
+    ['K线', countText('ohlcv')],
+    ['状态', countText('regime_history')],
+    ['衍生品', countText('deriv')],
+    ['DVOL', countText('dvol')],
+    ['VWAP量流', countText('vol1h')],
+    ['美国波指', countText('usvol')],
+    ['个股IV日线', countText('stock_vol')],
+    ['个股IV盘中', countText('stock_vol_live')],
+    ['近端IV', countText('opt_iv_near')],
+    ['IV期限曲线', countText('stock_iv_term')],
     ['本轮错误', (c.errors || []).length],
   ].map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join('');
+  const allCounts = Object.entries(n).sort(([a], [b]) => a.localeCompare(b));
+  $('colCountsSummary').textContent = `全部业务表（${allCounts.length}）`;
+  $('colCountsAll').innerHTML = allCounts.map(([table, count]) =>
+    `<span>${esc(table)}</span><b>${Number(count).toLocaleString('en-US')}</b>`
+  ).join('');
   $('colLog').textContent = (c.log_tail || []).join('\n') || '（暂无日志）';
   const lg = $('colLog');
   lg.scrollTop = lg.scrollHeight;

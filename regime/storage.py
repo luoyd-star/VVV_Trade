@@ -490,16 +490,22 @@ def get_ref_daily(conn, series: str, since_ms: int = 0) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ts", "close"])
 
 
-def get_states_audit(conn, symbol: str, tf: str):
-    """回测用全量状态行（含审计快照）。按 ts 升序；features 解析为 dict。
+def get_states_audit(conn, symbol: str, tf: str, include_rules: bool = False):
+    """回测用全量状态行（含审计快照）。按 ts 升序；JSON 列解析为对象。
 
     与 get_states 分开：面板只要末端窗口的轻量列，回测要全历史 + 健康位
     （a8 起 features 里有 win/warmup）。版本过滤交给调用方——回测按
     (version, audit_version) 分桶是硬纪律，这里原样带出。
+
+    rules 是逐根判定规则命中的审计账本，只有显式 include_rules=True 才增选并
+    返回；默认不选，避免全历史调用无意放大查询与 Python payload。
     """
+    fields = "ts,state,raw_state,confidence,features,version,audit_version"
+    if include_rules:
+        fields += ",rules"
     rows = conn.execute(
-        "SELECT ts,state,raw_state,confidence,features,version,audit_version"
-        " FROM regime_history WHERE symbol=? AND tf=? ORDER BY ts",
+        f"SELECT {fields} FROM regime_history"
+        " WHERE symbol=? AND tf=? ORDER BY ts",
         (symbol, tf),
     ).fetchall()
     out = []
@@ -508,11 +514,17 @@ def get_states_audit(conn, symbol: str, tf: str):
             feats = json.loads(r[4]) if r[4] else {}
         except (TypeError, ValueError):
             feats = {}
-        out.append({
+        item = {
             "ts": r[0], "state": r[1], "raw_state": r[2] or r[1],
             "confidence": r[3], "features": feats,
             "version": r[5], "audit_version": r[6],
-        })
+        }
+        if include_rules:
+            try:
+                item["rules"] = json.loads(r[7]) if r[7] else {}
+            except (TypeError, ValueError):
+                item["rules"] = {}
+        out.append(item)
     return out
 
 
@@ -1054,8 +1066,27 @@ def symbols(conn) -> list:
     return [r[0] for r in rows]
 
 
+def table_names(conn) -> list[str]:
+    """现库业务表目录；SQLite 内部自增表 sqlite_sequence 不对外暴露。"""
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND name<>'sqlite_sequence' ORDER BY name"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def table_columns(conn, table: str) -> list[str]:
+    """返回目录内一张表的字段；拒绝目录外名字后再拼接标识符。"""
+    if table not in set(table_names(conn)):
+        raise ValueError(f"unknown table: {table}")
+    quoted = '"' + table.replace('"', '""') + '"'
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({quoted})").fetchall()]
+
+
 def counts(conn) -> dict:
+    """动态统计全部业务表；新管线建表后无需再维护手写清单。"""
     out = {}
-    for table in ("ohlcv", "dvol", "regime_history", "deriv"):
-        out[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    for table in table_names(conn):
+        quoted = '"' + table.replace('"', '""') + '"'
+        out[table] = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
     return out

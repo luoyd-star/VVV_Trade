@@ -780,6 +780,15 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
     return errors
 
 
+def _status_payload(interval: int, elapsed: float, errors: list) -> dict:
+    """采集循环健康摘要；品种全集只在启动日志记录，不重复塞入每轮 meta。"""
+    return {
+        "interval": interval,
+        "cycle_sec": round(elapsed, 1),
+        "errors": errors[-10:],
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="市场状态系统数据采集器")
     ap.add_argument("--symbols", default=DEFAULT_SYMBOLS)
@@ -813,12 +822,10 @@ def main() -> None:
             errors = cycle(conn, symbols, timeframes, source_order)
             elapsed = time.time() - t0
             storage.set_meta(conn, "last_run", str(int(time.time() * 1000)))
-            storage.set_meta(conn, "status", json.dumps({
-                "interval": args.interval,
-                "cycle_sec": round(elapsed, 1),
-                "errors": errors[-10:],
-                "symbols": symbols,
-            }, ensure_ascii=False))
+            storage.set_meta(
+                conn, "status",
+                json.dumps(_status_payload(args.interval, elapsed, errors), ensure_ascii=False),
+            )
             log.info("本轮完成 %.1fs 错误=%d 库=%s", elapsed, len(errors), storage.counts(conn))
             if args.once:
                 break

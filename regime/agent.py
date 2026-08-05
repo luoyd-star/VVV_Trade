@@ -450,6 +450,7 @@ def overview_brief() -> str:
         from . import storage
         conn = storage.connect_ro()
         try:
+            sql_tables = storage.table_names(conn)
             rows = conn.execute(
                 "SELECT r.symbol, r.tf, r.ts, r.state, r.raw_state, r.confidence,"
                 " r.features FROM regime_history r JOIN ("
@@ -530,9 +531,11 @@ def overview_brief() -> str:
             "# 任意品种的全量面板文本（与 <panel> 同口径）\n"
             "  .venv/bin/python scripts/vvvquery.py states BTC-USDT 4h 20  "
             "# 状态+审计特征历史\n"
+            "  .venv/bin/python scripts/vvvquery.py tables  "
+            "# 动态表/字段目录（含 rules/ref_daily/breadth 用途）\n"
             "  .venv/bin/python scripts/vvvquery.py sql \"SELECT ...\"  "
-            "# 只读 SQL（表：ohlcv/regime_history/deriv/vol1h/usvol/dvol/"
-            "stock_vol/ref_daily）\n"
+            f"# 只读 SQL（现库 {len(sql_tables)} 张业务表，动态目录："
+            f"{', '.join(sql_tables)}）\n"
             "  个股隐波历史查 stock_vol，**必须带 source 条件**（口径不同源不可混算）：\n"
             "    SELECT ts,iv,hv FROM stock_vol WHERE symbol='NVDA-USDT' "
             "AND source='moomoo' ORDER BY ts DESC LIMIT 60\n"

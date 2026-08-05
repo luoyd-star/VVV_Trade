@@ -34,7 +34,6 @@ UNDERLYINGS = {
 }
 TARGET_DAYS = 3.0          # 目标常数期限（贴近实际挂牌结构）
 MIN_TENOR_DAYS = 0.2       # 距到期 <4.8 小时的合约临近结算 IV 不稳，剔除
-YEAR_DAYS = 365.0
 K_NEAR_STRIKES = 5         # ATM 邻域宽度：距指数价最近的 5 个行权价（其上全部报价进中位数）
 DUP_PLACEHOLDER = 3        # 同一到期内完全相同的 markIV ≥3 次 → 占位值簇，整簇剔除
 

@@ -257,6 +257,9 @@ td.pos { color: var(--up); } td.neg { color: var(--down); }
 .kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; font-size: 12px; margin-bottom: 12px; }
 .kv span { color: var(--muted); }
 .kv b { font-family: var(--mono); font-weight: 600; text-align: right; color: var(--ink); }
+.count-box { margin: 0 0 12px; border-top: 1px solid var(--grid); padding-top: 8px; }
+.count-box > summary { cursor: pointer; color: var(--accent); font-size: 11px; }
+.count-kv { margin: 8px 0 0; max-height: 210px; overflow: auto; }
 .log { background: var(--card2); border: 1px solid var(--grid);
        padding: 10px; font-family: var(--mono); font-size: 10px; line-height: 1.6;
        color: var(--sub); max-height: 210px; overflow: auto; white-space: pre-wrap; }
