@@ -155,10 +155,11 @@ def sync_breadth(conn) -> tuple:
 
 
 def sync_binance_opt_iv(conn) -> tuple:
-    """币安期权近端 IV（XAU/XAG，24/7）→ opt_iv_near。30 分钟节流。
+    """币安期权近端 IV（XAU/XAG + BTC/ETH/SOL/BNB/XRP/DOGE，24/7）→ opt_iv_near。30 分钟节流。
 
-    这是 GLD/SLV 代理（美股 RTH 才更新）给不了的：夜间与周末的贵金属隐波。
-    仅参考展示，不算分位（期限逐日漂移，tenor_days 随值落库）。
+    贵金属：GLD/SLV 代理（美股 RTH 才更新）给不了的夜间与周末隐波。
+    加密：~3d 常数期限（总方差插值），持仓前端层（1-3 天持仓周期直接对应的定价）。
+    分位待历史自积累（期限逐日漂移，tenor_days 随值落库）。
     """
     import time as _t
 
