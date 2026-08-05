@@ -51,6 +51,9 @@ OVERVIEW_VOL1H_HOURS = 260          # 起步值，待校准；覆盖 POC 的 240
 OVERVIEW_TERM_FRESH_SEC = 2 * 3600  # 起步值，待校准；期限曲线超过两小时不作当前标注
 OVERVIEW_DVOL_RANK_WIN = 365        # 起步值，待校准；加密 IV30 历史分位观察窗
 OVERVIEW_DVOL_RANK_MIN = 120        # 起步值，待校准；不足样本不输出历史分位
+POLICY_SIGNAL_TF = "1h"
+POLICY_SIGNAL_OHLCV_LIMIT = 400     # 起步值，待校准；覆盖 cRSI 自适应带观察窗
+STALE_TF_MULTIPLIER = 1.5           # 起步值，待校准；超过 1.5 个周期视为陈旧
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -83,6 +86,18 @@ def _series(arr):
         f = float(v)
         out.append(round(f, 6) if math.isfinite(f) else None)
     return out
+
+
+def _bar_close_timing(open_ts_ms, tf: str) -> tuple[int | None, float | None]:
+    """由 K 线开盘时间得到收线时间与年龄；输入不可用时不猜。"""
+    try:
+        close_ts = int(open_ts_ms) + TF_SEC[tf] * 1000
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None, None
+    age_sec = time.time() - close_ts / 1000
+    if not math.isfinite(age_sec):
+        return None, None
+    return close_ts, age_sec
 
 
 def _tf_payload(conn, symbol: str, tf: str):
@@ -212,12 +227,17 @@ def _tf_payload(conn, symbol: str, tf: str):
     # 开盘 ts 算，恒定多报一整个周期（1d 上把 6.6 小时说成 30.6 小时）。
     # 阈值必须同步从 2.5×TF 收紧到 1.5×TF：old_age = new_age + TF，
     # old_age > 2.5×TF ⟺ new_age > 1.5×TF，判定边界完全不变（已逐分钟扫描验证）。
-    last_close_age = time.time() - (int(ts_ms[-1]) / 1000 + TF_SEC[tf])
+    _, last_close_age = _bar_close_timing(ts_ms[-1], tf)
     health = {
         "warmup": bool(len(df) < WARMUP_BARS),
-        "stale": bool(last_close_age > 1.5 * TF_SEC[tf]),
+        "stale": bool(
+            last_close_age is not None
+            and last_close_age > STALE_TF_MULTIPLIER * TF_SEC[tf]
+        ),
         "bars": int(len(df)),
-        "last_close_age_min": round(last_close_age / 60),
+        "last_close_age_min": (
+            round(last_close_age / 60) if last_close_age is not None else None
+        ),
     }
 
     # margin 由 analyze_timeframe 的当根原始规则树产出；确认层只折叠 state，
@@ -1053,6 +1073,25 @@ def _latest_state(conn, symbol: str, tf: str):
     return rows[-1]["state"] if rows else None
 
 
+def _latest_state_snapshot(conn, symbol: str, tf: str) -> dict:
+    """读取最新状态及其同一审计行的 warmup 标志。"""
+    row = conn.execute(
+        "SELECT ts,state,features FROM regime_history"
+        " WHERE symbol=? AND tf=? ORDER BY ts DESC LIMIT 1",
+        (symbol, tf),
+    ).fetchone()
+    if not row:
+        return {"ts": None, "state": None, "warmup": None}
+    try:
+        features = json.loads(row[2]) if row[2] else {}
+    except (TypeError, ValueError):
+        features = {}
+    warmup = features.get("warmup") if isinstance(features, dict) else None
+    if not isinstance(warmup, bool):
+        warmup = None
+    return {"ts": row[0], "state": row[1], "warmup": warmup}
+
+
 def _signal_ok(at, crsi_zone):
     """cRSI 极值区是否与当前位置所需方向一致；不可判定时返回 None。"""
     if crsi_zone is None:
@@ -1064,7 +1103,50 @@ def _signal_ok(at, crsi_zone):
     return None
 
 
-def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None):
+def _policy_signal_snapshot(conn, symbol: str, at, asof_ms) -> dict:
+    """只用截至当前 4h 收线时刻的 1h 已收线 cRSI，不回退 4h。"""
+    result = {
+        "signal_tf": POLICY_SIGNAL_TF,
+        "crsi": {"crsi": None, "pos": None, "zone": None},
+        "signal_ok": None,
+        "degraded": [],
+    }
+    if asof_ms is None:
+        result["degraded"].append("signal_asof_unavailable")
+        return result
+    frame = storage.get_ohlcv(
+        conn, symbol, POLICY_SIGNAL_TF, limit=POLICY_SIGNAL_OHLCV_LIMIT,
+    )
+    if not len(frame):
+        result["degraded"].append("crsi_1h_missing")
+        return result
+    try:
+        ts_ms = storage.ts_to_ms(frame["ts"])
+        # ohlcv.ts 是开盘时刻；只有收线时间不晚于 4h asof 的 1h bar 才能进入信号。
+        closed = np.asarray(ts_ms, dtype="int64") + TF_SEC[POLICY_SIGNAL_TF] * 1000 <= int(asof_ms)
+        frame = frame.loc[closed].reset_index(drop=True)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        result["degraded"].append("crsi_1h_unavailable")
+        return result
+    if not len(frame):
+        result["degraded"].append("crsi_1h_missing_at_asof")
+        return result
+
+    try:
+        crsi_last = crsi_features(frame).get("last") or {}
+    except Exception as exc:  # noqa: BLE001  信号缺失只降级，不回退 4h 或拖垮位置测量
+        result["degraded"].append(f"crsi_1h_unavailable:{type(exc).__name__}")
+        return result
+    result["crsi"] = {key: crsi_last.get(key) for key in ("crsi", "pos", "zone")}
+    if any(result["crsi"][key] is None for key in ("crsi", "pos", "zone")):
+        result["degraded"].append("crsi_1h_unavailable")
+        return result
+    result["signal_ok"] = _signal_ok(at, result["crsi"]["zone"])
+    return result
+
+
+def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None,
+                 tradeable=None, reason=None):
     """把本批明确列出的 regime × location 单元格映射成剧本展示名。"""
     kinds = set()
     if isinstance(zone, dict):
@@ -1084,6 +1166,10 @@ def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None):
     elif regime == "range" and at == "at_resistance":
         play = "S3 区间上沿做空"
 
+    if play is not None and tradeable is not True:
+        # 当前测量层最常见的未成立门槛是 wrong_approach；其他原因也如实随行。
+        reason_note = "" if reason in {None, "wrong_approach"} else f"；{reason}"
+        return f"WAIT · 路径未确认（P09{reason_note}） · 参考剧本：{play}"
     if play is not None and signal_ok is False:
         return f"{play}（位置到了信号没到）"
     return play if signal_ok is not None else None
@@ -1148,6 +1234,7 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
         "location": None,
         "crsi": {"crsi": None, "pos": None, "zone": None},
         "signal_ok": None,
+        "signal_tf": POLICY_SIGNAL_TF,
         "play": None,
         "zones": [],
         "vol_notes": [],
@@ -1174,6 +1261,7 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
     base["price"] = price
 
     vol1h = None
+    last_close_ms = None
     try:
         last_ts = int(storage.ts_to_ms(df["ts"].tail(1))[0])
         since_ms = last_ts - OVERVIEW_VOL1H_HOURS * 3_600_000
@@ -1212,15 +1300,17 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
     ))
     base["zones"] = enriched
 
-    crsi_last = crsi_features(df).get("last") or {}
-    base["crsi"] = {key: crsi_last.get(key) for key in ("crsi", "pos", "zone")}
-    if any(base["crsi"][key] is None for key in ("crsi", "pos", "zone")):
-        degraded.append("crsi_unavailable")
-    signal_ok = _signal_ok(location.get("at"), base["crsi"].get("zone"))
-    base["signal_ok"] = signal_ok
+    signal = _policy_signal_snapshot(
+        conn, symbol, location.get("at"), last_close_ms,
+    )
+    base["crsi"] = signal["crsi"]
+    base["signal_ok"] = signal["signal_ok"]
+    base["signal_tf"] = signal["signal_tf"]
+    degraded.extend(signal["degraded"])
     base["play"] = _policy_play(
-        regime_4h, location.get("at"), signal_ok,
+        regime_4h, location.get("at"), signal["signal_ok"],
         role_flipped=location.get("role_flipped"), zone=location.get("zone"),
+        tradeable=location.get("tradeable"), reason=location.get("reason"),
     )
 
     vol_input = None
@@ -1325,16 +1415,27 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
     if not len(df):
         return {"symbol": symbol, "reason": "4h_ohlcv_missing"}
 
-    regime_4h = _latest_state(conn, symbol, "4h")
+    last_ts = int(storage.ts_to_ms(df["ts"].tail(1))[0])
+    bar_close_ts, age_sec = _bar_close_timing(last_ts, "4h")
+    timing = {
+        "bar_close_ts": bar_close_ts,
+        "age_sec": int(age_sec) if age_sec is not None else None,
+    }
+    if age_sec is None:
+        return {"symbol": symbol, "reason": "bar_close_time_unavailable", **timing}
+    if age_sec > STALE_TF_MULTIPLIER * TF_SEC["4h"]:
+        return {"symbol": symbol, "reason": "stale_4h", **timing}
+
+    state_4h = _latest_state_snapshot(conn, symbol, "4h")
+    regime_4h = state_4h["state"]
     regime_1d = _latest_state(conn, symbol, "1d")
     if regime_4h is None:
-        return {"symbol": symbol, "reason": "regime_4h_missing"}
+        return {"symbol": symbol, "reason": "regime_4h_missing", **timing}
     # 1d 是**底座（背景）不是前提**：用户裁决「4h 决策 + 1d 底座」——决策周期是 4h，
     # 1d 只提供大方向背景。X2 扩容的新永续多数 1d 不足 90 根（每轮 39 个 warmup 告警），
     # 若因此整品种排除，会无谓丢掉半个宇宙（实测 37/74）。缺 1d 时降级标注，不作废 4h 判断。
 
     price = float(df["close"].iloc[-1])
-    last_ts = int(storage.ts_to_ms(df["ts"].tail(1))[0])
     since_ms = last_ts - OVERVIEW_VOL1H_HOURS * 3_600_000
     vol1h = storage.get_vol1h(conn, symbol, since_ms=since_ms)
     # 4h 价格只取已收线序列，POC 量流也截到同一根 4h 的收线时刻；否则形成中的
@@ -1344,29 +1445,54 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
         vol1h = vol1h[vol1h["ts"] < last_close_ms].reset_index(drop=True)
     levels = extract_levels(df, vol1h=vol1h)
     if levels.get("atr") is None:
-        return {"symbol": symbol, "reason": "no_atr"}
+        return {"symbol": symbol, "reason": "no_atr", **timing}
     if levels.get("zones") is None:
         reasons = levels.get("degraded") or ["no_levels"]
-        return {"symbol": symbol, "reason": ",".join(reasons)}
+        return {"symbol": symbol, "reason": ",".join(reasons), **timing}
 
     location = locate(
         price, levels["atr"], levels["zones"], regime_4h,
         prices=df["close"].tail(APPROACH_BARS).to_numpy(),
     )
     if location.get("at") is None:
-        return {"symbol": symbol, "reason": location.get("reason") or "location_unavailable"}
+        return {
+            "symbol": symbol,
+            "reason": location.get("reason") or "location_unavailable",
+            **timing,
+        }
 
-    crsi_last = crsi_features(df).get("last") or {}
-    if any(crsi_last.get(key) is None for key in ("crsi", "pos", "zone")):
-        return {"symbol": symbol, "reason": "crsi_unavailable"}
-    crsi = {key: crsi_last[key] for key in ("crsi", "pos", "zone")}
-    signal_ok = _signal_ok(location["at"], crsi["zone"])
+    degraded = list(levels.get("degraded") or [])
+    degraded.extend(location.get("degraded") or [])
+    signal = _policy_signal_snapshot(conn, symbol, location["at"], bar_close_ts)
+    degraded.extend(signal["degraded"])
 
+    vol_input = None
     try:
         vol_input = _overview_vol_inputs(conn, symbol)
         notes = vol_notes(symbol, price, **vol_input)
-    except Exception:  # noqa: BLE001  风险补充缺失不拖垮已成立的位置测量
+    except Exception as exc:  # noqa: BLE001  风险补充缺失不拖垮已成立的位置测量
         notes = []
+        degraded.append(f"vol_inputs_unavailable:{type(exc).__name__}")
+
+    enriched = [
+        _policy_zone_payload(zone, price, levels["atr"], regime_4h)
+        for zone in levels["zones"] if isinstance(zone, dict)
+    ]
+    stop_check = None
+    side = _policy_side(regime_4h, location)
+    if side is not None:
+        structural = find_structural_stop(
+            location, enriched, price, levels["atr"], side,
+        )
+        if structural is None:
+            degraded.append("structural_stop_unavailable")
+        else:
+            iv3 = vol_input.get("iv3") if vol_input else None
+            width = check_stop_vs_iv(structural["stop_dist_pct"], iv3)
+            if width is None:
+                degraded.append("iv3_missing_for_stop_check")
+            else:
+                stop_check = {**structural, **width}
 
     zone = _overview_zone(location.get("zone"))
     item = {
@@ -1379,18 +1505,25 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
         "at": location["at"],
         "role": location.get("role"),
         "meaning": location.get("meaning"),
-        "tradeable": bool(location.get("tradeable")),
+        "tradeable": location.get("tradeable") is True,
         "approach": location.get("approach"),
         "role_flipped": location.get("role_flipped"),
         "zone": zone,
         "dist_atr": location.get("dist_atr"),
-        "crsi": crsi,
-        "signal_ok": signal_ok,
+        "crsi": signal["crsi"],
+        "signal_ok": signal["signal_ok"],
+        "signal_tf": signal["signal_tf"],
         "play": _policy_play(
-            regime_4h, location["at"], signal_ok,
+            regime_4h, location["at"], signal["signal_ok"],
             role_flipped=location.get("role_flipped"), zone=zone,
+            tradeable=location.get("tradeable"), reason=location.get("reason"),
         ),
         "vol_note": "；".join(notes) if notes else None,
+        "vol_notes": list(notes),
+        "stop_check": stop_check,
+        "degraded": list(dict.fromkeys(degraded)),
+        "warmup": state_4h["warmup"],
+        **timing,
         "_vol_notes": notes,
     }
     return {"symbol": symbol, "item": item}
@@ -1399,7 +1532,9 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
 _OVERVIEW_FULL_KEYS = (
     "symbol", "display", "regime_4h", "regime_1d", "price", "atr",
     "at", "role", "meaning", "tradeable", "approach", "role_flipped",
-    "zone", "dist_atr", "crsi", "signal_ok", "play", "vol_note",
+    "zone", "dist_atr", "crsi", "signal_ok", "signal_tf", "play",
+    "vol_note", "vol_notes", "stop_check", "degraded", "warmup",
+    "bar_close_ts", "age_sec",
 )
 
 
@@ -1412,18 +1547,28 @@ def _overview_lite(item: dict) -> dict:
         "meaning": item["meaning"],
         "dist_atr": item["dist_atr"],
         "crsi": {"zone": item["crsi"]["zone"]},
+        "signal_ok": item.get("signal_ok"),
+        "signal_tf": item.get("signal_tf"),
+        "stop_check": item.get("stop_check"),
+        "warmup": item.get("warmup"),
+        "bar_close_ts": item.get("bar_close_ts"),
+        "age_sec": item.get("age_sec"),
     }
 
 
 def _partition_overview(scans: list[dict]) -> dict:
-    opportunity, near, risk, middle, unavailable = [], [], [], [], []
+    armed, wait_signal, near, risk, middle, unavailable = [], [], [], [], [], []
     for scan in scans:
         item = scan.get("item")
         if item is None:
-            unavailable.append({
+            unavailable_item = {
                 "symbol": scan.get("symbol"),
                 "reason": scan.get("reason") or "measurement_unavailable",
-            })
+            }
+            for key in ("bar_close_ts", "age_sec"):
+                if scan.get(key) is not None:
+                    unavailable_item[key] = scan[key]
+            unavailable.append(unavailable_item)
             continue
 
         notes = item.get("_vol_notes") or []
@@ -1436,7 +1581,11 @@ def _partition_overview(scans: list[dict]) -> dict:
             })
 
         if item["tradeable"] is True:
-            opportunity.append({key: item.get(key) for key in _OVERVIEW_FULL_KEYS})
+            full = {key: item.get(key) for key in _OVERVIEW_FULL_KEYS}
+            if item.get("signal_ok") is True:
+                armed.append(full)
+            else:
+                wait_signal.append(full)
         elif item["at"] in {"at_support", "at_resistance"}:
             near.append(_overview_lite(item))
         elif item["at"] == "middle_zone":
@@ -1444,22 +1593,32 @@ def _partition_overview(scans: list[dict]) -> dict:
         else:
             unavailable.append({"symbol": item["symbol"], "reason": "location_unavailable"})
 
-    dist_key = lambda row: (float("inf") if row.get("dist_atr") is None
-                            else row["dist_atr"], row["symbol"])
-    opportunity.sort(key=dist_key)
+    candidate_key = lambda row: (
+        0 if row.get("signal_ok") is True else 1,
+        float("inf") if row.get("dist_atr") is None else row["dist_atr"],
+        row["symbol"],
+    )
+    dist_key = lambda row: (
+        float("inf") if row.get("dist_atr") is None else row["dist_atr"],
+        row["symbol"],
+    )
+    armed.sort(key=candidate_key)
+    wait_signal.sort(key=candidate_key)
     near.sort(key=dist_key)
     risk.sort(key=lambda row: row["symbol"])
     middle.sort(key=lambda row: row["symbol"])
     unavailable.sort(key=lambda row: row["symbol"] or "")
     return {
         "counts": {
-            "opportunity": len(opportunity),
+            "armed": len(armed),
+            "wait_signal": len(wait_signal),
             "near": len(near),
             "risk": len(risk),
             "middle": len(middle),
             "unavailable": len(unavailable),
         },
-        "opportunity": opportunity,
+        "armed": armed,
+        "wait_signal": wait_signal,
         "near": near,
         "risk": risk,
         "middle": middle,
@@ -1471,7 +1630,7 @@ _OVERVIEW_CACHE = {"at": 0.0, "payload": None}
 
 
 def overview_payload() -> dict:
-    """全宇宙横截面扫描：4h 决策、1d 底座，按机会优先分层。"""
+    """全宇宙横截面扫描：4h 决策、1d 底座，按门槛分层。"""
     now = time.time()
     cached = _OVERVIEW_CACHE["payload"]
     if cached is not None and now - _OVERVIEW_CACHE["at"] < OVERVIEW_TTL_SEC:
@@ -1493,8 +1652,17 @@ def overview_payload() -> dict:
     finally:
         conn.close()
 
+    bar_closes = []
+    for scan in scans:
+        value = scan.get("bar_close_ts")
+        if value is None:
+            value = (scan.get("item") or {}).get("bar_close_ts")
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            bar_closes.append(int(value))
+
     out = _deep_clean({
         "updated_at": int(now * 1000),
+        "asof": min(bar_closes) if bar_closes else None,
         "tf": "4h",
         **sections,
         "heartbeat": heartbeat,

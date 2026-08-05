@@ -791,7 +791,7 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
 
 
-def test_iv_term_build_codes_incremental_and_reports_fails():
+def test_iv_term_build_codes_incremental_and_reports_fails(monkeypatch):
     """build_codes 增量补全 + 失败留痕（2026-08-05 首个 RTH 限频事故的回归）。
 
     事故：PACE=0.5 恰等于 moomoo 限额 → 61 品种散布式失败，只建成 26 个；
@@ -799,9 +799,14 @@ def test_iv_term_build_codes_incremental_and_reports_fails():
     修法三条：降速、跨轮分批增量补、失败上报调用方。
     """
     from regime import stock_iv_term
+    from types import SimpleNamespace
 
     assert stock_iv_term.PACE >= 0.6, "PACE 必须留出限频余量（moomoo 60次/30秒）"
     assert stock_iv_term.BUILD_BATCH < 61, "单轮建链必须分批，不得一轮打满全宇宙"
+
+    # 纯单元测试只消费 RET_OK；避免真实 SDK 导入时向沙箱外 HOME 写日志。
+    monkeypatch.setitem(sys.modules, "moomoo", SimpleNamespace(RET_OK=0))
+    monkeypatch.setattr(stock_iv_term, "PACE", 0)
 
     class _Ctx:
         """只对 want 里的品种给链；其余模拟限频失败（ret!=0）。"""

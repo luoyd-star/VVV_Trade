@@ -28,6 +28,11 @@ const view = {
 };
 const pad = (n) => String(n).padStart(2, '0');
 
+function utcDateTime(date) {
+  return `${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} `
+    + `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC`;
+}
+
 function stateMeta(state) {
   return STATE[state] || { label: state || '状态不可用', color: '#7c8595' };
 }
@@ -71,13 +76,13 @@ function appendText(parent, className, text) {
   return el;
 }
 
-function renderOpportunity(items) {
-  const host = $('opportunity');
+function renderCandidates(hostId, items, emptyText) {
+  const host = $(hostId);
   host.replaceChildren();
   if (!items.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-normal';
-    empty.textContent = '当前无符合条件的机会位——这是常态，不是故障';
+    empty.textContent = emptyText;
     host.appendChild(empty);
     return;
   }
@@ -87,6 +92,7 @@ function renderOpportunity(items) {
     top.className = 'opp-top';
     appendText(top, 'opp-symbol', item.symbol);
     if (item.display) appendText(top, 'opp-display', item.display);
+    if (item.warmup === true) appendText(top, 'warmup-badge', '预热');
     const regime = appendText(top, 'opp-regime', stateMeta(item.regime_4h).label);
     regime.style.color = stateMeta(item.regime_4h).color;
     card.appendChild(top);
@@ -95,11 +101,17 @@ function renderOpportunity(items) {
     appendText(card, 'opp-location',
       `${zoneLabel(item)} · 距 ${fmtNumber(item.dist_atr)}ATR${touches}`);
     appendText(card, 'opp-crsi',
-      `cRSI ${item.crsi.zone}（${fmtNumber(item.crsi.crsi, 1)}） · 1d ${stateMeta(item.regime_1d).label}`);
+      `${item.signal_tf || '信号周期不可用'} cRSI ${item.crsi.zone || '不可用'}`
+      + `（${fmtNumber(item.crsi.crsi, 1)}） · 1d ${stateMeta(item.regime_1d).label}`);
 
     const play = appendText(card, `opp-play${item.signal_ok ? '' : ' waiting'}`,
       item.play ? `建议关注 · ${item.play}` : '建议关注 · 暂无匹配剧本');
     play.title = '位置与信号共振后才满足 policy P06；仍需统一风控门槛';
+    if (item.stop_check) {
+      appendText(card, 'opp-stop',
+        `止损宽度 ${item.stop_check.verdict || '不可判定'} · 比值 ${fmtNumber(item.stop_check.ratio)}`
+        + `${item.stop_check.note ? ` · ${item.stop_check.note}` : ''}`);
+    }
     if (item.vol_note) appendText(card, 'opp-risk', `⚠ ${item.vol_note}`);
     host.appendChild(card);
   });
@@ -191,12 +203,20 @@ function renderHeartbeat(lanes) {
 function render(data) {
   view.data = data;
   const counts = data.counts || {};
-  $('oppCount').textContent = counts.opportunity ?? '—';
+  $('armedCount').textContent = counts.armed ?? '—';
+  $('waitSignalCount').textContent = counts.wait_signal ?? '—';
   $('nearCount').textContent = counts.near ?? '—';
   $('riskCount').textContent = counts.risk ?? '—';
   $('middleCount').textContent = counts.middle ?? '—';
   $('unavailableCount').textContent = counts.unavailable ?? '—';
-  renderOpportunity(data.opportunity || []);
+  renderCandidates(
+    'armed', data.armed || [],
+    '当前没有“位置 + 信号”同时成立的候选——这是常态，不是故障',
+  );
+  renderCandidates(
+    'waitSignal', data.wait_signal || [],
+    '当前没有等待信号的位置候选',
+  );
   renderCompact('near', data.near || [], '当前无接近但尚未满足门槛的关键位');
   renderRisk(data.risk || []);
   renderCompact('middle', data.middle || [], '当前无中间区域品种');
@@ -204,9 +224,14 @@ function render(data) {
   renderHeartbeat(data.heartbeat || []);
   const updated = data.updated_at ? new Date(data.updated_at) : null;
   $('updated').textContent = updated && !Number.isNaN(updated.getTime())
-    ? `更新 ${pad(updated.getUTCHours())}:${pad(updated.getUTCMinutes())}:${pad(updated.getUTCSeconds())} UTC`
-    : '更新时间不可用';
+    ? `计算 ${utcDateTime(updated)}`
+    : '计算时间不可用';
   $('updated').className = 'badge ok';
+  const asof = data.asof ? new Date(data.asof) : null;
+  $('asof').textContent = asof && !Number.isNaN(asof.getTime())
+    ? `数据截至 ${utcDateTime(asof)}`
+    : '数据截至不可用';
+  $('asof').className = 'badge';
 }
 
 async function load() {
@@ -225,6 +250,7 @@ async function load() {
     $('loadError').hidden = false;
     $('updated').textContent = '刷新失败';
     $('updated').className = 'badge bad';
+    $('asof').textContent = '数据截至不可用';
   } finally {
     if (seq === view.loadSeq) view.nextRefresh = Date.now() + REFRESH_MS;
   }

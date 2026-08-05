@@ -81,8 +81,9 @@ age 是最后落库年龄（OpenD 为网关探活、无落库年龄）；采集�
 时间语义：<panel> 首行是**当前时刻**，面板数据均为此刻快照；历史对话每条开头的
 [MM-DD HH:MM UTC·距今] 前缀是**该消息的发生时刻**——历史回答里引用的读数只在其时点有效，
 与当前 <panel> 数字冲突时以 <panel> 为准，引用历史结论必须显式说明其时点。
-总览 scope 的 <panel> 是 4h 决策/1d 底座的横截面：counts 为机会/接近/风险/观望/不可用数量；
-opportunity 逐条含 symbol、regime、位置、cRSI 共振、剧本和波动率提示；risk 只列风险标注，
+总览 scope 的 <panel> 是 4h 决策/1d 底座的横截面：counts 将位置候选拆为
+armed（位置+信号共振）与 wait_signal（位置成立、等待信号），另含接近/风险/观望/不可用数量；
+armed/wait_signal 逐条含 symbol、regime、位置、1h cRSI、剧本、止损宽度校验和波动率提示；risk 只列风险标注，
 middle（观望）只给数量，不应把 WAIT 误读成数据缺失。
 </panel_legend>"""
 
@@ -224,6 +225,28 @@ def render_context(p: dict) -> str:
         if b:
             parts.append(f"突破{'↑' if b['dir'] == 'up' else '↓'}量分位{b['vol_rank']}")
         lines.append(" ".join(parts))
+
+    policy = p.get("policy") or {}
+    if policy:
+        location = policy.get("location") or {}
+        lines.append(
+            "Policy测量: "
+            f"regime_4h={policy.get('regime_4h')} regime_1d={policy.get('regime_1d')} | "
+            f"location at={location.get('at')} meaning={location.get('meaning')} "
+            f"role_flipped={location.get('role_flipped')} dist_atr={location.get('dist_atr')} "
+            f"approach={location.get('approach')} | "
+            f"signal_ok={policy.get('signal_ok')} signal_tf={policy.get('signal_tf')} | "
+            f"play={policy.get('play')}"
+        )
+        stop = policy.get("stop_check") or {}
+        lines.append(
+            "Policy GATE1止损: "
+            f"verdict={stop.get('verdict')} ratio={stop.get('ratio')} note={stop.get('note')}"
+        )
+        vol_notes = policy.get("vol_notes") or []
+        degraded = policy.get("degraded") or []
+        lines.append("Policy vol_notes: " + ("；".join(map(str, vol_notes)) or "无"))
+        lines.append("Policy degraded: " + ("；".join(map(str, degraded)) or "无"))
     dv = p.get("dvol")
     if dv:
         dvol_parts = []
@@ -401,16 +424,27 @@ def render_overview_context(ov: dict) -> str:
         "——下方全部数据为此刻横截面快照",
         f"总览口径: {ov.get('tf') or '不可用'} 决策 · 1d 底座",
         "分层统计: "
-        f"机会 {count_text('opportunity')} · "
+        f"位置+信号共振 {count_text('armed')} · "
+        f"等待信号 {count_text('wait_signal')} · "
         f"接近 {count_text('near')} · "
         f"风险 {count_text('risk')} · "
         f"观望 {count_text('middle')} · "
         f"不可用 {count_text('unavailable')}",
     ]
-    opportunities = ov.get("opportunity") or []
-    if opportunities:
-        lines.append("机会位（逐条）:")
-        for item in opportunities:
+
+    asof = ov.get("asof")
+    if isinstance(asof, (int, float)):
+        lines.append(
+            "数据截至: " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(asof / 1000))
+        )
+
+    def append_candidates(key: str, title: str) -> None:
+        candidates = ov.get(key) or []
+        if not candidates:
+            lines.append(f"{title}: {count_text(key)}（WAIT 是常态）")
+            return
+        lines.append(f"{title}（逐条）:")
+        for item in candidates:
             crsi = item.get("crsi") or {}
             signal = (
                 "位置+信号共振" if item.get("signal_ok") is True
@@ -423,14 +457,27 @@ def render_overview_context(ov: dict) -> str:
                 f"- {item.get('symbol')} | 4h={item.get('regime_4h')} "
                 f"1d={item.get('regime_1d')} | 位置={item.get('at')}"
                 f"({item.get('meaning')},距{dist_text},来向{item.get('approach')}) | "
-                f"信号=cRSI {crsi.get('zone')}({crsi.get('crsi')})/{signal} | "
+                f"信号={item.get('signal_tf')} cRSI {crsi.get('zone')}"
+                f"({crsi.get('crsi')})/{signal} | "
                 f"剧本={item.get('play') or '无匹配剧本'}"
             )
-            if item.get("vol_note"):
-                line += f" | 波动率提示={item['vol_note']}"
+            stop = item.get("stop_check") or {}
+            line += (
+                " | stop_check="
+                f"verdict={stop.get('verdict')},ratio={stop.get('ratio')},note={stop.get('note')}"
+            )
+            vol_notes = item.get("vol_notes") or []
+            if vol_notes:
+                line += f" | 波动率提示={'；'.join(map(str, vol_notes))}"
+            if item.get("warmup") is True:
+                line += " | warmup=true"
+            degraded = item.get("degraded") or []
+            if degraded:
+                line += f" | degraded={'；'.join(map(str, degraded))}"
             lines.append(line)
-    else:
-        lines.append(f"机会位: {count_text('opportunity')}（WAIT 是常态）")
+
+    append_candidates("armed", "位置+信号共振")
+    append_candidates("wait_signal", "位置候选（等待信号）")
 
     risks = ov.get("risk") or []
     if risks:

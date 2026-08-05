@@ -1,0 +1,1483 @@
+{
+  "summary": "对 12 份 policy 层审查报告逐条对抗核验",
+  "agentCount": 12,
+  "logs": [
+    "核验 12/12 路，116 条：{\"CONFIRMED\":60,\"CORRECTED\":48,\"REFUTED\":7,\"UNVERIFIABLE\":1}；成立条目严重度：{\"P2\":76,\"P1\":32}"
+  ],
+  "result": {
+    "stats": {
+      "CONFIRMED": 60,
+      "CORRECTED": 48,
+      "REFUTED": 7,
+      "UNVERIFIABLE": 1
+    },
+    "sev": {
+      "P2": 76,
+      "P1": 32
+    },
+    "routes": [
+      {
+        "route": "路线1（policy 原文保真度）对抗复核。方法：①逐行读 eric-policy.md 与 regime/policy/{location,levels,stopcheck,volnote}.py、dashboard.py 的 _signal_ok/_policy_play/_policy_side/_build_policy_payload/_scan_overview_symbol/_partition_overview、web/{overview.js,app.js,overview.html}、regime/agent.py 的 render_overview_context/system_brief/PANEL_LEGEND、hermes_system.md；②核对报告全部 26 处行号引用（policy 原文 10 处全对，代码 2 处微偏：location.py:123/127 实际应为 125/130）；③.venv/bin/python 只读实跑 overview_payload() 与 15 个品种的 build_dashboard()，合成分支复现\"新突破/新跌破\"与三类 eligible 缺口；④sqlite3 只读核对最新 4h 状态分布；⑤对照 docs/DESIGN_POLICY_LAYER_20260805.md 与 dd9c10c/6e7946a 两条施工 commit 的用户裁决与分期（期0 只装配输入、position/account 层不建、只用 cRSI、不做回测、stopcheck「只警告不改变 play」是明写裁决），把\"下一期功能\"与\"本期缺陷\"分开。结论：11 条无一条够 P0 门槛——全系统检索 OPEN_LONG/OPEN_SHORT/RISK_CHECK/PARTIAL_TP/TRAIL_STOP 全部 NO_MATCH，系统从不输出动作动词、不下单、不用中性值伪装缺失；失真集中在\"展示层剧本名不消费 tradeable/GATE 结果\"与\"GATE1 结果不进总览/Hermes\"两处，判 P1。",
+        "verdicts": [
+          {
+            "claim": "§2.1/§2.2/§2.3/§2.5 未形成逐行 condition→action 实现，只有五类位置语义 + 六个 play 名称",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "evidence": "location.py:137 _semantics 确为 5 个分支（pullback_long/reduce_long_not_open_short/bounce_short/deep_long_requires_second_confirmation/prior_low_support_not_tradeable + range/squeeze/high_vol_chop）；dashboard.py:1067 _policy_play 确只有 5 个 if 分支产出 6 个字符串（S5/S4/S1/S13/S3下沿/S3上沿）。全库检索 OPEN_LONG/OPEN_SHORT 均无匹配。",
+            "correction": "事实成立但不构成缺陷。docs/DESIGN_POLICY_LAYER_20260805.md §3.7 分期表明写：期0 只装配 PolicyInput（mapping+location+signals）「不出任何动作」，engine.py（§2矩阵+§3门槛+§5持仓+§6否决）在期1 之后；commit dd9c10c 的用户裁决亦为「regime 直接复用五态不做映射、signals 只用 cRSI、不做回测」。这是分期范围而非保真度失效，自称 P1 偏高。",
+            "fix_hint": "保持现状；但把「本期覆盖了原文哪几行、未覆盖哪几行」写成一张对照表进 docs，避免下一轮审查反复把分期当缺口。",
+            "kind": "原文覆盖/分期范围"
+          },
+          {
+            "claim": "五道开仓 GATE 无一道能阻断 play：G1/G4 只是测量或文案，G2/G3/G5 完全不存在",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "evidence": "独立复现 build_dashboard('JPM-USDT')：play='S3 区间上沿做空'、signal_ok=True，同时 stop_check={'verdict':'too_tight','ratio':0.1902}，play 不被回写。dashboard.py:1221 先算 play、1233 才算 side/止损，顺序确如报告所述。_partition_overview（dashboard.py:1438）确实只看 item['tradeable']。account/position_building/emotional_flags/RISK_CHECK 全库 NO_MATCH。",
+            "correction": "三处需修正。①「G4 只是文案」错：_signal_ok 是真三态判定，signal_ok is None 时 _policy_play 直接返回 None（play 不出），signal_ok is False 时强制加「（位置到了信号没到）」后缀——是弱执行不是纯文案。②G2/G3/G5 依赖 account/position/position_building，本期明确不建，记为「缺陷」不成立。③「stop_check 不回写 play」是 commit 6e7946a 明写的施工裁决「**只警告不改变 play**」，不是遗漏。真正有害的残余只有一条：GATE1 的 stop_check 只存在于详情页，overview payload 与 Hermes 上下文完全没有该字段（见 missed b/c）。降为 P1。",
+            "fix_hint": "最小修：把 stop_check 并进 _scan_overview_symbol 与 _OVERVIEW_FULL_KEYS，让总览卡片与 render_overview_context 随行输出止损宽度判定；play 是否降级为 WAIT 留待 engine 期，但「有 play 无 GATE1 结果」的信息不对称必须先补。",
+            "kind": "GATE/展示-判定分离"
+          },
+          {
+            "claim": "tradeable 只代表位置候选却直接进入「机会位」，今天 15 个机会中 13 个信号未共振",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "evidence": "实跑数字逐个复现：counts={'opportunity':15,...}，signal_ok Counter({False:13, True:2})，13 条 play 全部带「（位置到了信号没到）」。location.py:3-5 docstring 确实自述 tradeable 不代表已过信号与风控。",
+            "correction": "「直接进入机会位」这句夸大了隐蔽性。实际三处都有披露：overview.html:85 分区副标写「位置候选」；overview.js renderOpportunity 给未共振卡片挂 class 'waiting'、play 文本自带「位置到了信号没到」、title 写「位置与信号共振后才满足 policy P06；仍需统一风控门槛」；agent.py:410-427 注入 Hermes 时逐条写「信号未共振」。这是分区命名与计数口径问题，不是把未共振伪装成共振。降为 P2。",
+            "fix_hint": "把分区标题从「机会位」改成「位置候选」，或把 counts 拆成 opportunity_signal_ok / opportunity_location_only 两个数，Hermes 的「分层统计」行同步拆——目前 Hermes 只看到「机会 15 个」这个聚合数。",
+            "kind": "分区命名/计数口径"
+          },
+          {
+            "claim": "P09 右侧确认未建模：禁买突破/禁赌破位的状态仍在详情页显示 S5/S1，S8 完全没实现",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "evidence": "独立合成复现：zone(pivot_high,origin_role=resistance) + 价格 98→99.5→100.2 + trend_up → locate 返回 at_support/role_flipped=True/approach=from_below/tradeable=False/reason=wrong_approach，而 _policy_play 返回 'S5 突破回踩加仓'；镜像的新跌破返回 'S1 反弹至压力做空'。_policy_play 签名（dashboard.py:1067）确实不收 tradeable/reason/approach，app.js:431 conclusion=p.play 无条件取用。S8 全库 NO_MATCH。",
+            "correction": "两处修正。①泄漏范围只在详情页：总览侧 tradeable=False 会落入 near 分区，_overview_lite 根本不带 play 字段，所以主页与 Hermes 无此泄漏。②详情页也不是零披露——app.js:470-476 的 policyApproach 行对 trend_up/at_support 与 trend_down/at_resistance 两格会打印「未满足该剧本要求（需要从上方回踩）」，恰好覆盖 role_flipped 可能出现的全部单元格；问题是标题结论行仍写「建议关注 · S5 突破回踩加仓」，与两行之下的路径判定自相矛盾。③「原支撑反压确认应标 S8、不能冒充 S1」被原文推翻：eric-policy.md:72 的 S1 行明确把「原支撑变压力」列为 S1 的压力来源之一，标 S1 是保真的。",
+            "fix_hint": "_policy_play 增收 location（或至少 tradeable/reason），tradeable=False 时结论行返回 'WAIT · 路径未确认（P09）' 并把剧本名降级为灰字参考；不必新造 S8 分支。",
+            "kind": "展示层泄漏/P09"
+          },
+          {
+            "claim": "S13 只判定「EMA100/200附近 + 当前一次超卖」，原文的第二次、1/2-1/3 标准风险仓、不接第一刀、DCA 均未执行",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "evidence": "dashboard.py:1056 _signal_ok 确实只读末根 cRSI zone；dashboard.py:1079 S13 分支确实只查 kinds & {'ema100','ema200'}；函数签名确为 (regime, at, signal_ok, role_flipped, zone)。position_building/emotional_flags 全库 NO_MATCH。",
+            "correction": "三处修正。①「第二次」并非无痕迹——展示串本身就是「S13 深跌逆势做多（需二次确认·半仓）」，是未机器执行而非未告知。②DCA / 1/2-1/3 仓位 / 不接第一刀 全部依赖 position_building 与 account，属 policy §4/§5，本期明确不建设，记为缺陷不成立。③残余的真问题只有一条且报告说对了：「半仓」是原文「顺势的 1/2-1/3」（eric-policy.md:77）的失真缩写，在交易语境下极易被读成账户资金 50%。整体降为 P2。",
+            "fix_hint": "只改字符串：「S13 深跌逆势做多（需第二次超卖确认 · 仓位为顺势单的 1/3-1/2）」。二次确认的 episode 计数留给 signals 层。",
+            "kind": "参数措辞失真"
+          },
+          {
+            "claim": "trend_up 漏掉结构前低支撑、trend_down 漏掉结构前高与 EMA100/200 压力，原文认可的位置被判成 middle_zone",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "evidence": "独立复现三例，全部返回 at='middle_zone'/meaning='middle_zone_veto'：(pivot_low support, trend_up)、(pivot_high resistance, trend_down)、(ema200 resistance, trend_down)；对照组 (ema21 support, trend_up) 返回 tradeable=True。原文依据成立：eric-policy.md:60 的 S4 写「回踩至 EMA21/55 **或结构前低**」，:72 的 S1 写「结构前高/EMA/原支撑变压力」。",
+            "correction": "行号微偏：trend_up 支撑判据实际在 location.py:125（报告写 123，是 if regime 那行），trend_down 压力判据实际在 location.py:130（报告写 127）。性质需补一句：这是漏检（假阴性），方向保守，不会产生错误的开仓建议——今日实测后果是 trend_up 21 个品种 0 机会、trend_down 2 个品种 0 机会。另需注意 _eligible 的 docstring 自称「用户裁决的 regime × 来源表」，须先向用户确认这是裁决还是遗漏，再动表。",
+            "fix_hint": "若确认为遗漏：trend_up support 补未翻转 _LOW_KINDS；trend_down resistance 补未翻转 _HIGH_KINDS 与处于 resistance 角色的 _SLOW_EMAS。改动会改变全宇宙 tradeable 分布，必须配「来源×角色×翻转」全组合测试并重跑实测对照。",
+            "kind": "位置矩阵覆盖缺口"
+          },
+          {
+            "claim": "policy payload 不消费用户持仓，§2.1 的 WAIT/MANAGE 分流与结构前高的 PARTIAL_TP/TRAIL 无法执行",
+            "status": "REFUTED",
+            "severity": "P2",
+            "evidence": "payload keys 实测为 ['atr','crsi','degraded','location','play','price','regime_1d','regime_4h','signal_ok','stop_check','tf','vol_notes','zones']，确无持仓；PARTIAL_TP/TRAIL_STOP 全库 NO_MATCH。",
+            "correction": "事实对，定性错。position/account 状态层本期明确不建设（DESIGN_POLICY_LAYER §3.5 定为 Phase 1 手工录入 + §3.7 期1 才跑 §5），把未开工的下一期当缺陷不成立。更关键的是：空仓这一半原文动作**已经正确实现**——trend_up + at_resistance 走 _semantics 返回 ('reduce_long_not_open_short', tradeable=False)，前端 MEANING 映射为「结构压力位，仅关注持仓风险」，正是 §2.1 第 6 行「空仓→WAIT、且不得转成开空」的行为。缺的只是持多那一半。",
+            "fix_hint": "不改代码。等 position 层落地后再接 MANAGE 分支；现在唯一值得做的是在详情页把「本系统尚无持仓输入，§5 持仓管理未运行」写成一条常驻降级标注，避免用户以为 policy 卡已覆盖持仓。",
+            "kind": "下一期功能/范围外"
+          },
+          {
+            "claim": "进入 squeeze 时应触发的一次性 S14 RISK_CHECK 完全缺失",
+            "status": "REFUTED",
+            "severity": "P2",
+            "evidence": "location.py:150 squeeze 确返回 ('wait_for_confirmed_breakout', False, None)；RISK_CHECK 全库 NO_MATCH。SQL 复现最新 4h 状态分布：range 26 / trend_up 21 / high_vol_chop 19 / squeeze 4 / trend_down 2，squeeze=4 与报告一致。",
+            "correction": "定性错，且报告自身已给出反证。eric-policy.md:101-102 的 §2.5 是两段式：RISK_CHECK 的三项检查（仓位≤计划值 / 止损已设 / 未放宽）全部读 position 与计划仓位，本期无此输入；而第二行「风控校验完成后 → WAIT」正是当前 squeeze 的输出（tradeable=False + wait_for_confirmed_breakout）。也就是说，在「用户空仓」这个本期唯一可表达的状态下，当前输出与原文一致。报告末句「风险检查需要 position/计划仓位/原止损信息」等于承认这条不该判 P0。",
+            "fix_hint": "随 position 层一起做边沿事件；不必单独提前。若要现在有产出，可在 squeeze 卡片加一句静态提示「policy §2.5：预警本身永远不是入场理由」。",
+            "kind": "下一期功能/范围外"
+          },
+          {
+            "claim": "play 只有字符串：止盈目标、最低 RR、S3 机械退出被静默省略，S13 把 1/2-1/3 缩成「半仓」",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "evidence": "逐个核对 15 个机会的 play，确实全部是裸字符串；payload keys 实测无 target/RR/exit_route/size（详情页与总览两处都无）。原文依据成立：eric-policy.md:60/72 要求 RR≥1.5 + 目标=结构位，:83-84 要求 S3 固定 1.5-2R 机械平仓、边沿 2-3R。",
+            "correction": "补两点。①目标与 RR 并非不可算——zones 列表与 stop_check 都已在同一个 payload 里，缺的是拼装，不像 §4/§5 那样卡在缺输入，所以这条比其他「未实现」更该做。②但 Route A/B 锁定属 §3 退出路线层，与 engine 同期；本期只补 target/RR 是可行的最小集。③「半仓」与第 5 条重复计数。",
+            "fix_hint": "play 升为结构对象 {policy_id, side, stop, target, rr, note}；target 取同侧最近的对向结构 zone，rr=|target-price|/|price-stop|；算不出 target/RR 时返回 None 并显式标注「RR 不可计算」，不要展示裸方向词。",
+            "kind": "Play 参数缺失"
+          },
+          {
+            "claim": "Hermes 注入未经 GATE 的机会/剧本，系统提示要求「不机械等待」，且无 P20 消息否决、P21 满仓否决、系统不下单约束",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "evidence": "hermes_system.md:17 原文确为「即使存在不确定性，也要给出当下最优行动，而不是机械地说\"再等等\"」，与 eric-policy.md:7「大多数时刻的正确动作是 WAIT——这是本政策的特征，不是缺陷」构成真实张力。agent.py:665 的 system 组装 = load_system() + system_brief() + overview + gap_note + PANEL_LEGEND + panel；我逐段核对 system_brief（agent.py:445-505，只有版本/品种/数据/文档/git log）与 PANEL_LEGEND（agent.py:44-87），确无任何 policy 否决层或「只给建议不下单」的约束。",
+            "correction": "「注入的是未经 GATE 的机会/剧本」不完整。render_overview_context（agent.py:410-427）逐条注入了「信号未共振/位置+信号共振/信号不可判定」，play 串本身带「（位置到了信号没到）」，且 PANEL_LEGEND 末段与空机会分支都写了「WAIT 是常态」「不应把 WAIT 误读成数据缺失」。真正的空洞是 GATE1：stop_check 完全不进总览 payload、也就完全不进 Hermes——今天两个 signal_ok=True 的品种止损都是 too_tight，Hermes 看不到这一点。另注：hermes_system.md 是用户完全掌控的文件，改它需用户同意，不能由审查单方判定为缺陷。",
+            "fix_hint": "不改 hermes_system.md；在 PANEL_LEGEND 或一段独立的、机器生成的 policy 约束块里注入三条硬边界：本系统只出建议不下单、消息/叙事永不构成开仓依据（P20）、满仓/一把梭一律否决改 DCA（P21）；同时把 stop_check 随 opportunity 逐条注入。",
+            "kind": "Hermes 上下文/否决层"
+          },
+          {
+            "claim": "location/stopcheck/volnote 的阈值均标「待校准起步值」却无统一版本与来源，唯一的 LEVELS_VERSION 也未进 payload",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "evidence": "location.py:14-15、stopcheck.py:12-17、volnote.py:12-16 共 13 个常量全部注释「起步值，待校准」。全库检索 LEVELS_VERSION 只出现在 levels.py:18 定义、levels.py:277 塞进 extract_levels 返回值的 'version' 键、__init__.py:3/7 导出——dashboard 从未读取该键。实测 build_dashboard 的 policy payload 与 overview_payload 顶层键中均无任何版本字段。",
+            "correction": "「没有统一版本与来源」略夸：每个常量都带行内中文来源说明（如「与 1-3 天持仓前端口径对齐」「policy §6.5 的极端环境提示门槛」），缺的是机读的 value/source/status 结构与跨模块单一版本号。严重度上，这是版本纪律问题（阈值本就被用户裁决为未校准先验、本阶段不回测），不产生错误输出，P0 不成立。",
+            "fix_hint": "新增 POLICY_THRESHOLDS_VERSION 常量 + 一张 {name: (value, source, status)} 表，随 policy payload、政策卡页脚与 Hermes system_brief 三处输出；阈值任一变动即升版。与既有「升版即重算」纪律对齐即可，无需回测。",
+            "kind": "阈值/版本纪律"
+          }
+        ],
+        "missed": [
+          "【P1·信号周期同源自证】policy §0 明确 signals 取小周期 3m-1h，docs/DESIGN_POLICY_LAYER_20260805.md §3.3 也自定「阶段一用 1h」。但 dashboard.py:1215 与 :1359 的 crsi_features(df) 里 df 就是 4h 决策序列——「位置+信号共振」(P06/GATE4) 实际是同一根 4h K 线自己跟自己共振，跨周期确认这一层根本不存在。这直接改变了「共振」的含义，且 payload 只写 tf='4h' 不写信号周期，用户与 Hermes 都无从察觉。报告 11 条全部漏掉。",
+          "【P1·GATE1 结果不进决策界面】stop_check 只在 _build_policy_payload（详情页）计算；_scan_overview_symbol 根本不算，_OVERVIEW_FULL_KEYS 也无该键（实测 opportunity[0] 的 18 个键里没有 stop_check）。结果是主页机会卡与 Hermes 上下文里，剧本名裸奔、GATE1 判定全无。commit 6e7946a 自述 P3 的价值就是「policy 说做空、波动率说这个止损必死」，而这句话恰恰传不到用户最常看的两个界面。",
+          "【P1·stop_check 判定退化为恒真告警】逐个实跑 15 个机会：10 个可算 stop_check，10/10 全是 too_tight，ratio 区间 0.10-0.68（含两个 signal_ok=True 的 JPM 0.19 / XBI 0.31），另 5 个因缺 IV3 返回 None——即「ok」与「tight」两档从未出现。根因是口径错配：止损取 4h zone 边界 ± ZONE_BUFFER_ATR=0.25（zone 宽度上限 1.5 ATR），而分母用 HOLDING_DAYS_DEFAULT=3.0 天的 IV3 年化换算，4h 级结构位天然打不过 3 日预期波动。一个永远为真的风控告警等于没有告警，还会训练用户忽略它。要么按交易级别设 holding_days，要么把该比值降为展示量并换判据。",
+          "【P1·high_vol_chop 用 block 违反自家裁决】location.py:152 对 high_vol_chop 返回 tradeable=False（硬阻断），今日最新 4h 有 19/72 个品种处于该态、全部被踢出机会位（near 分区里 high_vol_chop 占 10 个）。但 eric-policy.md:181 的 §6.5 原文是「交易频率与仓位主动下调」= throttle，DESIGN_POLICY_LAYER §4 裁决 2 也白纸黑字写「改 throttle 不用 block，block 是我们给 policy 加严，实测会禁掉 15-16% 的核心剧本」。当前实现与原文和自家裁决同时相反。squeeze 的 block 有 §2.5「预警本身永远不是入场理由」背书、成立；high_vol_chop 没有。",
+          "【P2·输出单边性无标注】今日 15 个机会 100% 是 (range, at_resistance) 做空、且全是美股永续；trend_up 的 21 个品种产出 0 机会。这是 _eligible 表缺口（见第 6 条）加 approach 门共同作用的结构性后果，不是市场结论。但 render_overview_context 只给「机会 15 个」加逐条清单，Hermes 极可能把它读成「今天全市场偏空」。建议在总览注入里加一行方向分布与「本期位置矩阵对 trend_up 覆盖不全」的口径说明。"
+        ]
+      },
+      {
+        "route": "路线2（levels.py 深审）复核路径：①通读 regime/policy/levels.py(402行)、location.py、stopcheck.py、features/volatility.py、features/structure.py、dashboard.py:1140-1250、web/overview.js、tests/test_policy_levels.py 全文；②用 .venv/bin/python + storage.connect_ro() 按 dashboard 完全相同的装配口径（get_ohlcv limit=400 + get_vol1h since=-260h + 截到 last_close_ms）对 72 个有 4h 数据的品种全宇宙实跑 extract_levels/locate/find_structural_stop，统计重叠对/连通块/混合角色/选中 zone/tradeable/结构止损落点；③monkeypatch _merged_cluster 记录成员 origin_role，还原\"多数票\"的真实输入；④sqlite3 只读对拍 1d 与 4h 聚合（Deribit 08:00 vs Binance 00:00）；⑤构造边界数据复现 NaN-ATR、192小时 POC 覆盖、EMA200 截断（全历史 vs 400根）。全程未写任何项目文件、未重启进程。原报告 9 条中 4 条自称 P0，我独立判定后 0 条 P0、3 条 P1、6 条 P2。",
+        "verdicts": [
+          {
+            "claim": "1.5 ATR 上限只限制单个分片，拒并后产生的重叠分片仍组成最大 6.917 ATR 的连续关键区，链式护栏形同虚设",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "聚类/区间上限",
+            "evidence": "全宇宙实跑复现：737 个输出 zone 中相邻重叠 438 对（原报告 437），重叠连通块 132 个，其中 129 个跨度>1.5 ATR（原报告 123），最大 DOGE-USDT=6.917 ATR/10 分片，42 个连通块含当前价——除两个计数细节外与原报告完全吻合。机制无误：levels.py:184-187 超限成员直接 clusters.append([zone]) 新建簇，从不消除与上一簇的区间重叠。活体影响我另测：43 个当前判为 at_support/at_resistance 的品种里 29 个的**被选中 zone** 就坐在 >1.5 ATR 的重叠块内，15 个 tradeable 里占 13 个。",
+            "correction": "数字微调：438 对（非437）、129 个块>1.5ATR（非123）；其余全部复现。",
+            "severity_note": "",
+            "fix_hint": "加\"输出区间互不重叠\"终态不变量；超限重叠连通块标 chain_overflow/contested 并禁入位置判断，或按确定性切点切成互斥区间。注意还要连带处理 _zone 的截断语义（见下）：MAX_ZONE_ATR 截断后 zone 仍宽 1.5 ATR，叠加 location.AT_ZONE_ATR=0.5 的两侧容差，单个 zone 的实际\"到位\"带宽已达 2.5 ATR，重叠链把它再放大数倍。",
+            "verdict_reason": "降级理由：不是 P0。展示出去的仍是一个 ≤1.5 ATR 的 zone 且诚实列出全部 kinds，没有伪造数值、没有中性值伪装缺失；tradeable 还要过 signal 共振门。但它确实让 MAX_ZONE_ATR 注释里写明的\"防止价格在里面晃荡都算到位的伪关键位\"目标失效，且已影响 13/15 个活体 tradeable 判定——P1 实至名归，是本批最硬的一条。"
+          },
+          {
+            "claim": "聚类把支撑和压力合成一个 zone，再用多数票或\"低价成员\"任意决定角色，17 个价格正处于这种矛盾 zone 内",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "支撑/压力语义",
+            "evidence": "事实全部复现：92 个混合 origin_role 的输出簇、覆盖 60/72 品种、17 个含当前价（与原报告一字不差），其中 29 个是平票走\"取 mid 最低成员角色\"的兜底、5 个平票且含当前价。BTC 例证精确命中：kinds=[poc, prev_day_hi, pivot_high]、roles=[support, resistance, resistance]→resistance。location.py:109-113 确实在 lo<=price<=hi 时沿用 origin_role。",
+            "correction": "两处需修正。（a）\"把支撑和压力合成一个 zone\"是部分误读：ema*/poc 的 origin_role 是**价格相对该点位动态判定**的（levels.py:347、263：price>=point 即 support）。所以\"ema21=support + pivot_high=resistance\"只表示价格夹在两个相距<0.5 ATR 的位之间，这是普通的翻转带，不是语义矛盾。真正无争议的矛盾只有 34 个（我按 *_hi/*_lo 静态类别单独统计），其中仅 3 个含当前价。（b）\"17 个矛盾 zone 含当前价\"≠ 17 个判定被污染：我实测 43 个 at_* 品种里只有 3 个的**被选中 zone** 是角色混合的（COST/CRWD/XLE），且这 3 个 tradeable 全为 False。origin_role 只在价格落在区间内时才生效，当前对最终判定的实际污染是 0 例。",
+            "fix_hint": "保留 member_roles 到输出 payload（现在被 _merged_cluster 丢弃，审计不可回溯）；平票时不要用\"取价低成员\"这种与语义无关的兜底，改标 contested 交由 location 层裁决。优先级低于第 1 条。",
+            "verdict_reason": "自称 P0 明显夸大：当前 0 例判定被污染，且一半以上\"矛盾\"是对动态角色的误读。"
+          },
+          {
+            "claim": "前日/前周固定按 UTC 00:00 切桶，与 Deribit 1d 的 08:00 日界不一致，已经输出错误高低点",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "前日/前周日界",
+            "evidence": "数字逐个复现：BTC 4h-UTC 口径前日 64489.0/63281.5，1d(2026-08-04 08:00) 原生 64489.0/63413.5；前周高点 65726.0 vs 1d 口径 65672.5；ETH 前日低差 5.4（1852.5 vs 1847.1）、SOL 差 0.052（73.069 vs 73.017）。对照组我也独立跑通：32 个 Binance 源品种的 4h 聚合前日与 1d 完全一致，`32|0 mismatched`。SQL 也确认 deribit|1d|08:00|3 与 binance_futures|1d|00:00|32 两套锚点并存。",
+            "correction": "事实成立，但\"已经输出错误高低点\"的定性不成立——它预设了 Deribit 的 08:00 日线才是唯一正确的\"日\"。实际上：levels.py 输入的 4h 序列本身（包括 Deribit 那 3 个品种）全部是 00:00 对齐的（SQL 证：deribit|4h 六个桶 00/04/08/12/16/20 各 1008 根），所以 UTC-日聚合在输入口径内是自洽的；而 UTC 00:00 是永续合约的行业标准日界。项目记忆 time-alignment-invariants 明确记载\"日界跨源不一致\"是用户已知并已裁决的既定状态（选定 Deribit 为主源，不许为消除日界差而换源），并未规定 prev_day 必须跟随源日线。真正的问题是**面板内部口径分裂**：同一屏上 regime_1d 来自 08:00 锚定的日线、prev_day_hi/lo 来自 00:00 锚定的 4h 聚合，仅影响 3/72 品种。",
+            "fix_hint": "不要改成\"跟随源日界\"（会触碰用户已裁决的主源约定）。正确做法是在 sources 里给 prev_day_*/prev_week_* 标注 anchor=\"UTC00\"，并在面板上对 BTC/ETH/SOL 注明与 Deribit 日线口径不同；或由调用方显式传 session anchor 参数，默认仍 UTC00。",
+            "verdict_reason": "P0→P2：3 个品种、幅度 0.2% 量级、且\"哪个才对\"是定义选择而非错误。"
+          },
+          {
+            "claim": "ATR 在验证 OHLC 有限性之前计算，Pandas 横向 max 跳过 NaN，缺失高价数据时仍伪造 ATR 和关键位而非返回 None",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "NaN/ATR 铁律",
+            "evidence": "复现完全一致：240 根 high=NaN/low=99/close=100 → extract_levels 返回 atr=1.0、zones=1（不是 None），degraded=[pivot_invalid_ohlc, range_invalid_ohlc, prev_day_history_insufficient, prev_week_history_insufficient, poc_missing]。根因确认：volatility.true_range 用 pd.concat(...).max(axis=1)，默认 skipna=True，high=NaN 时 max 退化成 |low-prev_close|；levels.py:291-299 先算 ATR、直到 309-315 才拒坏 OHLC，且拒的只是 pivot 这一类。",
+            "correction": "爆炸半径比原报告描述窄：ATR 是 rolling(14).mean()，只有落在**末 14 根**窗口内的 NaN 才会污染当前 ATR——我实测在第 100-102 根注入 NaN high，atr 仍为干净值 3.0，与无 NaN 完全相同。另外 pivot/range 两类已经被独立拒算，prev_day/week 因 dropna 后为空也自然返回 None，实际能带着伪造 ATR 活下来的只有 EMA 系与 poc。",
+            "fix_hint": "ATR 前置校验：末 ATR_PERIOD+1 根窗口内 OHLC 全部有限且满足 high>=max(open,close,low)、low<=min(...)，否则直接 no_atr 返回；底层 true_range 改用 np.maximum.reduce 或显式 skipna=False，让 NaN 传播而不是被静默吞掉。",
+            "verdict_reason": "P0→P1：库内实测 null_ohlc=0/invalid_ohlc=0（原报告自己也承认），当前无任何错误输出，不满足\"已让使用者做出错误判断\"。但它确实是\"用可算出的值伪装缺失\"的铁律边界破口，且伪造的 ATR 会直接流进 base[\"atr\"]→dist_atr→止损宽度，一旦触发是静默偏低而非报错，P1 合适。"
+          },
+          {
+            "claim": "touches 先用当前完整历史确定区间、再回扫整段历史，把枢轴形成及确认之前的穿越计成触碰（6539 vs 应为 1293）",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "touches 因果性",
+            "evidence": "实现事实精确复现：576 个当前枢轴，_touch_stats 全历史回扫合计 6539 次（与原报告分毫不差）；我按\"形成事件计1 + 确认窗 i+k 之后的独立重入\"重算得 1434 次（原报告 1293），539 个枢轴被高估（原报告 545）。",
+            "correction": "三点必须纠正。（a）\"因果性\"定性不成立：整个计算只用截至当下的数据，相对决策时点没有任何未来信息；原报告自己在盲区里也写了\"枢轴右侧 k=4 确认无未来函数\"，两处自相矛盾。这是**定义之争**不是 bug——现实现算的是\"载入窗内价格进入该价带的次数\"，展示文案 web/overview.js:94 写的就是\"触碰N次\"，名实相符。（b）1293 这个\"正确值\"是作者自定义口径，我按同一定义算出 1434，说明该数字本身不稳定，不宜当作对照基准。（c）关键事实原报告漏了：touches **完全不参与任何判定**——全仓 grep 确认消费者只有 dashboard.py:1110/1318 装 payload 和 overview.js:94 / app.js:458 展示，location.py、stopcheck.py、_policy_play、_policy_side 均不读它。",
+            "fix_hint": "真正该修的是原报告只写在\"建议\"列、没写进断言的那半条：ema21/55/100/200、range_hi/lo、poc 这些 zone 是拿**今天的静态点位**回扫 400 根历史算 touches 的，对 EMA 而言几乎无意义（400 根前的价格跟今天的 EMA200 值比大小）。要么给动态来源输出 touches=None，要么改用历史动态 EMA 带。另外 touches/last_touch_bars 静默依赖调用方窗口长度（现为 400），payload 里没有任何字段记录，跨窗口不可比。",
+            "verdict_reason": "P1→P2：纯展示字段、零判定消费者、无未来泄漏。"
+          },
+          {
+            "claim": "把整小时成交量全压到该小时 VWAP 桶不能还原真实 volume-profile POC，误差不可由现有字段约束",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "POC 还原误差",
+            "evidence": "机制读码即证（levels.py:247-255：prices=quote/volume 得小时 VWAP，整小时 volume 进单桶）。分辨率论据我用全库 1h OHLCV 独立复算：187568 个小时样本，小时高低幅度中位数 0.331 ATR、61.09% 超过 0.25 ATR 的桶宽、P99 2.722、max 18.24——与原报告在 69 品种子集上的 0.309/60.39% 方向一致、量级一致（P99/max 因样本范围不同而不同）。库内确实无 1m/逐笔，误差不可实测这点属实。",
+            "correction": "两点。（a）P99 1.937/max 6.729 我复不出（全库口径下是 2.722/18.24），该两个数字依赖其未言明的子集与时窗，标 UNVERIFIABLE 更诚实。（b）建议\"禁止它单独扩大可交易 zone\"部分已经成立：location._eligible 的所有分支里 poc 都不在任何一个可用 kind 集合内（_HIGH_KINDS/_LOW_KINDS/_FAST_EMAS/_SLOW_EMAS/range_*），纯 poc zone 永远无法成为机会位。残余风险是 poc 作为共振成员会把合并 zone 的 lo/hi 撑开，从而改变 dist_atr 与结构止损的边沿。",
+            "fix_hint": "改名 hourly_vwap_volume_proxy（或在 sources 里加 fidelity 标注），与 policy §7\"代理建议+保真度标注\"的既有纪律对齐；顺带在文档里写死\"poc 不进 _eligible\"这条现状，防止后续编辑静默把它加进去。",
+            "verdict_reason": "P1→P2：是一个诚实的粗粒度聚合，不伪造缺失、不独立触发机会位；属命名/保真度诚实性问题。用户本期已裁决不做回测，精度提升本就不是本期目标。"
+          },
+          {
+            "claim": "POC 覆盖率以\"自身最后一小时\"为窗口终点而非 4h 决策时点，量流滞后约 72 小时仍能通过 80% 门槛",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "POC 覆盖守门",
+            "evidence": "代码事实：levels.py:240 end=frame[\"ts\"].iloc[-1].floor(\"h\")，窗口跟着数据尾巴漂移，从不与决策时点比对。复现一致：喂 192 根连续小时 → _poc_level 返回 mid=100.5、reason=None（coverage 恰为 0.8，not < 0.8 故放行）。滞后上限算术也对：dashboard.py:49-50 取 since=last_ts-260h、上界 last_ts+4h，共 264 个小时槽，滞后 L 小时后剩 264-L 槽，L<=72 即可凑满 192 槽通过门槛。当前库 72 个可算品种均 240/240、lag=0，本次快照未触发（原报告如实说明）。",
+            "correction": "无实质修正；\"约 72 小时\"经我算术复核为 L<=72（含边界）准确。",
+            "fix_hint": "_poc_level 增 expected_end_ts 参数（由 dashboard 传 4h bar 的 close 时刻），固定检查决策时点之前的 240 个**预期**小时槽；末小时滞后超过 1-2 小时返回 poc_stale，槽位覆盖不足返回 poc_coverage_insufficient。",
+            "verdict_reason": "维持 P1（原报告也是 P1，我独立判定同级）：这是\"陈旧数据冒充当前关键位\"，最贴近铁律的一条——POC 会被画进 zone、参与合并、影响 dist_atr 和止损边沿，而面板上没有任何滞后标记。当前不触发所以不到 P0，但一旦 vol1h 采集断三天就会静默产出\"当前成交密集区\"。"
+          },
+          {
+            "claim": "dashboard 只加载 400 根 4h 算 EMA200，adjust=False 的启动残差使 EMA200 最多偏移 0.301 ATR",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "EMA 预热/调用窗口",
+            "evidence": "独立复跑 64 个 >=200 根的品种、48 个实际被截断（n>400），与原报告完全一致；max 0.3012 ATR、>0.1 ATR 共 10 个、>0.25 ATR 共 2 个，BNB-USDT 581.614264(400根) vs 579.941841(全历史)——三位小数级吻合。理论也对得上：span=200、adjust=False 时 400 根后种子残余权重 (1-2/201)^400≈1.9%。",
+            "correction": "P50/P90 复不出：我在 48 个被截断品种上得 P50=0.0586、P90=0.1431，原报告写 0.0367/0.1250（疑似在 64 个品种的全集上算，把 16 个未截断的 0 值也计入，把中位数拉低了）。",
+            "fix_hint": "若要动，最小改法是给 EMA 输出加 convergence/input_bars 标注，而不是改窗口——因为 400 是 classify.FEATURE_WINDOW 的全系统约定。",
+            "verdict_reason": "P1→P2：400 根不是 policy 层的疏忽，而是项目记忆 time-alignment-invariants 里写死的全系统约定（\"collector 入库与 dashboard 展示必须共用 FEATURE_WINDOW=400，否则同一根 bar 会给出两个 atr_rank\"）——单方面给 levels 换更长窗口反而会制造新的口径分裂。量级上中位 0.059 ATR 远小于 location.AT_ZONE_ATR=0.5 的到位容差，只有 2 个品种越过 0.25 ATR。属\"按设计如此\"+\"精度可标注\"，不是缺陷。"
+          },
+          {
+            "claim": "前日/前周只要目标桶内存在一根数据就会输出极值，部分周期被伪装成完整周期",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "周期完整性",
+            "evidence": "代码事实无误：levels.py:212 只判 len(highs)==0 or len(lows)==0，不校验槽位数；作者的 14 根合成数据复现（PREV_WEEK_EMITTED=True）机制上必然成立。",
+            "correction": "活体影响为零，原报告未做这项检查：我对全部 72 个品种逐一核对目标桶根数，prev_day **全部恰好 6 根**、prev_week **全部恰好 42 根**，零例外（limit=400 根 4h≈66.7 天，目标周期永远落在窗口内部；且库内当前无缺口）。只有新上市不足两周的品种才可能触发。",
+            "fix_hint": "按输入周期与 anchor 校验槽位数（4h 下前日 6 根、前周 42 根且无缺口），不足即返回 None + prev_*_incomplete；同时补一条测试（现有 test_previous_day_and_week_use_utc_calendar_buckets 只测完整周期）。",
+            "verdict_reason": "P1→P2：纯潜伏缺陷，当前 72/72 品种全部完整，无任何错误输出。"
+          }
+        ],
+        "missed": [
+          "【最重要】结构止损被放进了下一个关键区里：我实跑 find_structural_stop，17 个当前能算出结构止损的品种中有 10 个的 stop_price 落在**另一个 key zone 的 lo~hi 之内**（AMAT 561.09 落进 [pivot_high, prev_week_hi]；DIS 97.64 同时落进两个 zone；还有 APP/EWJ/GEV/JPM/MU/SNDK/V/XBI）。这是第 1 条重叠链的直接下游伤害，也是本批唯一真正触到\"错误交易判断\"的现象：policy §3 GATE 1 要求止损放在\"结构性失效位\"、§2.2 要求\"止损=压力有效突破处\"，而把止损塞在下一个压力簇中间意味着正常触碰就会被扫，同时 GATE 2 的 1% 风险定仓会据此算出偏大的仓位。原报告 9 条里没有任何一条追到 stopcheck 这一层。判定 P1。",
+          "\"到位\"带宽的真实值是 2.5 ATR 而非 1.5：_zone 的 MAX_ZONE_ATR 截断保证单 zone <=1.5 ATR，但 location.AT_ZONE_ATR=0.5 是从 zone **边沿**再往外量的，所以单个满宽 zone 的实际判定带宽 = 1.5+2×0.5 = 2.5 ATR。原报告只盯 1.5 这个数，没把 location 的容差算进来——这让第 1 条的重叠链影响再翻一档。建议把两个常数放在一起校准。",
+          "_zone 超宽截断会把枢轴 zone 的一半推到价格从未成交过的一侧：对 pivot_high，point=该根 K 线的 high，截断时以 point 为中心 ±0.75 ATR，于是 zone 的上半段整体位于实际最高价之上。levels.py:74-84 的注释把这解释为\"保住锚点语义\"，作为设计选择可接受；但要注意 stopcheck 用的正是这个被人为抬高的 hi 来放空头止损（stop=hi+0.25ATR），等于凭空多给了 0.75+0.25=1 ATR 的止损宽度。值得单独裁决。",
+          "role_flipped 在价格位于 zone 内时恒为 False：_zone_state 在 lo<=price<=hi 分支直接 role=origin_role，因而 role!=origin_role 永不成立。这意味着 policy §2.2/S8 的\"破位后反弹测试失败\"与 §2.1/S5 的\"突破后回踩前高企稳\"这两个依赖 flipped 的剧本，只在价格已经完全走出区间时才可能触发，价格正在区间内测试时一律不识别。这是设计取舍（注释写了\"正在区间内尚不能宣告穿越\"），但会系统性延迟 S5/S8 的识别时点，建议记入已知取舍清单。",
+          "poc 从不进入 location._eligible 的任何 kind 集合——纯 poc zone 永远不可能成为机会位。这一点是好事（等于原报告第 6 条要求的护栏已存在），但代码里没有任何注释或测试锁住它，后续给 _eligible 加分支时极易静默破坏。建议补一条断言测试。",
+          "touches / last_touch_bars 静默依赖调用方传入的 df 长度（dashboard 固定 400 根），payload 里没有任何字段记录窗口长度，导致该数字跨调用方、跨版本不可比，也无法审计。与第 5 条同源但性质不同（那是定义，这是可审计性）。",
+          "覆盖率盲区：现有 6 个 levels 测试（我逐一读过 tests/test_policy_levels.py）确实如原报告所说未覆盖跨角色聚类、输出区间重叠、源日界、NaN ATR、陈旧 POC、部分周期；我再补一条——也未覆盖 levels→stopcheck 的联动（止损落在其他 zone 内的情形），而那恰是唯一有实际交易后果的路径。"
+        ]
+      },
+      {
+        "route": "路线3 location.py 深审（6 条发现，其中 4 条自称 P0）。核验方式：①逐条回读 regime/policy/location.py 与 levels.py 全文 + eric-policy.md §2/§6 原文 + docs/DESIGN_POLICY_LAYER_20260805.md（本项目自己的设计裁决）；②最小构造复现每条断言；③写只读 point-in-time 回放器（按 dashboard._scan_overview_symbol 同口径切 df/vol1h，regime 取 regime_history 当时值）复核报告点名的 GOOGL/XAG/BNB 历史样本；④做 72 品种 × 250 根 4h = 13030 个 point-in-time bar 的全量历史扫描，量化每条缺陷的真实触发率；⑤复跑当前横截面做阈值/K 敏感性。全程只读，未改任何文件、未重启进程。结论：6 条事实断言全部成立（代码行为与数据全部独立复现，报告给的横截面数字 13/15/19、34/29/21、13/72、7 个方向候选 5/5/0、34 mixed zone/32 品种、high_vol 19=near10+middle9+opp0 全部逐位对上），但 4 条自称 P0 里没有一条达到\"会让使用者做出错误交易判断\"的门槛——全部是压制方向（把真位置误报成 middle / 把合格机会挡掉），系统不下单、面板另有 zone 明细与文案兜底。故 severity 全部下调：1 条 P1（我认定的头号必修）、1 条 P1、4 条 P2。",
+        "verdicts": [
+          {
+            "claim": "trend_up×at_support 不接受结构前低、trend_down×at_resistance 不接受结构前高，policy 原文明确允许的位置被误报成 middle_zone",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "policy 矩阵失真（真缺陷，范围比报告说的更大，但不是 P0）",
+            "evidence": "代码：location.py:125 trend_up support 只收 _FAST_EMAS|range_lo|(_HIGH_KINDS and flipped)，无 _LOW_KINDS；:130 trend_down resistance 只收 _FAST_EMAS|range_hi|(_LOW_KINDS and flipped)，无 _HIGH_KINDS。最小复现 locate(102,4,[pivot_low zone],'trend_up','from_above') 与 locate(98,4,[pivot_high zone],'trend_down','from_below') 均返回 middle_zone/no_regime_key_level_nearby。历史回放独立复现报告点名的两个样本：GOOGL 2026-08-01 20:00 UTC trend_up，纯 pivot_low zone [346.290,350.390] dist=0.4809 ATR、infer_approach=from_above（来向都对），eligible=False → 全局落 middle_zone；GOOGL 2026-07-30 08:00 UTC trend_down，pivot_high+poc+prev_day_hi zone dist=0.3970、approach=from_below，eligible=False → middle_zone。规模量化（72 品种×250 根=13030 个 point-in-time bar）：153 根 bar 出现『判 middle_zone 但 0.5 ATR 内存在 policy 原文允许的结构位』，占全部 bar 1.2%，占 trend 态 middle_zone bar（637 根）的 24%；其中 trend_down 108、trend_up 45。",
+            "correction": "报告漏了同一格里更严重的一半：trend_down×at_resistance 连 EMA100/EMA200 也不接受。policy:72 写的是『结构前高/EMA/原支撑变压力』，EMA 无周期限定，但 _eligible 只放行 _FAST_EMAS。GOOGL 2026-07-30 08:00 那根的最近候选正是纯 ema100 zone [336.890,339.257]，dist=0.0（价格就在带内）、approach=from_below、语义 bounce_short_opportunity/tradeable=True，却 eligible=False。所以 S1 剧本在『反弹到长期均线』这一支同样是死的。另：severity 不成立为 P0——本缺陷方向是压制而非误导开仓，产出的是漏报与一句假话（reason='no_regime_key_level_nearby'），不会让人做出错误的进场动作；且详情页 zones 列表仍逐条给出 eligible 标记。判 P1，且是本轮唯一我认为必须先修的一条。",
+            "fix_hint": "_eligible 补三处对称项：trend_up/support 加 (kinds & _LOW_KINDS and not flipped)；trend_down/resistance 加 (kinds & _HIGH_KINDS and not flipped) 与 kinds & _SLOW_EMAS。补测试：pivot_low/prev_day_lo 在 trend_up、pivot_high/prev_day_hi/ema100/ema200 在 trend_down 的纯来源矩阵行，外加上述两个 GOOGL 历史回放用例锁定。"
+          },
+          {
+            "claim": "infer_approach 只比较窗口首尾、忽略中间穿越，会把『跌穿后从下方收回』误判为 from_above 并据此放行错误剧本",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "来向推断精度不足（机制成立，危害被显著夸大）",
+            "evidence": "代码 location.py:84 first,last=values[0],values[-1]，全程不看中间点，机制断言成立。最小复现：zone[99,101] 下 [105,95,100]→from_above、[95,105,100]→from_below，与报告一致。XAG 2026-07-06 04:00 UTC 样本独立复现：regime=trend_up，收盘 [62.86,61.88,62.38]，选中 zone=ema21+ema100 [61.9527,62.2342]，中间根 61.88 确已跌破 lo，输出 pullback_long_opportunity/from_above/tradeable=True。",
+            "correction": "两处夸大。①危害规模：13030 根 bar 全扫，『被选中 zone 判 tradeable 且 3 根路径确实穿到对侧』共 42 根，其中 26 根是 range_edge_opportunity——range 语义的 required_approach 是 None，来向根本不参与否决，这 26 根不构成误判；真正靠来向放行的方向型只有 7 根（pullback_long 3 + bounce_short 4），占 0.05%。②样本选得不对：XAG 那根是『回踩下穿后当根收回带上方』，这在 policy 语义里恰恰是标准的回踩重夺，标成 from_above 说不上错。本缺陷真正会错的是镜像方向——先冲破压力再跌回带内，被标成 from_below → bounce_short_opportunity，而按 §2.1 S5 那其实是回踩做多位；报告没区分这两种。综合判 P2。",
+            "fix_hint": "改成扫窗内最后一次跨越边界的方向；若窗内双向穿越则返回 None 或新增 crossed_zone 语义，不沿用首尾净移动。测试补：双向穿越、突破后回抽、区间内起步三类路径。"
+          },
+          {
+            "claim": "逐 zone 现算修复不彻底：先按距离选最近 zone 再算 approach，最近 zone 来向不合格时会遮蔽同阈值内来向合格的其他 zone",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "候选选择顺序（真缺陷，纯压制方向，触发率极低）",
+            "evidence": "代码顺序确如所述：:184-200 建候选时不算 approach，:208 min() 定死一个 zone，:212-216 才推断来向并否决。BNB-USDT 2026-06-21 16:00 UTC 点位回放逐位复现报告数字：regime=trend_down，收盘 [588.82,590.32,592.25]，最近 zone=ema21+pivot_high+prev_day_hi [586.3720,593.4680] dist=0.0（起点 588.82 落在带内 → infer_approach 返回 None）→ wrong_approach/tradeable=False；同批 ema55 zone [594.2846,596.6499] dist=0.4301 ATR，approach=from_below、语义 bounce_short_opportunity/tradeable=True，被完全隐藏。生产两处调用（dashboard.py:1197-1201 与 1352-1356）确已传 prices，问题确在 locate 内部。",
+            "correction": "报告未给触发率，我补上：13030 根 bar 中 wrong_approach 共 402 根，其中『另有阈值内 + 来向合格 + 可交易的 zone 被遮蔽』只有 11 根（占 wrong_approach 的 2.7%，占全体 0.08%）。当前 2026-08-05 12:00 横截面为 0 例。报告称 QQQ/ASML/NVDA 亦复现——我在另一时间窗独立命中 ASML(2026-07-24/07-30)、NVDA(2026-06-27)、COST、CRCL、ETH、META，方向属实，QQQ 未逐个核。危害方向纯压制（少一个机会），判 P2。",
+            "fix_hint": "候选循环内就把每个 zone 的 approach/语义算出来存进候选元组，返回时带完整候选审计列表；最近 zone 不合格而他 zone 合格时显式输出候选或标 multi_zone_conflict，不静默只回最近 zone 的否决结果。"
+          },
+          {
+            "claim": "合并区间把多来源角色压成多数票 origin_role，role_flipped 对混合前高前低的 zone 无法保持正确语义",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "合并丢信息导致角色反转语义失真",
+            "evidence": "代码：levels.py:_merged_cluster 内 :127-131 多数票，平票取 mid 较低成员角色（实测 merge_zones([pivot_high@100, pivot_low@101]) → origin_role='resistance'，与报告『平票取较低成员』一致）；location.py:_zone_state:101-118 用这个单值算整带 flipped；:125/:130 把同一个 flipped 套给所有 kinds。最小复现完全对上：纯 pivot_high/origin=resistance，价格 106 → at_support/role_flipped=True/tradeable=True；改成 pivot_high+pivot_low/origin=support 同价同来向 → middle_zone/tradeable=False。当前横截面混合静态角色 zone 34 个、覆盖 32 品种，与报告数字逐位一致。",
+            "correction": "补两点报告没给的：①反向假阳也存在——同一混合带若被投成 origin=resistance，价格在上方即得 role_flipped=True/tradeable=True/at_support，而真正让它合格的成员 pivot_low 从来就不是压力位；实测 locate(106,4,[kinds=pivot_high+pivot_low, origin=resistance]) → pullback_long_opportunity/tradeable=True。②规模：13030 根 bar 中 188 根（1.4%）选中的就是混合角色带，其中 87 根判 tradeable、11 根带 role_flipped=True（8 根同时 tradeable），样本如 CRWV 2026-07-06 08:00 trend_down [pivot_high,prev_day_lo] origin 投成 support、NVDA 2026-08-03 12:00 range [pivot_low,range_hi]。③还有一处展示后果报告没串起来：dashboard._policy_play 直接拿 role_flipped 区分『S5 突破回踩加仓』与『S4 趋势回踩做多』，投票错一次就把剧本名字标反。判 P1。",
+            "fix_hint": "合并后保留成员级 origin_role 列表；_zone_state 输出 flipped_from_support / flipped_from_resistance 两个独立标志，_eligible 按『来源 kind + 该成员原角色 + 当前角色』逐成员判定；成员角色冲突且价格位于带内时标 contested，不用多数票冒充确定角色。"
+          },
+          {
+            "claim": "high_vol_chop 写成『降频』但实现为 tradeable=False 永久禁用，与原文『降低频率与仓位』不等价",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "policy §6.5 语义落地不等价（成立，但方向保守且下期模块未建）",
+            "evidence": "代码：_eligible:131-133 对 high_vol_chop 只接受 range_lo/range_hi；_semantics:152 兜底一律返回 ('high_vol_reduce_frequency', False, None)，故 dashboard.py:1438-1443 的 tradeable is True 分支永不命中。当前横截面复现报告数字：19 个 high_vol_chop → near=10、middle=9、opportunity=0，逐位一致。13030 根历史扫描同向：high_vol_chop 1615 根 bar 中 tradeable=0 根。",
+            "correction": "报告漏了一条更有力的本地证据：本项目自己的 docs/DESIGN_POLICY_LAYER_20260805.md §4 裁决 #2 已明文定过『§6.5 极端环境用 throttle 不用 block』，理由正是『block 是我们给 policy 加严，且实测会禁掉 15-16% 的核心剧本』，§3.1 也写明 high_vol_chop 应映射为 range 底座 + 置位 extreme_env。所以这不只是与 policy 原文不等价，是与本项目自己的设计裁决相反。但 severity 不到 P1：mapping.py 尚未建（属下期），方向是压制而非误导，且面板 overview.js:20 已把该态显式文案化为『高波环境，policy 建议降频降仓』，用户看到的不是伪装的机会。判 P2。",
+            "fix_hint": "位置资格与高波修饰拆开：保留 range/trend 的正常位置语义，另出 risk_modifier='reduce_frequency' 字段（仓位/频率下调由决策层消费）；若产品确实要全禁，必须改名为显式 veto 并作为新增系统先验单独版本化标注，不能挂在『降频』这个词下面。"
+          },
+          {
+            "claim": "AT_ZONE_ATR=0.5 与 APPROACH_BARS=3 是会改变判断的未版本化先验，输出不带参数或来源，违反阈值版本化铁律",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "治理缺口（事实全部成立，『违反铁律』的定性过重）",
+            "evidence": "事实面全部独立复现：常量在 location.py:14-15 只注『起步值，待校准』；返回体 :218-229 无 version/参数/来源；全仓库 grep 无 LOCATION_VERSION/POLICY_VERSION 定义（只在设计文档 :44 提过应有三条版本线）；levels.py 虽有 LEVELS_VERSION='lv1' 并写进 extract_levels 返回，但 dashboard._build_policy_payload 的 base 字典不含任何 version 字段，不进面板。敏感性我用同一横截面（截至 2026-08-05 12:00 UTC，72 个可算品种）重算，数字与报告逐位一致：阈值 0.3/0.5/0.8 → opportunity=13/15/19、middle=34/29/21，0.3→0.8 有 13/72 个品种换层（ADBE/BABA/COIN/CRCL/CSCO/EWJ/HYPE/LLY/MSTR/QQQ/SNDK/SPY/TSLA）；当前 7 个方向型候选下 K=3/5/7 的来向合格数 5/5/0。",
+            "correction": "『违反阈值版本化铁律』站不住。该铁律（升版即重算/修订自动失效）约束的是入库的派生值；我核过 market.db 全表清单，不存在任何 policy/location 表，本层输出一根都不落库、无历史读数需要作废，因此没有可被污染的存量。真实性质是：设计文档自己要求的三条版本线尚未落地（policy 层还在期 0），加上活体面板判定用了两个无溯源常量。属治理缺口而非铁律违反，判 P2。另：报告『自查盲区』里的 49 passed 我复不出——四个 policy 测试文件是 45 passed，pytest -k policy 是 54 passed，命令未注明；不影响任何发现的成立。",
+            "fix_hint": "加 LOCATION_RULES_VERSION 常量，locate 返回体随行输出 at_zone_atr / approach_bars / ATR 口径 / 来源说明；参数改动即升版。校准可不做收益回测（用户已裁决），用横截面稳定性 + 人工复核样本即可，但敏感性报告版本要随 payload 输出。"
+          }
+        ],
+        "missed": [
+          "【应并入发现1】trend_down × at_resistance 同样不接受 EMA100/EMA200：policy:72 原文『结构前高/EMA/原支撑变压力』的 EMA 无周期限定，但 _eligible:130 只放行 _FAST_EMAS。GOOGL-USDT 2026-07-30 08:00 UTC 的最近候选就是纯 ema100 带 [336.8901,339.2572]，dist=0.0、approach=from_below、语义 bounce_short_opportunity/tradeable=True，却 eligible=False 被丢弃。报告只点了『结构前高』，漏掉了这条同格的另一半。",
+          "【反方向失真，报告完全没查】_eligible 不只漏收，也多收了 policy 没写的来源：trend_up × support 放行 range_lo（location.py:125）、trend_down × resistance 放行 range_hi（:130），而 policy §2.3 的区间上下沿只属于 range 态。这是把区间边沿当趋势态回踩/反弹位，方向与发现1相反（可能造出 policy 没授权的机会位）。当前横截面未触发，但同样无审计。P2。",
+          "【S13 提前进机会区】_semantics 对 trend_down × at_support × 慢均线返回 ('deep_long_requires_second_confirmation', True, None)：tradeable=True 且 required_approach=None，于是 dashboard.py:1439 直接把它塞进 opportunity 桶。policy:77 明文要求『第二次 oversold/底背离确认』『不接第一刀』，而 _signal_ok 只看当根 cRSI 是否在超卖区，没有任何二次确认。剧本名串里带了『（需二次确认·半仓）』的字样，但分层桶没带——总览页只按桶排序。二次确认依赖尚未建的 signals 层，属下期；但『放进 opportunity』这个动作是现在就在做的。P2。",
+          "【reason 字段说了假话】_middle() 把 reason 硬编码成 'no_regime_key_level_nearby'，可是走到这一支的常见原因是『0.5 ATR 内有 zone 但资格表拒了』（发现1那 153 根 bar 全是这种），而不是附近没有关键位。用户在总览页看到的 middle 分层文案因此断言了一件事实上不成立的事。修法很轻：区分 no_eligible_level 与 no_level_nearby 两个 reason。P2。",
+          "【到位判定的实际带宽远超 AT_ZONE_ATR 的字面】_zone_state 对『价格落在带内』一律给 dist_atr=0.0，而 levels.MAX_ZONE_ATR=1.5 允许 zone 本身宽到 1.5 ATR，叠加两侧各 0.5 ATR 的 AT_ZONE_ATR 后，at_support/at_resistance 实际可以在约 2.5 ATR 的价格区间内持续成立。发现6 只测了 AT_ZONE_ATR 一个旋钮，敏感性其实被 zone 宽度分布主导。此项已在项目待办 #38『zone 宽度根本解法（触碰散布定义宽度）』里，非新问题，但发现6 的阈值结论不带这个前提就会被误读。",
+          "【报告缺的反证，会影响读者对严重度的判断】发现1/发现3 容易被读成『趋势剧本根本不出机会』，实际不是。13030 根 point-in-time bar 全扫：trend_up 1249 根里 tradeable 173 根（13.9%）、trend_down 2103 根里 266 根（12.6%）、range 6561 根里 2140 根（32.6%）。当前 2026-08-05 12:00 横截面 trend 态 0 个 opportunity 是快照现象（两个方向候选恰好都 wrong_approach），不是结构性失效。location.py docstring 里那句『trend_up 的 23 个品种 tradeable 全为 0』说的是修复前状态，别当成现状。"
+        ]
+      },
+      {
+        "route": "路线4：波动率层与 policy 的接缝（volnote + stopcheck）",
+        "verdicts": [
+          {
+            "claim": "结构止损找不到时只追加 structural_stop_unavailable 降级标记，原做多/做空剧本仍保留并展示，违反 §3 GATE 1「找不到→不开仓」，未降级为 WAIT",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "GATE 语义/展示披露",
+            "evidence": "代码事实成立：dashboard.py:1221 先生成 play，1233-1237 才算 structural，None 时只 degraded.append(\"structural_stop_unavailable\")，play 从不回滚；web/app.js:431-433 照常渲染「建议关注 · <play>」。但三点推翻其框架：① 本层根本不产出 OPEN_* 动作——docs/DESIGN_POLICY_LAYER_20260805.md:§3.7 明写当前是「期 0：只装配 PolicyInput，不出任何动作」，「§3 五道 GATE」属 §3.4 决策引擎、开放 OPEN_* 建议是期 3；没有动作就没有「降级为 WAIT」的对象。② 报告证据是强制 mock find_structural_stop=None，不是实况；我全库 74 品种实跑（2026-08-05 16:4x UTC），15 个 side 非 None 的品种结构止损 100% 找到，structural_stop_unavailable 实际出现 0 次。③ 详情页并未隐瞒：app.js:493 显示「结构位或 IV3 缺失，止损宽度校验不可计算」，app.js:495 显示降级标注；总览卡 tooltip 写「仍需统一风控门槛」。",
+            "correction": "真正成立的残余缺陷不是「违反 GATE 1」，而是披露不一致：_policy_play 已经把 GATE 4 未过内联成「（位置到了信号没到）」后缀（dashboard.py:1087-1088），同一函数却不给 GATE 1 未过任何内联标记；且总览页 payload 根本不带 stop_check/degraded（_OVERVIEW_FULL_KEYS，dashboard.py:1400-1404）。",
+            "fix_hint": "沿用已有约定：结构止损为 None 时把 play 标成「<剧本>（结构失效位不可得）」，并把 stop_check.verdict/degraded 加进 _OVERVIEW_FULL_KEYS 让总览卡也能看到。不要在期 0 就伪造 action=WAIT 字段——那会越过设计文档的分期门槛。"
+          },
+          {
+            "claim": "iv3 实际同时承载 1.67d/2d/2.21d 和严格 3d IV，实际期限在装配时被丢弃，随后统一按「3日/IV3」计算和比较",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "口径标注/字段丢失",
+            "evidence": "独立复现：① sqlite3 stock_iv_term 全表 SELECT t3,COUNT(*) → t3=2 共 131 行、NULL 11 行，**没有任何一行是 3**；最新快照 42 品种中 40 个 iv3 非空且 t3=2（与报告 42,40,40,2,2 完全一致）。② opt_iv_near 最新 8 行：5 行 method=interp/tenor_days=3.0，3 行 method=nearest，tenor_days 分别为 1.65(DOGE)、2.19(XAG)、2.19(XAU)。③ 装配处确实丢弃：dashboard.py:1269-1271 只取 row['iv3'] 不取 t3；dashboard.py:1291 只取 near.get('iv') 不取 tenor_days/method，而 _xopt_block(dashboard.py:260-262) 明明已经把 tenor_days/method 算出来了。④ 下游一律按 3 日说话：volnote.py:40 用 HOLDING_DAYS=3，文案「3日预期波动 ±X%（IV3 ..）」；web/app.js:944 更直接写「IV3 X（期限曲线3d·RTH自攒）」，而实际是 2d。",
+            "correction": "报告数字有两处轻微偏差（当前快照是 1.65 与 2.19，不是 1.67 与 2.21，随快照漂移）。另需补正严重度：把 2d 期权的**年化** IV 拿去按 √(3/365) 缩放到 3 日视界，在数学上不是错误（年化 IV 本就可缩放到任意视界），错的只是期限结构近似与标签精度，不是算术错误。也应指出币安/商品的详情页波动率卡其实已标了「~2.2d·单点」（app.js:795/946），只有 policy note 与美股路径把期限抹平了。",
+            "fix_hint": "vol_notes 增加 iv3_tenor_days/iv3_method 入参，文案改成「近端隐含（~2.0d，最近到期）」；美股侧把 t3 一并出到 payload，app.js:944 的「期限曲线3d」改成实际 t3。"
+          },
+          {
+            "claim": "IV×√(3/365) 只是 1σ 尺度，不是无条件预期绝对涨跌；当前文案与「正常波动就会打掉」表述过强；且未证明 Binance 与 moomoo 的年化基准都是 365（存在 252 口径）",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "文案措辞",
+            "evidence": "计算复现无误：volnote.py:40 与 stopcheck.py:97 同式，iv3=44.4 → 44.4×√(3/365)=4.03 → 输出「3日预期波动 ±4.0%」，与报告一致。",
+            "correction": "核心指控大部分不成立：① 252/365 之争被误用——「rule of 16」的 252 是把**年化 IV 换算成单日交易日波动**的场景；此处视界是 3 个**日历日**，而 BS 隐含波动率的 T 本来就是日历时间，用 365 才是正确且唯一自洽的口径，代码注释也明说「沿用自然日口径」。报告自己的盲区栏也承认无法断言两源基准不同。② 「预期波动/expected move」正是业界对 IV×√t 的标准称谓，不是夸大。③ 「止损在 1 倍预期波动内，正常波动就会打掉」对**触碰**概率而言反而是保守的（3 日内触碰 ±1σ 的概率远高于终点越过的 ~32%），谈不上过强。唯一站得住的残余：文案没写明这是约 1σ 尺度。",
+            "fix_hint": "文案补一个 σ 标注即可：「3日隐含 1σ 尺度 ±4.0%」，其余不必改。不要为「口径未知」而给 IV 加不确定性标记——那是把标准期权惯例当缺陷。"
+          },
+          {
+            "claim": "止损三档、结构缓冲、极端 IV 分位和财报窗口全是未版本化、无可追溯依据的起步常量，却直接产出 ok/降频降仓/持仓窗冲突等判断，违反阈值铁律",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "阈值治理/展示定性",
+            "evidence": "代码事实成立：grep VERSION regime/policy/ 只命中 levels.py:18 的 LEVELS_VERSION='lv1'，volnote.py/stopcheck.py 无任何版本常量；stopcheck.py:12-17 与 volnote.py:12-16 共 9 个常量全部注释「起步值，待校准」。policy 侧引用也核对无误：eric-policy.md:114 的 GATE 3 确是 1.5R 盈亏比（与 TIGHT_RATIO=1.5 无关，只是数字巧合），eric-policy.md:181 的 §6 第 5 条确实只写「频率与仓位主动下调」不给分位阈值。",
+            "correction": "「违反阈值铁律」是错的。SYSTEM_LOG_20260731.md:805「规矩一：改阈值→必须递增 RULES_VERSION」绑定的是**判定层**（classify.py THRESHOLDS + volatility.py 的 0.15/0.30/0.85）——因为那些阈值决定入库的 regime 状态，所以才有「升版即重算」语义。volnote/stopcheck 是请求时计算的展示标注，不入库、不进判定、无历史快照，重算语义对它们不适用。且用户已明确裁决**本阶段不做回测**，「无统计有效性」是分期决策不是缺陷（报告自己的盲区栏也承认）。残余成立的只有披露问题：verdict 文案「止损宽度相对预期波动充足」和「policy §6.5 建议降频降仓」把宿主自定的未校准先验讲成了既成结论，且 0.85 这个数字在文案里被挂到了 policy 名下而 policy 从未给过数字。",
+            "fix_hint": "不要为此建 VOL_POLICY_PRIOR_VERSION 走升版重算流程（无对象可重算）。只改文案：verdict 加「（未校准先验）」，「policy §6.5 建议降频降仓」改成「触发本系统 0.85 分位先验 → 对应 policy §6 第 5 条降频降仓」。"
+          },
+          {
+            "claim": "财报邻近度和条件分位都只按日期不看 pub_type，会把盘前财报发布后的当天继续标成「持仓窗内有财报」，并把盘前财报日的收盘 IV 错分进事前 in30 组",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "事件时点建模",
+            "evidence": "两半都独立复现：① storage.earnings_proximity(929-958) 只 SELECT ts、只算 ET 日历日差，全函数不出现 pub_type，而 earnings 表有该列。DB 确认 2026-08-05 的 BEFORE 三例正是 CRCL-USDT/DIS-USDT/UBER-USDT；我在 UTC 16:41（ET 12:41，盘中、盘前财报早已发布）全库实跑，这三者的 vol_note 仍是「⚠ 持仓窗内有财报（还有 0 日），非技术面风险」。② 条件分位 _earn_conditioned_rank(dashboard.py:496-529) 同样只用 ts；关键在于 stock_vol 与 earnings 的 ts **锚在同一个日期 00:00 UTC**（实测 DIS/CRCL 的 stock_vol ts=2026-08-04 00:00:00），所以盘前财报当天 ahead=0 → in30=True → 那一行**已被砸完波动率的**收盘 IV 被归进「事前」参照组。③ 报告的 138 条重合我用 JOIN 精确复现：pub_type=BEFORE 且同日有 stock_vol 行的记录数正好 138（AFTER 407、REGULAR 36）。",
+            "correction": "报告引的 storage.py:947 是函数体内的 SQL 行，函数定义在 929 行，属行号微偏。另需补充误差方向：note 侧是**过度告警**（把已发生的事件说成未来风险，偏保守）；真正有统计后果的是条件分位那半——138 个事后低 IV 被塞进事前组会压低参照分布、系统性抬高当前读数的分位，而这个分位正是 0.85 降频降仓提示的触发量。",
+            "fix_hint": "earnings_proximity 与 _earn_conditioned_rank 共用一个事件时点函数：BEFORE 在当日 ET 开盘后按已发生（days 记负），AFTER 在当日收盘前仍记 0，REGULAR 无法定位时显式标 uncertain 并从条件分位参照组剔除。"
+          },
+          {
+            "claim": "未发现 IV 标注或 too_tight/tight/ok 改写 play，但缺少针对三档 verdict 的「不改变动作」回归测试",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "测试覆盖",
+            "evidence": "① 无改写：play 在 dashboard.py:1221 生成，1226 之后只写 vol_notes/stop_check，无回写路径。② 风险列表可重叠：_partition_overview(dashboard.py:1418-1440) 先无条件 append risk，再独立分 opportunity/near/middle。③ 「13 个品种同时在 opportunity 与 risk」我精确复现——本次快照 tradeable=True 共 15 个（AMAT/APP/ARM/EWY/GEV/INTC/JPM/MU/NBIS/RKLB/SNDK/TSLA/TSM/V/XBI），其中 vol_note 非空的正好 13（EWY、V 无 note）。④ 测试缺口成立：tests/test_policy_stopcheck.py:27 有三档 verdict 的参数化测试，但只断言 verdict 取值，没有任何测试断言 verdict 变化时 play / opportunity 分层不变。",
+            "fix_hint": "加参数化集成测试：同一 policy 输入下把 check_stop_vs_iv 分别打桩成 None/too_tight/tight/ok，断言 play 与 _partition_overview 的四个分层完全相同。「结构止损 None → GATE 1 WAIT」那半不要写成测试——期 0 不产出 action，写了就是给未实现的期 3 行为上锁。"
+          }
+        ],
+        "missed": [
+          "【P1·总览页把自己算出的风控结论藏起来了】_scan_overview_symbol 组装的 item 里根本没有 stop_check 键，_OVERVIEW_FULL_KEYS（dashboard.py:1400-1404）也不含 stop_check/degraded，overview.js:100-103 只渲染 play + vol_note。结果：本次快照 15 张机会卡里 11 张（APP/ARM/INTC/JPM/MU/NBIS/SNDK/TSLA/TSM/XBI/DIS）系统自己算出的止损宽度判定是 too_tight，用户在总览页一个字也看不到，只有点进详情页才有。这比路线4 报告第 1 条描述的场景更实际——那条今天 0 次触发，这条今天 11 次触发。修法：把 stop_check.verdict 加进 _OVERVIEW_FULL_KEYS 并在卡片上出一行。",
+          "【P1·check_stop_vs_iv 三档在真实数据上已退化成常量】本次全库实跑，11 个同时有结构止损和 iv3 的品种，verdict **100% 是 too_tight**，ok 与 tight 一次都没出现（如 JPM：止损距 0.45% vs 3 日 1σ 2.3%，ratio=0.19）。根因不是阈值没校准，是两边量纲天生不匹配：结构止损宽度 = 4h zone 下沿再退 0.25×ATR(4h)，而对照量是 3 个日历日的 IV 尺度；4h ATR 与 3 日波动本就差一个量级。一个恒定输出同一个值的判定信息量为零，而它的文案「正常波动就会打掉」会让用户对所有机会一律打折。建议先做量纲对齐（比较对象改成同持仓窗的结构止损，或把 holding_days 与 4h 决策周期对齐），再谈阈值。",
+          "【P2·分位口径在 note 里被抹平，且仓库自己确立过这条纪律】volnote 的「隐含波动历史高位（分位 X），policy §6.5 建议降频降仓」对美股喂的是**财报条件分位**（_earn_conditioned_rank，2 年窗，rank_kind=cond），对 BTC/ETH 喂的是 **DVOL 365 日原始分位**（dashboard.py:1295-1300），两种定义共用同一句文案和同一个 0.85 门槛。而详情页 web/app.js:1010 恰恰专门区分了「(moomoo·条件分位)/(原始分位)」，dashboard.py:362-365 的注释更明写「回退时若仍标同财报状态内就是谎称口径」——policy note 把这个已建立的标注丢了。",
+          "【P2·分位显示一位小数，把 0.997 说成 1.0】volnote.py:47 用 {rank_f:.1f}。实测：ADBE rank=0.997、CRM=0.997 都显示成「分位 1.0」（读者会理解为历史最高），CSCO=0.958、ORCL=0.958、PANW=0.976、NOW=0.960 显示成「1.0」，AMAT=0.932、META=0.948 显示成「0.9」。同时 rank_raw 与 rank 差距可以很大（ORCL cond 0.958 vs raw 0.742；META 0.948 vs 0.663），一位小数把这种差异也一起吃掉了。改成两位小数即可。",
+          "【P2·加密的 term_inverted 是跨源比较且 DVOL 无新鲜度闸】dashboard.py:1302-1304 的兜底把 iv3（币安期权 ATM 中位数，binance_opt_iv.py 自建）与 iv30（Deribit DVOL，无模型方差指数）相减判倒挂——不同交易所、不同构造方法。且 dvol 在 _overview_vol_inputs 里没有任何 age 闸，而同一函数里 stock_iv_term 有 2h 闸（OVERVIEW_TERM_FRESH_SEC）、_xopt_block 自带 2h 闸、_stock_iv_block 有 4 天 stale 闸——dvol 是唯一的例外，Deribit 断供后旧值可无限期冒充当前并继续驱动 0.85 分位提示。今天未触发倒挂（BTC 28.29 vs 34.04、ETH 41.5 vs 47.81），属潜伏缺口。",
+          "【P2·iv3 缺失时整条波动率提示静默消失，总览无标记】实测 74 品种中 22 个 iv3 为 None（17 个 us_stock_perp + 3 commodity + HYPE + 1 intl），这些品种的「N日预期波动」note 直接不出现；degraded 里的 iv3_missing_for_stop_check 只在详情页、且只在 side 非 None 时才记，总览页完全无痕。缺失不被伪装成中性值（这点没违规），但也没被披露——用户无法区分「这个票波动率正常所以没提示」和「这个票根本没有 IV 数据」。",
+          "【方法论·报告的盲区可以消除】out4.md 自陈「目标 pytest 因只读环境没有可写临时目录而未启动（FileNotFoundError: No usable temporary directory）」。实测只需 TMPDIR 指向 scratchpad：`TMPDIR=<scratchpad> .venv/bin/python -m pytest tests/test_policy_stopcheck.py tests/test_policy_volnote.py tests/test_dashboard_overview.py -q` → 27 passed in 0.22s。该盲区不成立，后续路线不应再以此为由跳过测试核验。"
+        ]
+      },
+      {
+        "route": "路线5：overview 横截面的正确性与性能（out5.md，7 条发现）",
+        "verdicts": [
+          {
+            "claim": "overview 既不校验 4h K线与 regime 的时间戳一致，也不持有全扫描只读事务，采集提交期间可能新价格配旧 regime，74 品种来自不同快照（自称 P0）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "时点一致性",
+            "evidence": "dashboard.py:1051-1053 `_latest_state` 只返回 rows[-1]['state']，而 storage.get_states(regime/storage.py:427-436) 明明带出 ts，时间戳被主动丢弃；dashboard.py:1324-1331 先 get_ohlcv 再两次 _latest_state；dashboard.py:1480-1494 无 BEGIN。写端确认：regime/storage.py:326 `conn.commit()` 单独提交 OHLCV，collector.py:619-654 之后才算状态并第二次 commit。实测 `storage.connect_ro(); c.execute('SELECT COUNT(*) FROM ohlcv'); c.in_transaction` → False（journal_mode=wal），各 SELECT 确为独立快照。但现库静态核验：72 个 4h 品种中 MAX(ohlcv.ts)<>MAX(regime_history.ts) 的数量为 0。",
+            "correction": "机制描述全对，但严重度是 P0 的判定不成立：窗口只存在于每轮采集中「某一个 symbol/tf 的两次 commit 之间」，量级是该品种 regime 滞后一根 4h bar 若干百毫秒；且系统有非对称迟滞确认折叠，单根 bar 极少翻转 regime。现库 0/72 不一致，无任何错误输出可复现。属于「不变量没被断言」而非「已产生错误判断」。",
+            "fix_hint": "`_latest_state` 改返回 (ts, state)，扫描层断言 state_ts == df 末根 ts，不等时进 unavailable: regime_4h_lagging；overview_payload 开头 conn.execute('BEGIN') 拿一次读快照，结束 commit。两处都是十行内改动，即使当前无表现也值得落，因为它把「静态核验通过」变成「运行时自证」。"
+          },
+          {
+            "claim": "signal_ok 只看 at + 当前 cRSI 三值，识别不了 regime 是否存在开仓单元格、也满足不了 S13「第二次超卖」，因此会错误宣告 P06 共振（自称 P0）",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "Policy 保真",
+            "evidence": "dashboard.py:1056-1064 `_signal_ok(at, crsi_zone)` 确实只吃两个参数。全库 74 品种详情实跑，signal_ok=True 共 5 个：JPM/XBI（range，有剧本）+ UBER-USDT(high_vol_chop, at_support, 超卖区)、XPD-USDT(high_vol_chop, at_resistance, 超买区)、XRP-USDT(squeeze, at_support, 超卖区)，三者均 tradeable=False, play=None——与报告完全一致。web/app.js:434-440 对 p.signal_ok===true 无条件渲染绿色 badge『位置 + 信号共振』。S13 合成复现：`_policy_play('trend_down','at_support',True,zone={'kinds':['ema200']})` → 'S13 深跌逆势做多（需二次确认·半仓）'，signal_ok=True，无二次超卖判定。",
+            "correction": "事实全对，但「会错误宣告 P06 共振」的实际暴露面比报告写的窄得多，够不上 P0：(a) regime/policy/location.py:141-146 `_semantics` 让 squeeze/high_vol_chop 一律 tradeable=False，这三个品种进不了 opportunity；(b) `_overview_lite`(dashboard.py:1406-1415) 根本不带 signal_ok，near/middle 层看不到；(c) Hermes 的 render_overview_context 只遍历 opportunity，也看不到。唯一暴露点是详情页那枚绿 badge，而它正上方的结论行同时写着『建议关注 · 暂无匹配剧本』。S13 分支现库 0 个实例，且剧本名本身已带『需二次确认』。",
+            "fix_hint": "最小修法不是重构整条链，是把展示层的语义拆开：badge 文案区分『cRSI 极值方向一致』（原始读数）与『P06 位置+信号共振』（需 play is not None 才成立）；app.js 的 sig 分支加 `p.play` 条件即可。另：详情页 renderPolicy 完全没渲染 location.meaning（overview.js:12-22 有现成 MEANING 表），把 'high_vol_reduce_frequency' 显示出来，误读空间基本消失。S13 二次超卖属信号层扩展（用户本期裁决 signals 只做 cRSI 超买超卖），建议记入下一期而非本轮。"
+          },
+          {
+            "claim": "risk 层只能与完成位置扫描的品种重叠，无法与 unavailable 重叠，现库漏掉 GS、SMH 已可计算的高 IV 风险",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "风险完备性",
+            "evidence": "dashboard.py:1325-1331 缺 4h OHLCV/regime 即提前 return，dashboard.py:1365-1369 的 vol 计算在其后；dashboard.py:1422-1427 对 item=None 直接 continue。实跑 `_overview_vol_inputs`：GS-USDT {'iv30':36.89,'iv30_rank':0.905}、SMH-USDT {'iv30':57.71,'iv30_rank':0.869}，用 price=None 调 vol_notes 仍返回『隐含波动历史高位（分位 0.9），policy §6.5 建议降频降仓』——不依赖价格。overview 实跑 counts={'opportunity':15,'near':28,'risk':57,'middle':29,'unavailable':2}，unavailable 正是 GS/SMH（reason=4h_ohlcv_missing），risk 57 条全部落在主分层内（0 条例外）。",
+            "correction": "事实与数字全部复现，但 P1 偏高。risk 是纯标注层不产生动作；GS/SMH 连 4h 序列都没有（库里 4h 仅 72 品种、1h 有 74，属新接入未回填），用户从总览对它们本来就无法做任何位置判断。这是「少了一条提醒」而非「给出错误提醒」。",
+            "fix_hint": "把 vol_notes 装配从 `_scan_overview_symbol` 的位置分支里提出来，即使结构测量失败也回填 `_vol_notes` 到 scan 顶层；`_partition_overview` 在 item is None 分支里也照样读 scan.get('_vol_notes') 入 risk。约 15 行。"
+          },
+          {
+            "claim": "1d 缺失在详情页保留，但 overview 的 near/middle/risk 删除该字段、Hermes 输出字面量 1d=None，未做到全链路显式降级",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "降级传播",
+            "evidence": "数字全部复现：库内 1d 仅 35 品种 / 全量 74，缺 39 个；按层统计 opportunity 9、near 16、middle 12、unavailable 2（合计 39）。`_overview_lite`(dashboard.py:1406-1415) 确实不含 regime_1d，risk 行(dashboard.py:1431-1436)也不含。`_deep_clean`(dashboard.py:63-77) 不删 None 键，opportunity 项确实保留 regime_1d=None。render_overview_context 实跑输出 `- APP-USDT | 4h=range 1d=None | …`。",
+            "correction": "三段指控里只有一段成立。(1) 「未做到全链路显式降级」不成立：唯一可行动的 opportunity 层 payload 保留了 regime_1d=None，且 web/overview.js:98 用 stateMeta(item.regime_1d) 回落为『状态不可用』并渲染成 `cRSI … · 1d 状态不可用`——前端已经明说，报告建议的「前端显示 1d 不可用」其实已实现。(2) near/middle 的 compact 行（overview.js:108-123）本来就不显示 1d，删键不构成「用中性值伪装缺失」，属 lite 设计。(3) 真正成立的只有 Hermes 那句中文简报里混一个裸 `None`，是措辞/可读性问题，不是判定失真。",
+            "fix_hint": "regime/agent.py:423-427 把 `1d={item.get('regime_1d')}` 改成缺失时输出『1d=不可用』，并在分层统计行补一句缺 1d 的品种数。其余不必改。"
+          },
+          {
+            "claim": "60 秒缓存无 single-flight，前端在慢请求完成前每秒重复触发 load()，一次冷刷新可并发跑多轮 74 品种扫描",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "并发/缓存",
+            "evidence": "dashboard.py:1470-1503 是裸全局 dict，无锁；dashboard.py:17/1765 用 ThreadingHTTPServer。web/overview.js:362-368 倒计时为 0 时每秒调 load()，而 view.nextRefresh 只在 load() 的 finally（overview.js:229）更新——loadSeq 守卫（213/218/223）只防「旧响应覆盖新渲染」，不防重入。冷缓存 4 线程实测：_scan_overview_symbol 被调 296 次（= 4×74 全扫），返回 4 个不同 payload 对象，耗时 6.17s；单线程冷扫描 1.29-1.34s，确实超过前端 1 秒重触发周期。",
+            "correction": "结论成立，但报告给的复现数字『scan_calls 8, expected_single_fill 2』我无法按其字面复现，也与 74 品种规模对不上（疑似缩样实验未说明）。正确量级是 4 线程 → 296 次品种扫描 / 4 份独立 payload。严重度我判 P2 而非 P1：只有 CPU 浪费与响应变慢，输出内容不受影响，也不会让人做出错误判断。",
+            "fix_hint": "overview_payload 外加 threading.Lock + 锁内二次查缓存（single-flight），TTL 改 time.monotonic() 防系统时钟回拨；前端在发起 fetch 时立刻 `view.nextRefresh = Date.now() + REFRESH_MS`，而不是等 finally。两处各 5 行。"
+          },
+          {
+            "claim": "Hermes 忽略 payload 的 updated_at，把缓存期内的旧横截面标成提问时刻的『此刻快照』",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "时间语义",
+            "evidence": "`grep -n updated_at regime/agent.py` 无任何命中——agent.py 从不读该字段。regime/agent.py:391-401 用 `now = time.gmtime()` 现取墙钟并输出『当前时刻: 2026-08-05 16:42 UTC（周三）——下方全部数据为此刻横截面快照』（实跑原样输出）。payload 的 updated_at 在 dashboard.py:1497 写的是扫描开始时刻，缓存 60 秒内原样返回。",
+            "correction": "断言准确，但 P1 偏高。误差上界 = OVERVIEW_TTL_SEC = 60 秒，而横截面的决策周期是 4h、数据本身是最后一根已收线 4h bar（现库年龄 4.75h）。60 秒的错标不足以改变任何 4h 级判断。它是一句「事实性措辞不严谨」，不是判定层污染。",
+            "fix_hint": "render_overview_context 同时输出『提问时刻』与『横截面生成时刻(ov.updated_at)』并给出快照年龄；超过 TTL 明写『缓存快照』。约 6 行，代价极低，建议顺手做掉。"
+          },
+          {
+            "claim": "一次 overview 冷扫描执行 719 条 SELECT，存在按品种 N+1 与重复财报/IV 查询",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "性能/N+1",
+            "evidence": "用 sqlite3.Cursor 子类计数实跑，总数精确复现 719，分布：earnings 236 / regime_history 144 / ohlcv 75 / vol1h 72 / stock_iv_term 60 / stock_vol_live 60 / stock_vol 59 / opt_iv_near 10 / dvol 2（报告的 heartbeat 3 在我的 tag 规则下归入其他，差异不实质）。regime_history 144 = 72 品种 × 2 周期，ohlcv 75 = 74 + storage.symbols() 自身一条，均为教科书式 N+1。冷扫描 1.29s，缓存命中 ~0s。重复财报查询经代码确认：_overview_vol_inputs(dashboard.py:1282-1285) 调 earnings_proximity，而它上一行调的 _stock_iv_block 内部(dashboard.py:383-385)已经查过一次。",
+            "severity_note": "",
+            "fix_hint": "优先级排序正确：先补 single-flight（发现 5），CPU 优化其次。真要做，收益最大的是 earnings（236 条，占 1/3）——按 us_stock_perp 品种集一次性预取到 dict，以及消除 _stock_iv_block 与 _overview_vol_inputs 的重复查询。1.3s/次 + 60s 缓存的现状不构成使用障碍。"
+          }
+        ],
+        "missed": [
+          "overview 层没有逐品种数据陈旧闸。详情页 _tf_payload 会算 health.stale/warmup 并进 health.issues 横幅，但 _scan_overview_symbol(dashboard.py:1323-1397) 全程不检查 df 末根 ts 的年龄——某个品种的 feed 断供后，它的机会卡会继续用几天前的价格与 regime 留在 opportunity 里，总览上只有一个全局 heartbeat 条，没有任何逐品种年龄标注。现库全部 72 个 4h 品种年龄一致（4.75h，即刚收线），所以暂未暴露。P2（潜在），修法：item 带 last_bar_age_min，超阈值降级或加醒目标注。",
+          "风险标注可以静默消失且总览无 degraded 通道。dashboard.py:1365-1369 用裸 `except Exception: notes = []` 吞掉全部异常；详情页同一段(dashboard.py:1227-1230)会把 `vol_inputs_unavailable:<异常名>` 写进 degraded，而 overview 的 item 结构里根本没有 degraded 字段。后果是某品种的高 IV / 财报临近提醒整条消失，前端与 Hermes 都看不到「本该有但算不出」。P2。",
+          "near/middle 的 lite 投影丢掉 tradeable 与 location.reason，被 wrong_approach 否决的品种仍以「候选」语义示人。实跑现库有 2 例：DIS-USDT、EWJ-USDT，均为 trend_up + at_support、meaning=pullback_long_opportunity、tradeable=False（reason=wrong_approach），在总览「接近」区渲染成『趋势支撑回踩候选』（overview.js:117 的 MEANING 映射），没有任何字样说明它是被来向门槛否掉的。分区标题『接近但尚未满足门槛』只做了泛化兜底。P2，修法：lite 带 reason，compact 行补一句否决原因。",
+          "dashboard.py:1441-1442 `_partition_overview` 末尾的 else 分支是死代码：locate() 只会返回 at_support/at_resistance/middle_zone 三值，at=None 的情况已在 _scan_overview_symbol:1356-1357 提前拦成 unavailable，因此这个 `unavailable.append({'reason': 'location_unavailable'})` 永不可达。P2 死物，清理或改成 assert。"
+        ]
+      },
+      {
+        "route": "路线6：前端两页（overview 总览页 + /symbol 详情页）— 对抗核验 5 条发现（原报告自称 2 条 P0），另附 4 条原报告漏掉的问题",
+        "verdicts": [
+          {
+            "claim": "信号未共振时系统没降级为 WAIT，反而把 13 个品种放进首页「机会位」并展示做空剧本（自称 P0）",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "信息架构 / 分层与排序",
+            "evidence": "数字复现无误：`.venv/bin/python -c 'import dashboard; p=dashboard.overview_payload()'` → opportunity=15，其中 signal_ok=False 13 个、True 2 个（JPM-USDT、XBI-USDT）。dashboard.py:1438 确实只按 `item['tradeable'] is True` 入 opportunity，不看 signal_ok。\n但「没有降级为 WAIT」不成立：(a) dashboard.py:1087-1089 `_policy_play` 在 signal_ok is False 时把剧本名改写成 `S3 区间上沿做空（位置到了信号没到）`——这正是 policy §2.1/§2.3 该单元格的 WAIT 原话；(b) web/overview.js:100 给该卡片加 `waiting` class，overview.html:30 `.opp-play.waiting{color:var(--warn-fg)}` 渲染为警示色；(c) 详情页 web/app.js:434-441 另有独立徽章 `位置已到 · 信号未共振`（badge warn）；(d) 全系统根本不存在 action 字段——docs/DESIGN_POLICY_LAYER_20260805.md:122「期 0：只装配 PolicyInput，不出任何动作」，regime/policy/location.py:3-5「本模块不产生交易动作」。所以不存在「本该输出 WAIT 却输出了 OPEN」这回事。",
+            "correction": "真正的缺陷是分层与排序，不是「未降级」：①「机会位」这个区名 + 计数 15 与「接近关键位」的副标题「位置已到，政策门槛尚未齐」语义打架——后者才是这 13 条的准确描述；② dashboard.py:1445 `opportunity.sort(key=dist_key)` 只按 dist_atr 排，导致唯一两个真共振项里 JPM 被排到第 5 位、XBI 第 9 位，首屏三张卡全是未共振项。一眼扫过的用户读到的是「15 个机会」而非「2 个共振 + 13 个只到位置」。",
+            "fix_hint": "不必改 payload 结构。overview.js 内把 opportunity 二次分组渲染：`signal_ok===true` 一组置顶（标题「位置+信号共振」），其余归入「位置候选 · 信号未到」；oppCount 显示 `2 / 15` 双数字。排序键改为 `(signal_ok?0:1, dist_atr)`。"
+          },
+          {
+            "claim": "两页剧本文案含「做多/做空/加仓」，违反「系统不下单、文案不得出现指令式措辞」的铁律（自称 P0）",
+            "status": "REFUTED",
+            "severity": "P2",
+            "kind": "文案 / 断言依据不存在",
+            "evidence": "该「铁律」在本仓库不存在。全仓 grep「铁律|不下单|指令式」只命中：docs/DESIGN_POLICY_LAYER_20260805.md:45「系统永不下单。输出止于『建议 + 完整理由链 + 溯源编号』」和 :180 防护「shadow 模式 +『建议/不下单』贯穿全部输出」——要求的是**不下单 + 带建议标注**，从未要求剔除方向词。两条要求都已满足：overview.html:68 头部「4h 决策 · 1d 底座 · 建议关注，不构成交易指令」、:135 页脚「系统不下单 · 不构成投资建议」；每条剧本前缀固定为「建议关注 · 」（overview.js:101 / app.js:433）。\n且「S1 反弹至压力做空」「S3 区间上沿做空」是 eric-policy.md §2.2/§2.3 的剧本原名，dashboard.py:1075-1085 的注释明写「映射成剧本展示名」——改成『空头条件候选』反而切断 S1/S3/S4/S5/S13 与 policy 原文的溯源对应，与 §9「每条规则带溯源编号」的纪律相悖。",
+            "correction": "整条断言的前提（那条铁律）是虚构的。唯一站得住的残渣是「S5 突破回踩加仓」这五个字：policy §2.1 原文是「OPEN_LONG（**可为**加仓）」，加仓语义以持多单为前提，而 position/account 状态层本期未建设，系统无从知道用户是否持仓——此处把条件性表述写成了无条件。",
+            "fix_hint": "只改这一处：dashboard.py:1076 `S5 突破回踩加仓` → `S5 突破后回踩前高（持多可为加仓）`。其余四条剧本名保持不动。"
+          },
+          {
+            "claim": "两页逐秒 UTC 时钟 + 「刷新 Ns」倒计时，构成用户明确要求避免的秒表式催促设计",
+            "status": "REFUTED",
+            "severity": "P2",
+            "kind": "误读需求 / 张冠李戴",
+            "evidence": "用户从未提过这个要求。全仓「秒表|催促|倒计时」只命中 docs/DESIGN_POLICY_LAYER_20260805.md:96「政策卡输出『环境回执 + 九条 veto 灯 + WAIT』，**不做「已等待 N 根」的秒表**（那正是 §6.3 踏空否决要防的心理）」和 :181「不做 WAIT 计时器、不做推送」。被禁的是**持仓/等待时长计时器**——它会制造「等太久了该动手」的踏空心理；被指控的是**数据刷新倒计时**，与交易心理无关。政策卡（app.js:412-497 renderPolicy）确实没有任何 WAIT 计时器，设计要求实际是被遵守的。\n另：`countdown` 元素在 web/index.html 里可追溯到仓库首次提交 2987dd6（`git log -S'countdown'`），远早于 policy 层三批（dd9c10c/bb0a184/6e7946a），根本不在本次审查主题范围内。",
+            "correction": "把「不做 WAIT 秒表」偷换成「不做刷新倒计时」，且把一个存在于首次提交、与 policy 层无关的既有 UI 件算进本轮改动。",
+            "fix_hint": "无需修改。若纯为观感想调整，仅属个人偏好，不应记为发现。"
+          },
+          {
+            "claim": "/symbol?symbol=XXX 只做字符正则、不做 74 品种白名单校验，未知品种被当成「数据库为空或历史不足」并误导用户去跑采集器",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "输入边界 / 误导性错误提示",
+            "evidence": "三处均复现：web/index.html:229-232 IIFE 只 `/^[A-Za-z0-9._:/-]{1,64}$/.test(symbol)` 后 `S.symbol = symbol.toUpperCase()`；dashboard.py:1618-1619 `/api/dashboard` 直接 `symbol=(qs.get('symbol') or ['BTC-USDT'])[0]` 送进 build_dashboard，无任何校验——对比同文件 :1683-1691 的 `/api/agent/chat` 对 scope=symbol 走了 `storage.symbols(conn)` 白名单并返 400，两个入口口径不一致，属实。\n实跑 `build_dashboard('NOTREAL')` → `tfs=[]`，`policy.degraded=['regime_4h_missing','regime_1d_missing','4h_ohlcv_missing']`，且 `instrument={'class':'crypto','display':None}`（instruments 对未知 symbol 静默兜底成 crypto）；web/app.js:285-287 因 `!tfs.length` 打出「数据库为空或历史不足——请先运行采集器」。SQL 侧确认 `SELECT COUNT(DISTINCT symbol) FROM ohlcv WHERE symbol='NOTREAL'` = 0，注册品种共 74。",
+            "correction": "事实全对，但严重度虚高。(1) 无注入面——storage 全走参数化查询，symbol 也进不了 Hermes 的 <panel>（那条路已有白名单）；(2) 触发需用户手改 URL，正常导航（overview 卡片 detailHref、品种菜单）只生成注册表内 symbol；(3) 后果止于一条不准确的横幅，不产生任何错误的交易判断。按 P0 门槛（错误交易判断 / 污染判定层 / 中性值伪装缺失 / 系统下单）一条不沾，判 P2。",
+            "fix_hint": "dashboard.py:1618 加 `if symbol not in set(storage.symbols(conn)): return self._json({'error': f'未知品种: {symbol[:32]!r}'}, code=400)`，与 :1691 的 chat 校验同源；app.js loadSymbols 后若 S.symbol 不在 S.symbols 则退回 S.symbols[0] 并 `history.replaceState` 规范化 URL。顺带把 instruments 对未知 symbol 兜底成 crypto 也改成显式 unknown。"
+          },
+          {
+            "claim": "新页面把内部枚举与错误码直接暴露给用户（eligible / APPROACH / 原始 regime / 来源键 / 降级码），未满足「全部用户可见中文」",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "术语口径 / 单源纪律回归",
+            "evidence": "暴露点逐个复现：web/index.html:92 `<th>eligible</th>`、:98 `<b>APPROACH 路径</b>`；web/app.js:428-429 `${p.regime_4h}` / `1d ${p.regime_1d}` 直出 `range`、`trend_down`；:457 `(zone.kinds||[]).map(esc).join(' · ')` 直出 `pivot_high · prev_week_hi · range_hi`；:495 `降级标注：${degraded.join(' · ')}` 直出 `regime_1d_missing`；web/overview.js:168 `item.reason` 直出 `4h_ohlcv_missing`。实跑 XBI-USDT 详情：regime_4h=`range`、degraded=`['regime_1d_missing','ema200_history_insufficient']`，均原样上屏。\n但报告引用的「全部用户可见中文」这条要求在仓库里查无出处。",
+            "correction": "依据换一条更硬的：app.js:36 有明文注释「中文标签只消费 dashboard.states_map；前端仅保留经过可视化校验的状态颜色」，且 stateMeta()（app.js:37-41）就是为此存在的单源函数——这是 docs/AUDIT_CONSISTENCY_20260805.md t7/t9「五状态中文标签双源」在「修复批 A：标签单源」里已闭环的整改项。renderPolicy 在同一个文件里绕过了自己刚建的 stateMeta，属**已闭环审查项的回归**，比「不够中文」严重得多，但仍止于可读性，不改变任何判定值，判 P2。",
+            "fix_hint": "app.js:428 改用 `stateMeta(p.regime_4h).label`；index.html 表头 `eligible`→`政策适用`、`APPROACH 路径`→`来向路径`；在 app.js 与 overview.js 共用一份 `KIND_CN`（pivot_high→结构前高 / prev_week_hi→前周高 / range_hi→区间上沿 / ema200→EMA200）与 `DEGRADED_CN`（regime_1d_missing→1d 状态缺失 / ema200_history_insufficient→EMA200 历史不足 / 4h_ohlcv_missing→4h K 线缺失），原码保留在 title 提示里供排障。"
+          }
+        ],
+        "missed": [
+          "【P1｜总览页丢弃全部降级标注，与详情页对同一品种给出不同的数据可信度】`_scan_overview_symbol`（dashboard.py:1324-1396）只在**没有 item** 时把 `levels['degraded']` 写进 reason；一旦品种成功出 item，degraded 与 4h health（warmup/stale/bars）全被丢弃，`_OVERVIEW_FULL_KEYS`（dashboard.py:1400-1404）里也没有对应字段，overview.js 无从渲染。实证：XBI-USDT 在总览是**完全共振**的「建议关注 · S3 区间上沿做空」（signal_ok=True，无任何标记），而 `build_dashboard('XBI-USDT')` 同一时刻给出 `health.issues=['4h 预热中（仅 163 根，分位参照期不足）']`、`policy.degraded=['regime_1d_missing','ema200_history_insufficient']`。15 个机会位里有 3 个（APP 158 根 / XBI 163 / GEV 158）低于 WARMUP_BARS=280。曝光度最高的页面反而是最不诚实的，直接抵触已完成的治理项「③ WARMUP / DATA_DEGRADED 标志贯通」。修法：item 增加 `degraded`/`warmup`/`bars` 三字段，卡片右上角出「预热中」「1d 缺失」小徽章。这条比原报告任何一条都重。",
+          "【P1｜信号周期 = 决策周期，policy §0「小周期 3m-1h 信号」被违反且 UI 无标注】dashboard.py:1215 与 :1359 都是 `crsi_features(df)`，而 df 来自 `storage.get_ohlcv(conn, symbol, '4h', ...)`——超买超卖信号取自 **4h 自身**。eric-policy.md:20 明写 signals 是「小周期（3m-1h）信号」，其价值正在于比决策周期更细；docs/DESIGN_POLICY_LAYER_20260805.md:82 也定「阶段一用 1h」。同周期 cRSI 让 P06「位置+信号共振」退化为「同一根 K 线上位置和振荡器同时极值」，共振率与 policy 原意不可比。库里 1h 数据是齐的（`storage.get_ohlcv(...,'1h')` 可用），并非做不到。至少应在卡片与政策卡上标明「信号周期 4h（policy 要求 3m-1h，暂以决策周期代）」。",
+          "【P2｜overview.js 硬编码中文状态标签，重演已闭环的 t7/t9「标签双源」，且丢了限定语】web/overview.js:5-11 `const STATE = {trend_up:{label:'趋势上行'}, ... high_vol_chop:{label:'高波动非趋势'}}`，而后端 `dashboard.STATES` 实为 `{... 'high_vol_chop': '高波动非趋势（趋势条件未齐）', 'squeeze': '低波动挤压（蓄势）'}`——限定语「（趋势条件未齐）」在总览页被删掉，正是 docs/AUDIT_CONSISTENCY_20260805.md t7 记录、批 A 已在 app.js 修掉的同一个病灶。而且 `overview_payload()`（dashboard.py:1494-1500）压根没下发 `states_map`，overview.js 想单源也没东西可消费。修法：overview_payload 输出加 `states_map: STATES`，overview.js 的 STATE 只留颜色。",
+          "【P2｜zoneLabel 对 role_flipped 一律写「突破后回踩前高」，反向翻转会给出事实错误的描述】web/overview.js:52 `if (item.role_flipped) return '突破后回踩前高';` 无条件返回。但 location.py:130 的 `_eligible` 在 trend_down + at_resistance 下明确接纳 `_LOW_KINDS and flipped`，即 policy §2.2 的「原支撑变压力」——此时正确说法是「跌破前低后反弹至该位（支撑变压力）」，卡片却会写成「突破后回踩前高」，方向完全相反。当前快照恰好 0 例命中（15 个机会位 role_flipped 全为 false），属潜伏缺陷。修法：按 `item.at` 分叉，at_resistance+flipped → 「原支撑变压力」，at_support+flipped → 「突破后回踩前高」。"
+        ]
+      },
+      {
+        "route": "路线7：Hermes 集成（单品种 + 横截面双模）——out7.md 共 6 条，全部复核完毕",
+        "verdicts": [
+          {
+            "claim": "单品种 Hermes 的 <panel> 完全丢弃 policy 块（剧本/止损校验/位置全看不到），造成决策层严重失真（原报 P0）",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "注入缺失（事实成立，但\"严重失真\"定性偏重）",
+            "evidence": "grep 全文：regime/agent.py 里唯一出现 policy 的是第 652 行注释，render_context()（149-386 行）没有任何 p[\"policy\"] 读取路径。实跑 dashboard.build_dashboard('JPM-USDT')：payload['policy']={play:'S3 区间上沿做空', signal_ok:True, location.at:'at_resistance', stop_check:{verdict:'too_tight', ratio:0.1902}, degraded:['regime_1d_missing']}；同一 payload 过 render_context() 得 1556 字符，对 'policy'/'剧本'/'止损'/'共振'/'S3' 的包含检查全部 False，连 location/zone 都没有。dashboard.py:1018 构建、:1040 入 payload，行号准确。",
+            "correction": "事实全部复现，但\"失真\"要收：详情页 Hermes 开场白（web/index.html:215）逐项列举了它能读什么（状态/特征值/cRSI/IV-RV/VWAP/翻转历史），并未宣称能读政策卡——与第 2 条那种\"宣称能读却没注入\"不是一类。真实危害是同页双界面结论不一致：左边政策卡写 stop_check=too_tight（GATE 1 不过），右边 Hermes 在 hermes_system.md\"70% 就行动\"驱使下只凭 cRSI 超买+range 可能给做空建议。够 P1 不够 P0：信息缺席，未污染判定层、未用中性值伪装缺失（policy 自身 degraded 机制是干净的）。",
+            "fix_hint": "render_context() 增加 policy 段，最小集：4h/1d regime + location(at/meaning/role_flipped/dist_atr) + signal_ok + play + stop_check(verdict/ratio/note) + vol_notes + degraded 原因原样带出。overview_brief() 已在 symbol scope 注入，与总览不重复。"
+          },
+          {
+            "claim": "overview 页面宣称能读\"接近\"横截面，实际只注入接近数量，near 明细、unavailable 原因、五路心跳、payload 时间全部省略",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "注入缺失 + UI 宣称与实际不符",
+            "evidence": "实跑 overview_payload()：keys 含 updated_at/near/unavailable/heartbeat，counts={'opportunity':15,'near':28,'risk':57,'middle':29,'unavailable':2}，与报告逐个吻合。render_overview_context()（389-444 行）产出 7003 字符（报告 7003 精确命中），'心跳' not in ctx、'updated' not in ctx；near 只以第 405 行的\"接近 28 个\"出现，28 个 symbol 一个未进。unavailable 实际带可诊断原因 GS-USDT/SMH-USDT = 4h_ohlcv_missing，被压成\"不可用 2 个\"。web/overview.html:126 确写\"我能读到总览当前的机会、接近、风险与观望横截面\"。",
+            "correction": "补一层报告没抓到的放大效应：chat()（agent.py:652）对 overview scope 置 ov=\"\"，而 scripts/vvvquery.py 只读查询接口的用法说明只写在 overview_brief()（agent.py:605-617）。总览 Hermes 既无 near 明细，也不知道能自查补齐——问\"哪些品种接近关键位\"时除编造无第二条路。这是本条判 P1 而非 P2 的理由。",
+            "fix_hint": "注入 _overview_lite 已有字段（symbol/regime_4h/at/meaning/dist_atr/crsi.zone，28 条约 1.5KB）；unavailable 带 reason；heartbeat 与 updated_at 各一行。若坚持省略，PANEL_LEGEND 总览段须逐分区写明\"只给数量\"，并同步改 overview.html:126 开场白。"
+          },
+          {
+            "claim": "risk 是可与四个主分区重叠的标签，Hermes 收到的却是\"分层统计\"、legend 未说明重叠，容易把 74 个品种误读成 131 个",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "口径措辞（非判定逻辑缺陷）",
+            "evidence": "dashboard.py:1429-1436 先按 _vol_notes 独立 append 进 risk，:1438 起才做互斥切分，中间无 continue，重叠是结构性的。实跑集合运算：risk∩opportunity=13、risk∩near=22、risk∩middle=22、孤儿=0——57 个 risk 全部同时躺在别的分区里。15+28+29+2=74；sqlite3 COUNT(DISTINCT symbol) FROM ohlcv 也是 74。agent.py:403 行首字面为\"分层统计: \"，PANEL_LEGEND（agent.py:84-86）未提重叠。",
+            "correction": "降到 P2。此条不改变任何判定，也不改变任一品种的 at/play/signal_ok；最坏后果是模型把\"风险 57\"复述成\"57 个品种处于风险状态\"。离\"让使用者做出错误的交易判断\"隔一层，不到 P1——报告给 P1 属于把展示层措辞当判定问题。",
+            "fix_hint": "第 403 行拆两段：\"主分区（互斥，合计=全宇宙）: 机会/接近/观望/不可用\" + \"风险标签（叠加，不可与上面相加）: 57\"；PANEL_LEGEND 同步加\"risk count 不可与其它 counts 相加\"。"
+          },
+          {
+            "claim": "overview 注入 at_resistance / range_edge_opportunity / from_above / None / 1d=None 等原始枚举，legend 无枚举字典、也未说明 1d 缺失时 4h 判断降级保留",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "legend 缺口",
+            "evidence": "agent.py:422-427 直接插值 item['at']/['meaning']/['approach']/['regime_1d']。实跑逐条形如：\"- ARM-USDT | 4h=range 1d=None | 位置=at_resistance(range_edge_opportunity,距0.00ATR,来向None) | 信号=cRSI 带内(72.94)/信号未共振 | 剧本=S3 区间上沿做空（位置到了信号没到）\"。PANEL_LEGEND 总览段仅 agent.py:84-86 三行，无 at/meaning/approach 字典，无 1d 缺失口径。near 的 meaning 枚举更晦涩（实跑有 reduce_long_not_open_short、prior_low_support_not_tradeable），按第 2 条补进注入后立刻需要字典。",
+            "correction": "英文枚举本身自解释性尚可，主要伤害集中在 approach=None 与 1d=None 两个裸 None——模型无从区分\"算过=无\"与\"根本没数据\"。P2。",
+            "fix_hint": "渲染时直接输出中文语义（位置=压力位·区间上沿机会·来向未判定）比补字典更稳；1d 缺失统一渲染为\"1d=无数据(底座缺失,本条仅 4h 判定)\"。"
+          },
+          {
+            "claim": "送模提示词没有\"系统不下单、建议不得升级为买卖指令\"的硬约束，且自定义人设要求\"就行动、不要机械地再等等\"，与 policy 的 WAIT-first 正面冲突",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "提示词护栏（部分成立，冲突程度被放大）",
+            "evidence": "行号全部核准：hermes_system.md:6-17 确为\"信息永远不完整/70% 规则/即使存在不确定性也要给出当下最优行动，而不是机械地说再等等\"；eric-policy.md:7 确为\"大多数时刻的正确动作是 WAIT\"。grep 不下单|不构成|投资建议 全仓：只命中 web/index.html:197、web/overview.html:68 与 :135 三处网页文案；agent.py 的 system 装配（665-670：load_system + system_brief + [overview_brief] + gap_note + PANEL_LEGEND + <panel>）一句都没有。",
+            "correction": "两处修正。①\"正面冲突\"过重：机制层已有三处 WAIT 护栏——PANEL_LEGEND agent.py:86\"不应把 WAIT 误读成数据缺失\"、render_overview_context agent.py:433 与 :443 两次\"WAIT 是常态\"——报告完全没提，造成\"毫无 WAIT 防线\"的失实印象；真正裸奔的是 symbol scope（无任何 WAIT 框架，且叠加第 1 条 policy 全缺）。②\"缺硬约束\"是护栏提案而非规格违反：eric-policy.md §0/§9 未要求宿主注入免责声明，且 agent.py:36-38 设计注释明写 hermes_system.md 由用户完全掌控，要求机制层覆盖用户人设属于建议。铁律层面系统确实不下单（代码无任何下单路径），未被违反。故 P2。",
+            "fix_hint": "最小改动：PANEL_LEGEND 尾部加一段用户人设覆盖不掉的机制层声明——\"本系统只输出研究结论与关注/等待/风险条件，不下单、不产出执行指令；任何 OPEN 剧本必须同时陈述未校验的 GATE，GATE 未过一律表述为 WAIT。\""
+          },
+          {
+            "claim": "上下文按\"20 条×每条 8000 字符\"裁剪，缺 provider-aware token 上限，最坏输入约 17.3 万字符",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "容量隐患（当前未触发）",
+            "evidence": "agent.py:674-680 确为 str(content)[:8000] 后取 [-20:]，无 token 计算。数字逐个复算：overview context 7003 字符（命中）；overview scope 完整 system = load_system 788 + system_brief 1937 + PANEL_LEGEND 2043 + 分隔符与 <panel> 标签 ≈ 11793（命中）；sqlite3 取 chat 最近 20 条 SUM(LENGTH(content))=26444（命中）；当前总输入约 38237 字符；上限 11793+20×8000=171793（算式成立）。",
+            "correction": "补两点。①11793 是 overview scope 基座；symbol scope 因多注入 overview_brief（实测 9350 字符）更大，实测基座约 14118 + panel 1556，理论上限约 17.6 万字符，报告上限略偏小。②危害面：超限会让 anthropic/openai 直接返回 API 错误并被 chat() 的 except 兜成 {\"error\":...}，是显式失败而非静默截断面板，不污染输出。P2 无异议。",
+            "fix_hint": "按 provider 上下文窗倒序装配历史并预留 output 预算；优先压缩重复的 risk 文案（实测风险段独占 3787/7003 字符，54%），腾出空间正好补第 2 条缺失的 near 明细。"
+          }
+        ],
+        "missed": [
+          "【P1·1d 底座名不副实】overview 头部与注入首行均写\"4h 决策 · 1d 底座\"，但 sqlite3 实查 ohlcv 里 tf='1d' 只有 35 个 symbol（4h 72、1h 74），JPM-USDT 的 1d 根数为 0；实跑 15 条机会位里 9 条 regime_1d 为 None。overview payload 完全没有 degraded 字段，注入文本只写\"1d=None\"，无法区分\"判定过但无状态\"与\"根本没采到\"；而 _policy_play(dashboard.py:1067) 只吃 regime_4h，1d 缺失既不下调剧本也不给降级提示（详情页 policy 至少还有 degraded=['regime_1d_missing']，总览连这个都没有）。半数以上宇宙的底座是空的，却与有底座的品种并列同一行呈现。",
+          "【P2·\"机会 15 个\"口径与 GATE 4 不一致】counts.opportunity 取自 tradeable（位置资格），与信号无关。实跑 15 条机会位 signal_ok 分布为 False×13 / True×2——真正\"位置+信号共振\"只有 JPM-USDT 与 XBI-USDT。逐条文本虽写了\"信号未共振\"，但首行\"机会 15 个\"配上 legend\"counts 为机会…数量\"会被读成 15 个可做的机会，与 policy P06/GATE 4 差 7.5 倍。建议改为\"位置合格 15（其中位置+信号共振 2）\"。",
+          "【P2·总览 Hermes 自查能力被切断】chat()（agent.py:652）对 overview scope 置 ov=\"\"，而 scripts/vvvquery.py 只读查询接口的全部用法说明只存在于 overview_brief()（agent.py:605-617）。总览 Hermes 既拿不到 near/unavailable 明细，也不知道可自行查库补——两个缺口叠乘，使\"编造 28 个 symbol\"成为阻力最小路径。",
+          "【P2·render_context 字面泄漏 Python None】实跑 JPM-USDT 注入文本出现\"美股波动率: VIX°=16.19(...) RV30=None ...\"——agent.py 美股波动率行的 f\"RV30={uv['rv_last']}\" 无 None 守卫（同行内 spread/xopt/rv3 都有守卫，唯独 rv_last 没有）。缺失以 None 呈现而非显式\"不可用\"，与本系统\"缺失必须显式\"的口径不一致。",
+          "【P2·缓存年龄被表述成\"此刻\"】overview_payload 有 OVERVIEW_TTL_SEC=60 缓存（dashboard.py:48、:1477），payload 自带 updated_at，但 render_overview_context 首行硬写\"当前时刻: … ——下方全部数据为此刻横截面快照\"且未注入 updated_at。60 秒偏差本身无害，问题是模型没有任何字段可判断快照年龄——与项目已投入大量工程的时间感知三件套（当前时刻锚点/历史时间前缀/时间跳变横幅）属同类风险的漏网。"
+        ]
+      },
+      {
+        "route": "端到端对拍复核（严格只读）。路径：①通读 out8.md 与 eric-policy.md 原文；②读 regime/policy/{location,volnote,stopcheck,levels}.py + dashboard.py 政策装配段（_signal_ok/_policy_play/_policy_side/_build_policy_payload/_overview_vol_inputs/_scan_overview_symbol/_partition_overview/overview_payload）+ web/app.js renderPolicy + web/overview.js + regime/agent.py `<panel>` 装配；③读 docs/DESIGN_POLICY_LAYER_20260805.md 确认分期路线（期0 只装配、期1 只跑§5+§6、期3 才放 OPEN_* 建议），据此区分「缺陷」与「下一期」；④.venv 只读实跑：全 74 品种逐个跑 _build_policy_payload + overview_payload 做全宇宙对拍，而非只看报告给的 6 个样本；⑤sqlite3 只读查 opt_iv_near / stock_iv_term / ohlcv×regime_history ts 对齐 / 4h 根数分布；⑥跑 65 个 policy 测试确认基线。关键增量：报告只举了 6 个样本，我跑了全宇宙，得到三组决定性统计——「绿 badge 但 tradeable=False」只有 3 个（且 play 全为 None）、「tradeable+signal_ok 双绿」只有 2 个（且两个的 stop_check 全判 too_tight）、「有 stop_check 的 11 个品种 100% 判 too_tight」。第三条是报告完全没抓到的、比它 6 条 P0 更实的问题。",
+        "verdicts": [
+          {
+            "claim": "实现只有剧本名，缺 action/持仓/风险定仓/RR/DCA/情绪否决闭环，且门槛失败不把剧本降级为 WAIT",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "复合断言：前半 REFUTED（越期指控），后半 CONFIRMED（门槛不降级）",
+            "evidence": "前半：docs/DESIGN_POLICY_LAYER_20260805.md §3.7 分期表白纸黑字——期0 只装配 PolicyInput『不出任何动作』、期1 才跑 §5+§6 且 OPEN_* 硬为 0、期3 才开放 OPEN_* 建议；position/account/DCA 属期1、gates/action 属期2-3。当前 commit 6e7946a 交付的是『详情页政策卡』，本就不该有 action。用 policy §0/§3 的完整闭环去要求期0 交付物，属于把未实现的下一期功能当 bug。后半：实跑全 74 品种，tradeable=True 且 signal_ok=True 的只有 2 个（JPM-USDT ratio=0.190、XBI-USDT ratio=0.306），**两个的 stop_check.verdict 全是 too_tight**，而 dashboard.py:1221 `base['play']=_policy_play(...)` 在 dashboard.py:1235 的 find_structural_stop/check_stop_vs_iv 之前生成，止损结果不反哺 play；web/app.js:433 顶层结论仍渲染『建议关注 · S3 区间上沿做空』+ 434-441 绿色 badge『位置 + 信号共振』。报告引的 dashboard.py:1142/1067/1221 行号全部准确。",
+            "correction": "『缺决策闭环』不是缺陷而是分期设计，应剔除；成立的只有一条：GATE 1 的止损宽度判定已经算出来了却不参与顶层结论，且今天 100% 的双绿样本都是 too_tight。此外报告漏了更狠的一层——主页 opportunity 卡的 _OVERVIEW_FULL_KEYS（dashboard.py:1397-1401）根本不含 stop_check，_scan_overview_symbol 也不计算它，所以最显眼的出口连那行『严重提示：偏紧』都没有。",
+            "fix_hint": "不要按报告建议『新增单一决策器 + 接持仓/RR/DCA/veto』（那是期1-3，越期施工会撞分期纪律）。本期只做两件小事：(1) 把 stop_check 提到 play 之前算，verdict∈{too_tight} 时顶层结论改『建议关注 · S3 区间上沿做空（GATE 1 未过：止损宽度不足）』并把 badge 降级为 warn；(2) 把 stop_check 加进 _OVERVIEW_FULL_KEYS 并在 overview.js 机会卡渲染，消除主页比详情页少一道告警。"
+          },
+          {
+            "claim": "signal_ok 与 play 不检查 location.tradeable，会在政策不可交易时显示绿色『位置+信号共振』，或在来向失败时仍给出加仓剧本",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "展示层判定越权（代码事实成立，影响范围小于报告所述）",
+            "evidence": "代码层成立：dashboard.py:1056 `_signal_ok(at, crsi_zone)` 只吃 at 与 cRSI 带；dashboard.py:1067 `_policy_play(regime, at, signal_ok, role_flipped, zone)` 签名里确实没有 tradeable/reason；app.js:435 `if (p.signal_ok === true)` 直接给绿。但实跑全 74 品种，『signal_ok=True 且 tradeable=False』只有 3 个：UBER-USDT、XPD-USDT（均 high_vol_chop/high_vol_reduce_frequency）、XRP-USDT（squeeze/wait_for_confirmed_breakout）——**三个的 play 全是 None**，顶层结论渲染的是『建议关注 · 暂无匹配剧本』，所以不存在『绿共振 + 可交易剧本』的组合。报告举的 DIS-USDT 那半条不成立：DIS 的 signal_ok=False（cRSI 带内），badge 走的是 439 行 warn 分支『位置已到 · 信号未共振』，play 带后缀『（位置到了信号没到）』，而且 app.js:468-475 的 APPROACH 卡明确渲染『未满足该剧本要求（需要从上方回踩）』——来向失败在详情页是显式可见的，不是被吞掉。overview 侧完全正确：_partition_overview（dashboard.py:1441）以 item['tradeable'] is True 为准入，DIS/XPD/XRP 全部落进 near 走 _overview_lite，主页不给剧本。",
+            "correction": "真正的缺陷是更窄的一条：详情页政策卡**全页不渲染 location.tradeable 与 location.meaning**（grep web/app.js 无 tradeable/meaning，MEANING 字典只存在于 overview.js:12-22），所以 high_vol_chop 的『policy 建议降频降仓』这条 §6.5 语义只在主页可见、详情页彻底丢失，同时还配一个绿 badge。不是『判定矛盾』，是『详情页缺了 overview 已有的语义字段』。",
+            "fix_hint": "badge 拆两级：绿色只在 tradeable=True && signal_ok=True 时给（今天只剩 JPM/XBI 两个，且这两个还该被 GATE 1 拦下）；tradeable=False 时无论 cRSI 如何一律渲染 location.meaning 的中文（把 overview.js 的 MEANING 字典提到公共模块，别在 app.js 抄第二份——本项目有『标签单源』的既有裁决，见 commit 12d9b40 批 A）。"
+          },
+          {
+            "claim": "实际 1.67 天、单到期近邻 IV 被丢掉期限/方法/到期数元数据后标成『IV3』并按 3 天算预期波动，高估 34%",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "元数据丢失 + 文案失真（成立），但量级计算方式错误",
+            "evidence": "元数据丢失成立：dashboard.py:249-265 `_xopt_block` docstring 明写『method/n_expiries 必须出到消费方』并返回 tenor_days/method/n_expiries/age_min/captured_at，而 dashboard.py:1290-1291 `out['iv3'] = near.get('iv') if near else None` 只取标量。DB 实证 `SELECT symbol,min(tenor_days),max(tenor_days),method,max(n_expiries) FROM opt_iv_near GROUP BY symbol`：BTC/ETH/SOL/BNB/XRP 是 interp@3.0d（2-11 个到期，名副其实），**DOGE 是 nearest 1.65-2.21d 单到期、XAU/XAG 是 nearest 2.19-2.75d 双到期**——只有这 3 个品种名不副实，不是全体。volnote.py:42 与 stopcheck.py:97 确实固定按 HOLDING_DAYS=3 计算并打『IV3』文案。**但『高估 34%』是错的**：4.2139/3.1440=1.340=sqrt(3/1.67)，报告拿『3 天预期波动』去比『1.67 天预期波动』，这是两个不同持仓窗的正常比值，不是估计误差。真正的误差是期限结构误差——用短端 IV 冒充 3d IV。我用库里现成的 iv9 做线性插值实测真实量级：JPM 用 24.53(t=2) vs 真 3d≈24.14（高估 1.6%）、TSLA 48.22 vs 47.56（1.4%）、SNDK 214.70 vs 205.07（4.7%）、APP 182.85 vs 172.19（**6.2%**）。",
+            "correction": "正确表述：期限错配造成的预期波动高估是 1.4%-6.2%（前端越陡越大，APP 因 2d IV 182 / 30d IV 81 的极端倒挂最严重），不是 34%。且报告漏了一半战场——美股路径同病：stock_iv_term 的 iv3 列 **t3 实测全库为 2 天**（TARGETS=(3,9,30) 但 pick_expiries 取最近到期，regime/stock_iv_term.py:34-46），_overview_vol_inputs 同样丢弃 t3，app.js:944 还写死文案『IV3 xx（期限曲线3d·RTH自攒）』。",
+            "fix_hint": "美股与 BTC/ETH/SOL/BNB/XRP 有 iv9/多到期，直接用现成两点插到 3d 即可根治（数据已在库里，零采集成本）；DOGE/XAU/XAG 只有单/双近邻到期，无法插值，应贯穿传 tenor_days/method/n_expiries 并在文案改『近端IV ~1.7d·单点（3d 代理）』——注意 app.js:792-794 的 IV 卡已经这么标了，把同一段元数据接进 policy 路径即可，不必新造口径。"
+          },
+          {
+            "claim": "location/volnote/stopcheck 阈值没有版本号，levels 的 lv1 也未进出口，违反『阈值必须版本化并标注来源』铁律",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "事实成立但定性拔高（『铁律』是设计文档的计划项，非既有约束）",
+            "evidence": "事实成立：`grep -n VERSION regime/policy/*.py` 只命中 levels.py:18 `LEVELS_VERSION='lv1'`；location.py:14-15、volnote.py:12-16、stopcheck.py:12-17 共 11 个常量全是『起步值，待校准』裸常量。levels.py:277 虽把 version 放进 extract_levels 返回值，但 _build_policy_payload 只取 degraded/atr/zones，version 确实没进 payload（报告的 dashboard.py:1142 base dict 里无版本键，属实）。但『铁律』的说法要打折：全仓 grep『铁律』只在 docs/DESIGN_POLICY_LAYER_20260805.md 与 coupling_fsm.py 出现，POLICY_THRESHOLDS_VERSION 是该文档 §2 列的**三条版本线规划**（与 POLICY_VERSION/LOCATION_VERSION 并列），属于未实施的设计条目，不是已生效的系统约束。按判据『某个功能还没实现不是 P0』，此条不该是 P0。",
+            "correction": "降为 P2。更值得修的不是版本字符串本身——是**披露**：web/index.html:161 的耦合卡已经写了『阈值为先验（校准中）』，而政策卡（index.html:78-102）一个字都没有。同项目内两个诊断层一个披露一个不披露，用户会把 too_tight / 共振 当成已校准结论。",
+            "fix_hint": "先补零成本的那半：政策卡副标题加『关键位/来向/止损阈值为起步先验，待回测校准』一行（与耦合卡同文案模板）。版本 manifest 可以等期2 校准时和 POLICY_THRESHOLDS_VERSION 一起做，别现在为一个还没有第二代的阈值集造 manifest 基建。"
+          },
+          {
+            "claim": "OHLCV 与 regime 分两次提交，policy 不核对两者最新 ts，新收线或状态计算失败期间会把新价格配旧 regime",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "时点一致性（结构性成立，当前未被触发）",
+            "evidence": "写侧确认：collector.py:594 `storage.upsert_ohlcv(...)` → regime/storage.py:326 `conn.commit()` 立即提交；同一 (sym,tf) 迭代内才在 collector.py:619 `upsert_states(commit=False)` / 650 `set_confirmed(commit=False)` / 654 `conn.commit()` 二次提交。读侧确认：dashboard.py:1051 `_latest_state` 只返回 rows[-1]['state']，不返回 ts；_tf_payload（dashboard.py:118-119）同样只取 states[-1]['state']——两个出口用同一个源（这点好，不存在判定双源），但都不核对 state.ts 是否等于决策用的 df 最新 ts。库内现状我独立复核为零错位：`WITH o AS(SELECT symbol,MAX(ts) ots FROM ohlcv WHERE tf='4h' GROUP BY symbol), r AS(SELECT symbol,MAX(ts) rts FROM regime_history WHERE tf='4h' GROUP BY symbol) SELECT ... WHERE r.rts IS NULL OR o.ots<>r.rts` 返回 0 行（72 个有 4h 的品种全对齐）。",
+            "correction": "报告把窗口说成『两次提交间』，实际更该担心的是另一条：collector.py:661-663 的 `except Exception` 把状态计算失败吞成 errors 条目，此时 OHLCV 已落库而 regime 停在上一根，**这个错位会持续到下一轮成功为止**，且 dashboard 的 health.issues（dashboard.py:1020-1027）只报 stale/warmup，不报『regime 落后 OHLCV 一根』——用户看不见。瞬时竞态窗只有单品种一次特征计算的秒级；持久错位才是真面。",
+            "fix_hint": "最小改动：_latest_state 与 _tf_payload 一并返回 state_ts，policy 装配处比对 `state_ts == df['ts'].iloc[-1]`，不等则在 degraded 里落 `regime_lags_ohlcv:{n}bars` 并把 location 置 None（宁缺毋滥，别拿旧 regime 算 eligible）。不必上『同事务发布 snapshot』那么重的方案。"
+          },
+          {
+            "claim": "overview 固定缓存 60 秒而详情页每次实时重算，数据更新边界上主页与详情页可展示不同 zone/cRSI/IV/play",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "跨出口时点偏斜（成立，但不改变判定内容且自愈）",
+            "evidence": "dashboard.py:48 `OVERVIEW_TTL_SEC=60`、1475-1478 缓存直返、1503 写回；dashboard.py:1009 build_dashboard 每次新建 connect_ro 全量重算，两者确无共享 snapshot_id。报告引的测试 tests/test_dashboard_overview.py:111 `test_overview_payload_uses_60_second_cache` 确实断言 t+59s 返回同一对象（我复跑 65 passed）。",
+            "correction": "影响被高估。偏斜上限 60 秒，且只在 4h 收线后的第一分钟内可能出现；overview.js:205 已渲染 updated_at 给用户时点线索；更重要的是我实测两个出口的**数值口径完全同源**（同 extract_levels / 同 crsi_features / 同 regime_history），不存在『同一时刻两个不同读数』的结构性双源——这与本项目历史上真正踩过的『面板与入库窗长不一致』是两回事。够不上 P0/P1。",
+            "fix_hint": "要么把 as_of_bar_ts（4h 最新收线 ts）一起出给两个出口，用户/Hermes 自己就能看出是否同一根；要么把 TTL 对齐到 4h 收线边界（收线后强制失效一次）。不必上 snapshot_id 基建。"
+          },
+          {
+            "claim": "主页与 Hermes 大量删字段/删品种，同一 zone 无法从卡片追到 <panel>",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "出口可审计性",
+            "evidence": "overview.js:93-96 机会卡确实只渲染 zoneLabel + 距 XX ATR + 触碰 N 次，不出 lo/hi；dashboard.py:1406 `_overview_lite` 对 near/middle 只留 symbol/display/regime_4h/at/meaning/dist_atr/crsi.zone，zone/touches/play/tradeable 全删；agent.py:410-432 `<panel>` 只逐条列 opportunity（且同样不含 lo/hi）、434-441 列 risk 的 notes、443 middle 仅给计数。我实跑 overview_payload 复核分层计数 opportunity=15 / near=28 / risk=57 / middle=29 / unavailable=2，near 项确为 lite 形态（DIS/XPD/DOGE/CL 均验证）。报告的六样本后端数值对拍我抽验了 JPM：overview 的 zone lo=356.97 / hi=360.79935714285716 / touches=4 与详情 hit-zone、cRSI 63.85 与详情 4h cRSI 卡完全相等——一致性这部分属实。",
+            "correction": "『删品种』的说法要收窄：near/middle 走 lite 是 _partition_overview 的明确设计（非机会位不占主页版面），不是缺陷；真正的可审计性缺口是两处报告没点的——(a) `<panel>` 对 unavailable **只给计数不逐条列**（agent.py 无 unavailable 分支），用户问『今天为什么没有 GS』模型无据可答（GS-USDT 实测只有 1h 共 175 根、无 4h，被正确归入 unavailable）；(b) opportunity 逐条行也不带 lo/hi 与 stop_check。",
+            "fix_hint": "opportunity 一层补齐即可（zone.lo/hi + stop_check verdict），near/middle 保持 lite；`<panel>` 增一行 unavailable 逐品种 reason（只有 2 个，成本为零）。"
+          },
+          {
+            "claim": "65 个 policy 测试全过但没有真实库六态跨出口 golden test，上述问题均未被测试捕获",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "测试覆盖",
+            "evidence": "复跑 `pytest -q tests/test_policy_{levels,location,volnote,stopcheck,batch3}.py tests/test_dashboard_overview.py` → 65 passed in 0.30s，与报告一致。`grep -rln 'market.db|connect_ro' tests/` 只命中 test_consistency_batch_e.py 与 test_dashboard_overview.py（后者用 monkeypatch 的假 Conn，不碰真库），policy 五个测试全是合成 payload/纯函数级。确实没有任何一条测试会在 stop_check 恒为 too_tight、tenor 元数据丢失、regime 落后 OHLCV 时变红。",
+            "correction": "无。",
+            "fix_hint": "别一上来就写『六态×跨出口』的大 golden——本期最值钱的是一条只读冒烟：对真库跑全宇宙 _build_policy_payload，断言『stop_check.verdict 的取值分布不得单一』（今天 11/11 too_tight 会立刻红）、『signal_ok=True 时 location.tradeable 必须为 True 或 play 必须为 None』、『state_ts == 决策 bar ts』。三条断言就能覆盖本轮真正成立的三个问题。"
+          }
+        ],
+        "missed": [
+          "【P1·报告完全没抓到，是本轮最实的问题】止损宽度校验恒定输出同一结论，无鉴别力。实跑全 74 品种，只有 11 个能算出 stop_check（其余 _policy_side 返回 None），而这 11 个 **100% 判 too_tight**：APP 0.102 / JPM 0.190 / XBI 0.306 / NBIS 0.314 / INTC 0.339 / ARM 0.376 / SNDK 0.453 / MU 0.513 / TSM 0.573 / DIS 0.675 / TSLA 0.682，无一个 tight、无一个 ok。根因是常量组合的量纲错配：结构止损 = zone 边沿 ± ZONE_BUFFER_ATR(0.25)×ATR，实测止损距离只有 0.46-2.11 ATR（JPM 0.464 / APP 0.708 / XBI 0.910 / TSLA 2.108，最宽的 TSLA 也只有 2.1 ATR），而对手方是 HOLDING_DAYS=3 天的 IV 预期波动 2.31-6.92 ATR。0.25 ATR 的缓冲对 3 天噪声在数学上几乎不可能达标——这个 verdict 是两个起步常量的恒等式，不是市场观察。后果比报告任何一条都直接：GATE 1 是当前唯一落地的门槛出口，一个永远喊狼来了的告警等于没有告警，而它恰好又是我在裁决#1 里要求接进顶层结论的那个信号。修法建议：把持仓窗与决策周期对齐（4h 决策的 Route A 区间单不该拿 3 天 IV 当尺），或改用『止损距离 vs 命中 zone 宽度 + N×ATR』的同量纲比较，并在 P4（zone 宽度根本解法）里一并定。落点 regime/policy/stopcheck.py:12-17。",
+          "【P1】美股 IV3 是 2 天期限冒充 3 天，且展示层写死了错误文案。stock_iv_term.py:20 TARGETS=(3,9,30) 但 pick_expiries（同文件:34-46）取『距目标最近的到期』，实测全库 t3 恒为 2（TSLA/SNDK/JPM/APP 等 `SELECT iv3,t3,iv9,t9 FROM stock_iv_term` 全部 t3=2、t9=9、t30=30）。dashboard.py:1275-1281 的 _overview_vol_inputs 只取 iv3 标量、丢掉 t3；web/app.js:944 更写死『IV3 xx（期限曲线3d·RTH自攒）』。报告的第 3 条只覆盖了 crypto 的 opt_iv_near 路径，把美股这条同型缺陷整段漏了——而美股恰恰是 74 个品种里的绝大多数，也是 11 个 stop_check 的全部来源。好消息是可零成本根治：iv9 就在同一行，两点插值到 3d 即可（实测修正幅度 JPM 1.6% / TSLA 1.4% / SNDK 4.7% / APP 6.2%）。",
+          "【P1】主页机会卡比详情页少一道风控告警。dashboard.py:1397-1401 的 _OVERVIEW_FULL_KEYS 不含 stop_check，_scan_overview_symbol（1323-1395）压根不计算它。结果：JPM-USDT 在主页显示『建议关注 · S3 区间上沿做空』（overview.js:100-103，signal_ok=True 所以不带 waiting 灰化），点进详情页才看到『比值 0.19 · 严重提示：偏紧（止损在 1 倍预期波动内，正常波动就会打掉）』。用户最常看的出口反而信息最少，且方向是『主页更乐观』——这比报告第 6 条的 60 秒缓存偏斜严重得多。",
+          "【P1】政策卡缺『先验阈值/校准中』披露，同项目内标准不一。web/index.html:161 的耦合卡已明确标注『诊断输出 · 阈值为先验（校准中）· 不构成方向信号』，而政策卡（index.html:78-102）零披露，尽管它背后的 11 个常量全是『起步值，待校准』，且 policy 原文 §9 自述『信号阈值是代理猜测，上线前应回测校准』、项目本身又已裁决本阶段不做回测。用户会把『位置+信号共振』『严重提示：偏紧』当成已验证结论。这是报告第 4 条本该落到的地方，它却去追版本字符串了。",
+          "【P2】详情页政策卡不渲染 location.tradeable / location.meaning。MEANING 中文映射只存在于 web/overview.js:12-22，web/app.js 全文 grep 无 tradeable/meaning。后果：XPD/UBER（high_vol_chop → §6.5『高波环境，policy 建议降频降仓』）、XRP（squeeze → 『挤压中，关注突破后的右侧确认』）这三个的位置语义在主页可见、在详情页彻底消失，同时详情页还给它们一个绿 badge。修时注意本项目已有『标签单源』裁决（commit 12d9b40 批 A），MEANING 字典应提到公共模块而非在 app.js 抄第二份。",
+          "【P2】Hermes `<panel>` 不逐条列 unavailable。regime/agent.py:390-444 装配了 opportunity 逐条、risk 逐条、middle 计数，唯独 unavailable 只进了 442 行前的分层统计计数。今天 unavailable 只有 2 个（GS-USDT、SMH-USDT，reason 均为 4h_ohlcv_missing；我核实 GS 库内只有 1h 共 175 根、确无 4h），逐条列出的 token 成本几乎为零，却能让『今天为什么没有 GS』这类问题有据可答。",
+          "【P2·仅备案，当前未触发】详情页与主页对『bar 数不足』的准入不一致。_tf_payload（dashboard.py:91）要求 len(df)>=90 否则整个 tf payload 返回 None → _build_policy_payload 拿到 regime_4h=None → locate 返回 unsupported_regime；而 _scan_overview_symbol 走 _latest_state 直读 regime_history，没有 90 根下限。库内现状不触发（唯一逼近的 PANW-USDT 有 92 根 4h，其余全 >95），但新品种上线的爬坡期会出现『主页有卡片、详情页说状态不可用』。"
+        ]
+      },
+      {
+        "route": "路线9（失败模式与降级路径）· 复核对象 out9.md 全文：7 条路线共 13 条表格发现 + 路线9 的 5 组叙述断言，逐条独立复现。原报告 13 条里自称 P0 的 8 条，我判定后仅剩 0 条 P0（3 条 P1、5 条降 P2、1 条 REFUTED）。关键背景：docs/DESIGN_POLICY_LAYER_20260805.md §3.7 明确当前处于「期 0：只装配 PolicyInput，不出任何动作」，OPEN_* 建议要到期 3 才开放——多条自称 P0 的发现把「期 0 的测量/展示层」当成了「决策引擎」来审。",
+        "verdicts": [
+          {
+            "claim": "路线1-1：总览把『位置成立但信号未共振』的 WAIT 标的计入『机会位』，15 个机会里 13 个不满足信号门槛，构成 GATE 4 失效",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "把按设计如此当缺陷/展示层措辞当判定逻辑",
+            "evidence": "数字完全复现：overview_payload() counts={'opportunity':15,...}，signal_ok 分布 {False:13, True:2}（True 者为 JPM-USDT、XBI-USDT），与报告一致。dashboard.py:1438 `if item[\"tradeable\"] is True` 确实只看 tradeable。但：(1) location.py:1-6 docstring 明写「tradeable 只表示该位置是否是政策承认的候选机会位，信号与风控门槛仍由后续决策层负责」；(2) overview.html:85 该区块副标题就是「位置候选按距关键位 ATR 升序」；(3) 卡片 play 文案强制附加「（位置到了信号没到）」并走黄色 .waiting 样式（overview.js:100-102），title 写「位置与信号共振后才满足 policy P06」；(4) Hermes 注入逐条带『信号未共振』（agent.py:411-419）。GATE 4 门的是 OPEN_*，而本期系统按 DESIGN_POLICY_LAYER §3.7『期 0 不出任何动作』根本不产生 OPEN_*，谈不上『失效』。",
+            "correction": "事实（13/15 未共振）成立，定性错误。这不是判定层缺陷，是分层命名与优先级问题：判定链条三处都显式标注了信号未共振，用户不会被伪装成『可开仓』。",
+            "fix_hint": "若要改，改的是排序与命名而非门：机会位内部按 signal_ok 降序置顶，或把区块改名『位置候选』、共振者单列一个『位置+信号共振』小节。不要把 signal_ok=False 一刀切进 near——那会丢掉『盯着等信号』这个真实用途。"
+          },
+          {
+            "claim": "路线1-2：完全横盘序列会被 cRSI 判成超买（up=down=0 → RSI=100），让区间压力位通过信号闸",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "合成输入可复现的退化，现库 0 例",
+            "evidence": "复现：120 根 close 恒为 100 → crsi_features last={'crsi':100.0,'db':100.0,'ub':100.0,'pos':101.9,'zone':'超买区'}，dashboard._signal_ok('at_resistance','超买区')=True。根因确在 crsi.py:94 的 `if d == 0.0: rsi=100.0` 先于 `u == 0.0` 判定。但报告漏了关键约束：OHLC 全恒定时 ATR=0，extract_levels 直接 degraded=['no_atr']、zones=None，品种进 unavailable，信号闸根本走不到；只有『close 全程恒定 + high/low 有幅度』这一合成组合能穿透（我构造 dfB 复现 atr=0.998、13 个 zone、signal_ok=True）。而且 _rma 是几何衰减，只要序列开头有一根非零变动，d 就永不精确为 0——我用『末 30 根/末 60 根恒定』的更现实构造均未触发（zone='带内'）。全库 74 品种扫描：退化带 0 例。",
+            "correction": "机制成立，但触发条件是『从第一根起 close 恒定』而非一般横盘；现实数据不可达。严重度从 P0 降到 P2。",
+            "fix_hint": "在 policy 信号适配层加一条廉价守卫即可：近 N 根 close 方差为 0 或 ub<=db 时 signal_ok=None 并写 degraded='signal_degenerate'，不要动 crsi.py（它刻意逐值对齐 Pine）。"
+          },
+          {
+            "claim": "路线1-3：S13 要求『第二次超卖/确认』，实现只看当根 cRSI 却会匹配 S13 剧本",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "把未实现的下一期功能当bug + 忽略展示层已标注",
+            "evidence": "代码属实：_policy_play(dashboard.py:1079) 的 S13 分支只看 regime/at/kinds，无二次确认状态。但展示名自带告警——实跑 `_policy_play('trend_down','at_support',True,zone={'kinds':['ema200']})` → 『S13 深跌逆势做多（需二次确认·半仓）』，字面就在提示条件未验完。且用户已裁决本期 signals 只做 cRSI 超买超卖，二次确认状态机属后续期。现库可达性 0：全库 trend_down + at_support + 命中 ema100/200 的品种数 = 0，该分支当前一次都不会渲染。",
+            "correction": "残留的真实瑕疵只有一处、且很轻：signal_ok=True 时详情页给绿色徽章『位置 + 信号共振』，而 S13 的共振定义（第二次超卖）其实未被检验——徽章语义比 play 名宽松。不是 P1。",
+            "fix_hint": "S13 单元格把 signal_ok 强制降为 None（『共振不可判定·需二次确认』），比建状态机便宜，也不假装已确认。"
+          },
+          {
+            "claim": "路线2-1：支撑/压力来源合并后用多数票/输入顺序强行选角色，同一价格同一 regime 可仅因列表顺序得到相反方向；现库 34 个混合来源 zone",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "影响范围夸大 + 顺序依赖在真实管线内不可达",
+            "evidence": "多数票与平票 tie-break 属实（levels.py:126-131）。顺序翻转我也复现了：merge_zones([range_lo,range_hi],4) → origin_role='support'/locate 得 at_support；反序 → 'resistance'/at_resistance，两者 tradeable 均 True。但：(1) 真实管线里 extract_levels 先 `clean.sort(key=mid)` 再聚类，candidates 生成顺序固定，只有两 zone 的 mid 完全相等才会暴露 tie，实测 74 品种无一例；(2) 现库混合来源 zone 共 33 个（报告说 34，差 1），其中『价格正在区间内、origin_role 真的成为判定角色』的只有 2 个（AMZN-USDT、LLY-USDT），且两者都不在机会位；(3) 15 个机会位命中的 zone 全部是纯压力类来源（pivot_high/prev_*_hi/range_hi/ema），mixed=False 无一例。",
+            "correction": "『仅因列表顺序得到相反方向』在真实调用路径不可复现，只在直接调 merge_zones 且 mid 相等时成立。真实影响面是 2/74 且不触及机会位。P0 → P2。",
+            "fix_hint": "不必拆 zone。最小修法：混合角色簇给 origin_role=None 并记 ambiguous_role，location._zone_state 遇 origin_role=None 且价格在区间内时返回 None（该 zone 不参与候选），价格在区间外仍可按方位定角色——保留信息，不投票。"
+          },
+          {
+            "claim": "路线2-2：locate 已因 wrong_approach 否决，详情页仍输出做多剧本并继续算多头止损，veto 未传播",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "误读展示层：veto 其实已有独立展示行",
+            "evidence": "代码属实：_policy_play(1221) 与 _policy_side(1233) 都不看 tradeable/reason。现库真实命中 2 例：DIS-USDT、EWJ-USDT，location={tradeable:False, reason:'wrong_approach'}，仍出 play='S5 突破回踩加仓（位置到了信号没到）' 和 stop_check.side='long'。但报告漏读前端：app.js:466-476 有专门的『来向』行，required 不满足时明写『未满足该剧本要求（需要从上方回踩）』；app.js:495 还渲染 degraded。总览侧 veto 传播是正确的——tradeable=False 的品种被 _partition_overview 归入 near，不进机会位。",
+            "correction": "不是『veto 未传播』，是**传播不对称**：signal 未共振会被写进 play 名后缀，路径否决不会；顶部结论行『建议关注 · S5 突破回踩加仓』最醒目却不带否决标记，用户要读到第三行才知道路径不成立。这是我保留 P1 的唯一理由。",
+            "fix_hint": "把否决收敛到一处：_policy_play 增加 tradeable 参数，tradeable is not True 时统一追加『（路径未满足·WAIT）』；同时删掉 app.js:469-471 前端自行重推 required 的那段（与 location._semantics 是两份独立实现，后端改表前端不跟就会说谎）。stop_check 可保留但要标『参考测量，位置门槛未过』。"
+          },
+          {
+            "claim": "路线3-1：总览没有详情页的 1.5×TF stale 闸，陈旧历史可被包装成刚更新的机会；updated_at 只是扫描墙钟；采集端先提交 OHLCV 后提交状态存在错时窗",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "既有安全闸在新页面缺失（回归）",
+            "evidence": "逐项核实：详情页 dashboard.py:216-219 有 health={'warmup','stale'}，stale=last_close_age>1.5*TF_SEC；_scan_overview_symbol(1323-1392) 全程不计算任何年龄，item 里也无 stale 字段；overview_payload 的 updated_at=int(now*1000) 确为扫描墙钟。采集端错时窗属实且我加了确认：storage.upsert_ohlcv 内部第 326 行自己 conn.commit()，而 states/confirmed 要到 collector.py:654 才 commit，中间确有『新 bar 可见、regime 未重算』的窗口。**我另外发现一处放大**：总览页的心跳条只有五路 lane（近端IV/个股IV/期限曲线/衍生品/OpenD，dashboard.py:971-986），**根本没有 OHLCV/价格管线 lane**——价格断流在总览页零可见性。现状：state_ts != bar_ts 的品种 0/72；最陈旧 4h 序列收线年龄 53 分钟（<1.5×4h=360 分），无实际陈旧。",
+            "correction": "报告把『state_ts 与 bar_ts 不一致』写得像已发生，实测 0/72，属应加的校验而非已现的缺陷。其余成立。未到 P0：需要采集侧先故障才会显形，且详情页仍拦得住。",
+            "fix_hint": "_scan_overview_symbol 复用详情页那一行计算：last_close_age>1.5*TF → reason='stale_4h'，进 unavailable；item 加 bar_open_ts；overview payload 把 updated_at（扫描时刻）与 asof（最老 bar 收线时刻）分列；心跳条补一路 ohlcv lane。"
+          },
+          {
+            "claim": "路线3-2：90–279 根的预热 regime 直接进总览政策判断，没有任何 warmup/degraded 标记；9 个品种，其中 APP/GEV/XBI 已进机会位",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "既有标志未贯通（回归）",
+            "evidence": "数字完全复现：4h bars 在 [90,280) 的品种 9 个——APP(158)、CAT(206)、CRWD(198)、GEV(158)、PANW(92)、SKHY(157)、SNOW(158)、VRT(158)、XBI(163)；其中 APP、GEV、XBI 在 opportunity，XBI 的 signal_ok=True（当前唯二共振之一）。而 warmup 标志**已经入库、可直接读**：SELECT json_extract(features,'$.warmup') FROM regime_history → APP=1、XBI=1、BTC=0。详情页 dashboard.py:217 用 len(df)<WARMUP_BARS(280) 生成 health.warmup 并进 issues 横幅；_scan_overview_symbol 只检查 `if not len(df)`，既不读 features.warmup 也不算 bars。",
+            "correction": "无需修正，报告准确。我上调关注度的理由：任务列表 #3『WARMUP/DATA_DEGRADED 标志贯通』是已验收项，新总览把它丢了，属回归而非新功能缺失。",
+            "fix_hint": "item 加 'warmup': bool(len(df)<WARMUP_BARS)（或读最新 state 的 features.warmup，与库内审计同源更好），前端在卡片上打角标；不排除品种。"
+          },
+          {
+            "claim": "路线3-3：POC/vol1h、IV 及波动输入异常在总览被吞掉，用户无法区分『没有风险提示』与『风险算不出』",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "降级静默",
+            "evidence": "属实：_scan_overview_symbol 在 zones 可用时完全丢弃 levels['degraded']（对比 _build_policy_payload:1181 会 extend 进 degraded）；vol_notes 异常在 1365 行被 `except Exception: notes=[]` 吞掉，item 无 degraded/risk_status 字段。复现 90 根输入 degraded=['pivot_high_unavailable','pivot_low_unavailable','ema100_history_insufficient','ema200_history_insufficient','poc_missing']，总览 item 里一个都不剩。IV 全缺时 vol_notes('X',100.0)=[]、check_stop_vs_iv(2.0,None)=None——**没有伪造中性值，铁律未破**。",
+            "correction": "报告自己也写了『没有伪造数值』，那么这就不是『用中性值伪装缺失』，只是缺失不可见。风险层空态文案还写了『当前无**可计算的**额外波动率或事件风险标注』，已部分对冲。P2。",
+            "fix_hint": "item 加 degraded[] 与 risk_status（ok/partial/unavailable），前端在无 vol_note 时区分『无提示』与『算不出』；顺带把 except Exception 的类型名记进 degraded（详情页已经这么做）。"
+          },
+          {
+            "claim": "路线4-1：location/stopcheck/volnote 阈值无版本标识，唯一的 LEVELS_VERSION 在 dashboard 装配时被丢弃——违反系统铁律",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "『铁律违反』定性无据",
+            "evidence": "事实成立：build_dashboard('BTC-USDT') 与 overview_payload() 的完整 payload 递归搜索，version 字段命中数为 0；levels 返回的 {'version':'lv1'} 在 _build_policy_payload:1181 只取 degraded/atr/zones，version 被丢。但『铁律』一说全仓无出处——grep 全仓 md，『铁律』只出现在 docs/DESIGN_POLICY_LAYER_20260805.md 里，且列的是铁律2（未验证启发式不进判定）、铁律3（不用可交易状态伪装缺失）、铁律5（shadow 模式），没有一条是版本标识。用户记忆里的『升版即重算』约束对象是 regime_history 这类**落库派生值**；policy 层是每请求现算、不落库，没有『旧版本残留在库里』的暴露面。设计文档确实计划 location 落库带 version 列（§3.2），属未实现的下一期。",
+            "correction": "P0『铁律违反』→ P2 工程卫生。阈值全部集中在四个模块顶部且逐条带『起步值，待校准』注释，可审计性并未丧失。",
+            "fix_hint": "低成本做法：policy payload 顶层加 {'versions': {'levels':LEVELS_VERSION,'location':...,'stop':...,'vol':...,'policy_doc':'eric-policy v2026-07-11'}}，等 §3.2 落库时再谈重算语义。"
+          },
+          {
+            "claim": "路线5-1：总览链接带 ?symbol=，详情页完全不读该参数，点任意机会都打开字母序第一个品种",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "功能性缺陷",
+            "evidence": "三处独立确认：overview.js:36 `return \\`/symbol?symbol=${encodeURIComponent(symbol)}\\``；dashboard.py:1645 `if parsed.path in (\"/symbol\",\"/index.html\"): return self._file(\"index.html\")`（查询串被丢弃，服务端不做任何注入）；app.js:23 `S={symbol:null,...}`、app.js:76 `S.symbol = S.symbol || S.symbols[0]`，全文件 grep 无 URLSearchParams/searchParams/location.search。所以点 TSLA 的卡片必然打开 storage.symbols() 的首个品种。",
+            "correction": "无需修正。未判 P0 的原因：详情页头部 $('symName') 会显示实际品种名，用户看得见自己开错了标的，不构成静默错数据。",
+            "fix_hint": "loadSymbols() 里先 `const q=new URLSearchParams(location.search).get('symbol')`，在 S.symbols 里校验后赋值，未知值显式报错而非静默回退；切换品种时 history.replaceState 同步。"
+          },
+          {
+            "claim": "路线5-2：新总览和详情页固定显示 UTC，没有按路线9口径提供 JST 展示",
+            "status": "REFUTED",
+            "severity": "P2",
+            "kind": "把审查提纲当系统需求",
+            "evidence": "UTC 属实（overview.js:207/364、app.js:45/588）。但 JST 展示不是本系统的任何需求：web/index.html footer 明写『时间均为 UTC』，PANEL_LEGEND 里历史消息前缀口径也钉死 UTC。更关键的是方向相反的先例——docs/AUDIT_CONSISTENCY_20260805.md t9 记录的裁决是『采集器日志用宿主 JST 无时区标识』属不一致，修法是**统一到 UTC 加 Z 后缀**，而不是把页面改成 JST。JST 在本仓库只作为宿主机本地时区出现在日志与系统日志叙述里。",
+            "correction": "『不是路线要求的 JST』这句把审查提纲的假设当成了系统规格。系统的既定展示口径就是 UTC，且此前审查已朝 UTC 收敛。改成 JST 反而制造新的口径分裂。",
+            "fix_hint": "不改。若用户个人希望看本地时间，正确做法是加一个显示切换（UTC/本地）并双标，绝不能单方面把 UTC 换成 JST——K 线轴、财报 ET 分桶、Hermes 历史前缀全部锚在 UTC。"
+          },
+          {
+            "claim": "路线6-1：hermes_system.md 要求『给出当下最优行动、不要再等等』，与 WAIT 常态及『系统不下单、不得指令式措辞』直接冲突",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "事实成立但定性夸大",
+            "evidence": "文本属实：hermes_system.md:17『即使存在不确定性，也要给出当下最优行动，而不是机械地说\"再等等\"』，由 agent.py:98-106 load_system() 注入全部 provider，且拼接顺序是 load_system() + system_brief() + PANEL_LEGEND + <panel>，用户提示词在最前、无任何后置 guard 覆盖它。但『违反系统铁律』不成立：『系统不下单』指系统不发送委托（footer『系统不下单 · 不构成投资建议』），Hermes 给口头建议不触碰这条；agent.py:453 明确注释『hermes_system.md 仍完全归用户掌控』，这是用户自己的通用决策风格提示词，不是 policy 层写的交易指令。PANEL_LEGEND:86 已含一句对冲『middle（观望）只给数量，不应把 WAIT 误读成数据缺失』。",
+            "correction": "P0 铁律违反 → P1 提示词层未加护栏。真实风险是：注入的机会位有 13/15 标着『信号未共振』，而 system 又要求『别说再等等』，模型有被推向『那就现在做空 XX』的压力——这一条值得修，但它是护栏缺失，不是铁律被破。",
+            "fix_hint": "在拼接链末尾（PANEL_LEGEND 之后、<panel> 之前）追加一段不可覆盖的 policy guard：『WAIT 是本系统的正常输出；任一 policy 门槛未满足时必须明确说 WAIT 并列出未过的门；只输出建议+理由，禁止命令式开/平仓与仓位指令』。放末尾即可，不必改用户的文件。"
+          },
+          {
+            "claim": "路线6-2：overview API 有 unavailable reason，但 Hermes 横截面只注入数量，无法说明哪些品种为何被排除",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "上下文丢失",
+            "evidence": "实跑 render_overview_context(overview_payload())：输出含『不可用 2 个』，但 'GS-USDT' in ctx → False、'4h_ohlcv_missing' in ctx → False。agent.py:389-445 只展开 opportunity 与 risk 两段，unavailable 与 near/middle 一样只进 count_text。",
+            "correction": "无需修正。P2 而非 P1：unavailable 当前只有 2 个且原因单一（4h_ohlcv_missing），Hermes 答不出细节最多是回答不完整，不会给出错误判断。",
+            "fix_hint": "按 reason 聚合注入一行即可：『不可用 2 个：4h_ohlcv_missing(GS-USDT, SMH-USDT)』；条数多时只列 reason 分布 + 前 N 个 symbol。"
+          },
+          {
+            "claim": "路线9-1：八类异常输入实跑结果（ATR=0/价格NaN/zones空/未知regime/cRSI全NaN/90根/vol1h缺/IV全缺）均不崩且显式降级",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "叙述性实证，逐条复现",
+            "evidence": "我独立复跑八条全部一致：locate(atr=0)→reason/degraded='no_atr'；locate(price=NaN)→'no_price'；locate(zones=[])→at/zone/role/meaning 全 None、reason='no_zones'；未知 regime→'unsupported_regime'；extract_levels(atr=0)→zones=None degraded=['no_atr']；90 根→['pivot_high_unavailable','pivot_low_unavailable','ema100_history_insufficient','ema200_history_insufficient','poc_missing']；vol_notes 全缺→[]；check_stop_vs_iv(2.0,None)→None。cRSI 小样本：n=5 时 last 五项全 None（与报告一致），n=30 时 crsi=61.53 但 db/ub/pos/zone 为 None——总览的 `any(... is None)` 闸同样会把它送进 unavailable，结论不变。",
+            "correction": "仅一处措辞需精确：『cRSI 全 NaN』不可能来自输入 NaN（crsi_features 入口 raise ValueError 拒收），实际是样本不足导致输出为 None。",
+            "fix_hint": "无需修。"
+          },
+          {
+            "claim": "路线9-2：degraded 分显式（ATR/价格/zones/regime/cRSI 致命缺失、详情页 levels/location/stop）与静默（overview 的部分 levels 缺失、warmup、vol1h/POC、IV、_overview_vol_inputs 异常）；1d 缺失按裁决保留 4h，72 个 4h 品种中 37 个无 1d",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "分类准确",
+            "evidence": "SQL 核对：4h 品种 72、1d 品种 35、有 4h 无 1d = 37，与报告一致；dashboard.py:1330-1333 的注释就是该裁决的出处（『1d 是底座不是前提』『实测 37/74』）。overview 三层里 regime_1d 为 null 的条目 66 个，字段保留、未静默排除，属实。",
+            "correction": "无。",
+            "fix_hint": "无需修（静默项的修法已并入路线3-2/3-3）。"
+          },
+          {
+            "claim": "路线9-3：现库 74 个成员全部有归宿（15 opportunity + 28 near + 29 middle + 2 unavailable = 74，risk 为可重叠维度）；两个不可用品种及原因完整；单品种异常有 measurement_error 兜底",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "守恒性核对准确",
+            "evidence": "实跑 counts={'opportunity':15,'near':28,'risk':60,'middle':29,'unavailable':2}，15+28+29+2=74=len(storage.symbols())；unavailable=[{'GS-USDT','4h_ohlcv_missing'},{'SMH-USDT','4h_ohlcv_missing'}]；overview_payload 的 try/except 兜底确实写成 reason=f'measurement_error:{type(exc).__name__}'（dashboard.py:1476）。",
+            "correction": "报告没提但值得记一笔：risk=60/74，风险层覆盖 81% 的宇宙（几乎人人有 IV3 预期波动这一条），该分区的信噪比接近于零。",
+            "fix_hint": "风险层只保留『⚠ 持仓窗内有财报』『IV 分位>0.85』这类真正稀有的标注，把『3日预期波动 ±X%』降级为卡片内字段——它是每个品种都有的常规读数，不是风险事件。"
+          },
+          {
+            "claim": "路线9-4：72 条 4h 序列收线年龄约 27 分钟、stale 数为 0；详情页有 1.5×TF 闸而总览无；policy 只读已收线 ohlcv、未消费 live_bars",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "实证准确",
+            "evidence": "新鲜度我在不同时刻复测：最陈旧 4h 序列 bar_open 年龄 293 分钟 = 收线年龄 53 分钟，仍 <360 分钟（1.5×4h），stale 数 0——与报告『约 27 分钟』只是采样时刻不同，结论一致。live_bars 一说核实无误：storage.get_ohlcv 只查 ohlcv 表（storage.py:329-338），live_bars 是独立表（storage.py:46/534/550），policy 路径没有任何引用。",
+            "correction": "无。",
+            "fix_hint": "无需修（总览 stale 闸修法见路线3-1）。"
+          },
+          {
+            "claim": "路线9-5：overview/详情/Hermes 显示均为 UTC，不是路线要求的 JST；前日/前周按 UTC 分桶、财报 proximity 用 ET 日历，口径正确",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "结论对一半",
+            "evidence": "UTC 显示属实。ET/UTC 分工属实（levels.py:199-208 用 ts.dt.floor('D') UTC；storage.py:929 earnings_proximity 用 America/New_York）。但『不是路线要求的 JST』这半句与路线5-2 同一错误，见该条 REFUTED。另外『口径正确』这个判定我不完全认同：prev_day_hi/lo 对 us_stock_perp 也按 UTC 日界切，而这些是 24/7 交易的美股永续，UTC 00:00 落在 ET 前一日 19-20 点，『前日高低』因此横跨两个 ET 交易日的盘后+盘前——是否刻意需用户确认。",
+            "correction": "JST 那半句删除；『口径正确』应改为『加密正确、美股永续的日/周分桶需确认』。",
+            "fix_hint": "若判定为需修：_previous_period_levels 按 instruments class 选日历（us_stock_perp 用 ET 日界），与 earnings 的 ET 口径统一；改前先确认这不是刻意选择。"
+          }
+        ],
+        "missed": [
+          "【放大路线3-1，我认为这是本报告最该被提到 P1 顶端的一条】总览页的心跳条根本没有价格管线：dashboard.py:971-986 的 _heartbeat 只有五路 lane（近端IV/个股IV/期限曲线/衍生品/OpenD），没有 ohlcv lane。叠加总览无 stale 闸、updated_at 只是扫描墙钟，结果是『OHLCV 采集完全断流』这一最要命的故障在总览页上零可见性——页面照样显示 15 个机会、照样显示『更新 HH:MM:SS UTC』。修法：补一路 ohlcv lane（MAX(ts) 按 tf 判 1.5×TF）。",
+          "【比报告的横盘案例更容易触发的同源 cRSI 退化】crsi.py:113-119 的 lmax/lmin else-if 扫描在窗口内 cRSI 单调时会退化：40 根记忆窗内 cRSI 单调则 lmin 永不更新，结果 db=999999.0、ub=0.0，于是 `c_last >= ub_last` 恒真 → zone 永远是『超买区』、pos 恒为 100.0。我用『末 60 根 close 恒定』构造复现：last={'crsi':28.36,'db':999999.0,'ub':0.0,'pos':100.0,'zone':'超买区'}——注意 crsi 只有 28 却判超买。全库 74 品种扫描 db>ub 或 |值|>1000 的现存 0 例，所以现在不是事故；但它与路线1-2 是同一个根因族，且触发面更宽。守卫应写在 policy 适配层：ub<=db 或 |db|>200 时 signal_ok=None + degraded。",
+          "【前端重复实现后端判定，会漂移】app.js:469-471 在浏览器里自行重推 required approach（`if regime_4h==='trend_up' && at==='at_support' required='from_above'` …），这是 location._semantics 的 required_approach 的第二份实现。今天两者一致，后端一旦扩表（比如给 range 边沿加来向要求）前端不跟就会显示『该剧本不设方向路径门槛』这种直接说反的话。修法：把 required_approach 写进 location 返回值，前端只渲染不推导。",
+          "【美股永续的日/周关键位分桶】levels._previous_period_levels 对所有品种一律按 UTC 日界/周界切 prev_day_hi/lo、prev_week_hi/lo，而同仓的财报 proximity 用 ET 日历（storage.py:929）、collector 也已统一 ET（docs/research/consistency_20260805/out13.md 记录过同类修正）。us_stock_perp 是 24/7 交易的美股永续，UTC 00:00 = ET 前一日 19/20 点，所以『前日高点』实际横跨两个 ET 交易日的盘后与次日盘前。这些 prev_day_* 是真进 zones 参与判定的（当前 15 个机会位里 9 个命中的 zone 含 prev_day_hi）。建议确认是刻意还是遗漏。",
+          "【风险层信噪比】风险分区当前 60/74 品种命中（81%），因为 vol_notes 的第一条『3日预期波动 ±X%（IV3 …）』对任何有 IV3 的品种都会输出——它是常规读数不是风险事件。『风险提示 60』这个计数对用户没有筛选价值，反而稀释了真正稀有的『⚠ 持仓窗内有财报』。建议把预期波动移出 notes、只留稀有事件。"
+        ]
+      },
+      {
+        "route": "out10.md 的对抗复核：14 条编号发现 + 1 张 30 行阈值扰动表。复核方式为读 eric-policy.md 原文与 regime/policy/{levels,location,stopcheck,volnote}.py、dashboard.py、web/{overview.js,app.js,style.css}、tests/，并用 .venv/bin/python 对现库 74 品种做只读全宇宙实跑与单常量扰动（含 monkeypatch 反事实），用只读 sqlite3 核对 opt_iv_near / stock_iv_term / ohlcv。总结论：事实层几乎全部可复现且精度很高（阈值表 8 项扰动数字逐字命中、基线 74/15/28/29/2 完全一致），但严重度系统性夸大——4 条自称 P0 无一达到 P0 门槛（无一条造成当前错误交易输出，无一条违反系统铁律）。真正值 P1 的是 4.1 与 7.1，外加报告完全漏掉的「用 4h cRSI 冒充 policy 要求的 1h 小周期信号」。",
+        "verdicts": [
+          {
+            "claim": "1.1 trend_up 的结构前低与 trend_down 的结构前高被 _eligible 资格表排除，核心 S4/S1 会被误判成 middle_zone",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "矩阵漏项/原文保真度",
+            "evidence": "location.py:125 trend_up+support 只收 _FAST_EMAS|range_lo|(_HIGH_KINDS and flipped)；:130 trend_down+resistance 只收 _FAST_EMAS|range_hi|(_LOW_KINDS and flipped)。我实跑 locate(101.0,1.0,[pivot_low zone],'trend_up',prices=[104,102.5,101]) 返回 middle_zone/no_regime_key_level_nearby；trend_down+pivot_high 同。全资格表穷举确认 trend_up-support 无 pivot_low/prev_day_lo、trend_down-resistance 无 pivot_high/prev_day_hi。原文 eric-policy.md:60(S4 回踩至 EMA21/55 或结构前低) 与 :72(S1 反弹至压力 结构前高/EMA/原支撑变压力) 明列这两项。",
+            "correction": "断言成立，但现实影响被夸大。我把这两行补进 _eligible 后重跑全宇宙 74 品种：签名改变 0 个，tradeable 15→15，middle 29→29。原因是枢轴几乎总与 EMA/range 合并进同一 zone（合并后 kinds 已含 ema21/range_hi 而通过资格），且现库 trend_down 只有 2 个品种。所以这是真实的规格缺口、当前 0 例线上影响，不是 P0。",
+            "fix_hint": "把未翻转的 pivot_low 补进 trend_up-support、未翻转的 pivot_high 补进 trend_down-resistance；prev_day/prev_week 高低是否同等采用应单独裁决（报告这一点提醒是对的）。同时补两条原文镜像测试。"
+          },
+          {
+            "claim": "1.2 S13 把第一次 cRSI 超卖直接标成信号满足，并把 1/2–1/3 + 强制/优先 DCA 压缩成半仓",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "文案压缩/展示语义",
+            "evidence": "实跑 _signal_ok('at_support','超卖区')=True；_policy_play('trend_down','at_support',True,zone={'kinds':['ema200']}) 返回 'S13 深跌逆势做多（需二次确认·半仓）'。app.js:435-437 在 signal_ok=True 时把徽章渲染成绿色 'badge ok · 位置 + 信号共振'。",
+            "correction": "两处需更正。(a) 报告说「直接标成信号满足」时忽略了剧本名里已明写「需二次确认」——用户不会被告知这是已确认的第二次超卖，误导面小得多；真正有问题的只是详情页那个绿色「位置 + 信号共振」徽章，它断言 P06 已满足而 S13 要求的是第二次超卖。(b) 「半仓」确实丢了 1/3 下限与 DCA，但 position/account/DCA 状态层本期不在范围内，这是文案精度问题不是判定缺陷。(c) S13 当前 0 例可达（trend_down 仅 2 品种，无一命中 ema100/200 支撑）。报告建议把 signal_ok 改为 None 会牵连全局 GATE4 语义，属过度修法。",
+            "fix_hint": "文案改为「1/2–1/3 仓 + 强制 DCA」；S13 单元格下把徽章降级为「cRSI 首次进超卖 · 二次确认未实现」，不复用通用共振绿标。"
+          },
+          {
+            "claim": "2.1 总览以位置层 tradeable 直接进入机会位、未要求 cRSI 共振；15 个机会中 13 个信号未到",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "分层命名/GATE 4",
+            "evidence": "dashboard.py:1438 `if item[\"tradeable\"] is True:` 是 opportunity 的唯一条件。我实跑 overview_payload()：counts opportunity=15，signal_ok True 2 / False 13 / None 0，与报告完全一致（JPM、XBI 为 True，APP/ARM/EWY/INTC/MU/NBIS/RKLB/GEV/TSM/V/AMAT/SNDK/TSLA 为 False）。",
+            "correction": "事实成立，但「未要求共振」的后果被夸大成 P0。overview.js:104-106 每张卡片都渲染 `建议关注 · S3 区间上沿做空（位置到了信号没到）`，带 waiting 样式，tooltip 明写「位置与信号共振后才满足 policy P06；仍需统一风控门槛」；location.py 模块 docstring 也明确 tradeable 只表示候选机会位、信号与风控门槛由后续层负责。用户在卡片层看到的是真话，被夸大的只是分区标题的计数。这是命名/计数问题，不会让人做出错误交易判断。",
+            "fix_hint": "把分区改名为「位置候选/等待信号」，或拆成「共振机会(2)」与「位置到位待信号(13)」两个计数，保持卡片文案不变。"
+          },
+          {
+            "claim": "2.2 两个真正共振的品种止损均判 too_tight 且 RR 完全未算，却仍在机会位并展示做空剧本",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "GATE 1/3 未接入分层",
+            "evidence": "实跑 _build_policy_payload：JPM stop ratio=0.2004 too_tight，XBI ratio=0.3197 too_tight（报告给 0.190/0.306，快照漂移），两者 play 仍是 'S3 区间上沿做空'。_scan_overview_symbol 的 item 完全不含 stop_check，_partition_overview 也不消费它；代码里没有任何 RR/目标位计算。",
+            "correction": "事实成立，但一半属于「把未实现的下一期功能当 bug」：GATE 3（RR≥1.5）从未实现，stopcheck 的「只警告不改变 play」是 commit 6e7946a 里的显式设计裁决而非疏漏。剩下一半是与 2.1 同源的命名问题。另外报告漏了更根本的一点，见 missed 第 2 条：12/12 结构止损全部 too_tight，这个三档判定已退化成常量。",
+            "fix_hint": "优先做的不是把 stop verdict 塞进分层，而是先修口径（见 missed 2）；在 GATE 3 实现前，机会卡片上把 stop verdict 与「RR 未实现」一起显式列出。"
+          },
+          {
+            "claim": "3.1 poc 实为每根 1h 全部成交量放到该小时 VWAP 桶后的众数，不是真正的成交价 Volume Profile POC，且输出无方法标识",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "来源口径标注",
+            "evidence": "levels.py:247 prices = quote_vol/volume 得到每小时单一价（即该小时 VWAP）；:253-255 把整根小时量 groupby 单桶求和取 idxmax。zone 只带 kinds=['poc']，无 method/resolution 字段。它经 merge_zones 参与合并（:387）并进入 _eligible 判定。",
+            "correction": "断言完全成立。补充：这是一种常见且可接受的近似（无逐笔数据时的标准做法），问题只在命名与缺标识，不在算法错误；报告自己在盲区里也承认无法量化误差。",
+            "fix_hint": "zone 里加 method='hourly_vwap_volume_mode' 与 resolution='1h'，或直接改名；面板关键位表的来源列显示近似标记。"
+          },
+          {
+            "claim": "3.2 支撑与压力成员合并后用多数票、平票用较低成员决定单一 origin_role，丢失 contested 语义；72 品种 92 个混合角色区间、3 个正被命中",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "语义压缩",
+            "evidence": "levels.py:126-131 确为多数票 + 平票取 mid 最低成员。我用 monkeypatch 记录每个 cluster 的成员 origin_role 后独立复算：737 个 zone 中混合角色 92 个——与报告数字完全一致。报告举的 CRWD 例子也复现（成员 poc:support + range_hi:resistance + prev_day_hi:resistance，压成 resistance）。",
+            "correction": "两处更正。(a)「3 个正被命中」低估：按距现价 ≤0.5 ATR 计，当前有 25 个混合角色 zone 被命中。(b) 更重要的是影响被高估：我对这 25 个逐个做反事实（把 origin_role 强制翻到相反值）后重算 _eligible，**没有任何一例结论翻转**；受影响的只有 role_flipped 这个展示字段（ASML/HOOD/NVO/SKHY/SOXL/XLE/COST 等 7 例会变）。所以当前是纯展示层失真，不是判定失真。",
+            "fix_hint": "保留 member_roles 到 zone payload，混合时输出 origin_role='contested' 并在面板关键位表标注；先不改 _eligible 的消费方式。"
+          },
+          {
+            "claim": "4.1 _policy_play 不消费 location.tradeable/reason，来向门槛失败仍显示 S5 剧本；DIS、EWJ 为 wrong_approach 却显示「位置到了信号没到」",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "条件组合/结论口径",
+            "evidence": "dashboard.py:1067 _policy_play 签名只有 regime/at/signal_ok/role_flipped/zone，无 tradeable、无 reason。实跑现库：DIS-USDT 与 EWJ-USDT 均 regime=trend_up, at=at_support, tradeable=False, reason=wrong_approach, approach=None，play 仍为 'S5 突破回踩加仓（位置到了信号没到）'，详情页顶行结论渲染为「建议关注 · S5 突破回踩加仓（位置到了信号没到）」、徽章「位置已到 · 信号未共振」。",
+            "correction": "断言与实例全部复现，只补两点上下文（不改变结论）：(1) 这两个品种在总览里进 near 区，_overview_lite 不含 play，所以错误文案只出现在详情页；(2) 同一张卡片下方的 policyApproach 行（app.js:463-476）会显示「未满足该剧本要求（需要从上方回踩）」——即页面自相矛盾，顶行结论错、下方证据对。这是本轮唯一一条把失败原因归错的判定层缺陷，值 P1。",
+            "fix_hint": "_policy_play 增加 tradeable/reason 参数；tradeable is not True 时返回「WAIT（来向不成立）」或纯测量说明，禁止落到「只差信号」这一支。"
+          },
+          {
+            "claim": "5.1 policy 层把所有 1–3 天近端 IV 都标成 IV3/3日，实际部分数据是 1.65 或 2.19 天的单到期 nearest 值",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "期限口径标注",
+            "evidence": "_xopt_block(dashboard.py:249-260) 返回 tenor_days/method/n_expiries，但 _overview_vol_inputs:1291 只保留 near['iv']；volnote.py:42 硬编码 '3日预期波动 ±x%（IV3 y）'。只读 SQL 复核：DOGE-USDT tenor_days=1.65/nearest/n=1，XAU、XAG=2.19/nearest/n=1，BTC/ETH/SOL/BNB/XRP=3.0/interp。",
+            "correction": "断言成立。补充一条报告漏掉的、更广的同型问题：美股侧 stock_iv_term 的 t3 列当前全为 **2**（AAPL/ADBE/AMD/AMZN/APP/ARM 抽样均为 2），即所有个股的「IV3」实际是 2 天期限，同样被标成 IV3。storage.py:751 的 docstring 本来就写了「实际期限随值落库（t3/t9/t30）」，说明系统知道期限会偏，是 policy 层把它丢了。综合下来全宇宙只有 5 个加密品种是真 3.0d。",
+            "fix_hint": "把 tenor_days/method/n_expiries/age 一路送进 policy payload；文案按实际期限写「近端 IV(1.65d)」；单到期 nearest 时加不稳健提示。"
+          },
+          {
+            "claim": "6.1 当前生产组合下 MAX_STOP_DIST_ATR=3.0 不可达，是死护栏",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "死护栏",
+            "evidence": "数学上界我独立推导确认：多头 dist = (price-hi) + (hi-lo) + ZONE_BUFFER ≤ AT_ZONE_ATR 0.5 + MAX_ZONE_ATR 1.5 + 0.25 = 2.25 ATR。实测全宇宙 12 个有 stop_check 的品种，stop_dist/ATR 最大 2.108（分布 0.464…2.108）。扰动：MAX_STOP_DIST_ATR=4.0 与 3.0 完全一致（结构止损 17 个）；=2.25 仍 17；=2.0 降为 16——与报告的「17→16」逐字一致。",
+            "correction": "完全成立，报告自定的 P2 也准确。",
+            "fix_hint": "删掉，或改为显式跨常量断言 MAX_STOP_DIST_ATR <= AT_ZONE_ATR + MAX_ZONE_ATR + ZONE_BUFFER_ATR 并在超配时报错。"
+          },
+          {
+            "claim": "7.1 总览条目不带 4h bar 时间或 settled，页面只显示重新生成时间；数据断流时旧判断会被盖上新的更新时间",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "时间语义/陈旧",
+            "evidence": "_scan_overview_symbol 的 item（dashboard.py:1372-1396）字段穷举确认无任何时间字段；overview_payload:1497 用 int(now*1000) 作 updated_at。前端 overview.js:205-209 只渲染 updated_at，且 **无条件** 执行 `$('updated').className = 'badge ok'`（永远绿色）。心跳 lane 是按表 MAX(ts) 的管线级判定，单品种断流看不出来。当前 4h 最旧 open 12:00Z（收线 16:00Z，收线后 52 分钟），全宇宙无陈旧样本。",
+            "correction": "断言成立，且我补上报告没提的一点：前端 badge 是硬编码绿色，不只是「只显示重新生成时间」，而是主动给出「新鲜」的视觉断言。判 P1（可导致在死数据上做交易判断），未到 P0 只因当前无陈旧实例、且详情页有 health.stale 可交叉验证。",
+            "fix_hint": "item 输出 bar_ts_ms/bar_close_ts_ms/age_sec/stale；stale 项降入 unavailable 或单列陈旧区；页面同时显示「计算时间」与「数据截至」，badge 颜色随最旧数据年龄。"
+          },
+          {
+            "claim": "8.1 风险提示计数把普通预期波动说明也算风险，至少 9 个品种仅因一条中性预期波动文案而进入红色风险区",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "统计口径/展示",
+            "evidence": "dashboard.py:1429-1435 确为 `notes` 非空即 append 到 risk；volnote.py:39-42 对任何有效 IV 都生成预期波动。我实跑现库：risk_rows=60，其中仅含预期波动一条的 11 个（BNB/BTC/DOGE/ETH/EWJ/IWM/NVDA/SOL/XAG/XAU/XRP）。",
+            "correction": "机制成立，两处数字与定性需更正。(a) 数字漂移：60 而非 57、11 而非 9。(b) **「红色风险区」不成立**——web/style.css 里没有任何 .risk-list / .risk-text 着色规则（grep 无命中），该区是中性样式，标题旁还明写「只标注，不改变位置与动作」。报告把不存在的红色告警当作后果，属展示层措辞误判。真实问题只是 60/74 的计数把信号稀释了。",
+            "fix_hint": "vol_notes 改返回 {kind,severity,text}；预期波动归「波动参考」，只有高分位/倒挂/财报窗进 risk 计数。"
+          },
+          {
+            "claim": "9.1 32 个决策与标注阈值没有可消费的版本或参数快照，LEVELS_VERSION 也未进 payload，直接违反「阈值是版本化先验」铁律",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "版本纪律",
+            "evidence": "grep 「起步值，待校准」计数：levels 13 + stopcheck 6 + volnote 5 + location 2 + dashboard 6 = 32，与报告一致。LEVELS_VERSION 只在 levels.py:18 定义、:277 进 extract_levels 返回值，被 _build_policy_payload 丢弃；实跑详情页 policy payload keys = [atr,crsi,degraded,location,play,price,regime_1d,regime_4h,signal_ok,stop_check,tf,vol_notes,zones]，无任何 version。",
+            "correction": "事实全对，但「直接违反铁律」的定性不成立，故不是 P0。本项目的版本谓词铁律（升版即重算/修订自动失效）约束的是**落库的计算产物**（states/audit，RULES_VERSION/AUDIT_VERSION）；policy 层完全不落库、每次请求实时重算，不存在「旧版本残留数据被当新版本读」的风险。而且每个常量在源码里都逐条标了「起步值，待校准」，来源纪律是有的，缺的只是 payload 层的可消费版本戳。判 P2（审计卫生），不是铁律违反。",
+            "fix_hint": "加 POLICY_SPEC_VERSION / LEVELS_VERSION / LOCATION_VERSION / VOLNOTE_VERSION / STOPCHECK_VERSION 与参数字典 digest，随 payload 输出；Hermes 上下文一并带上。"
+          },
+          {
+            "claim": "9.2 同一「3日持仓」在 volnote / 财报窗 / stopcheck 三处重复定义，能产生三套期限",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "参数漂移",
+            "evidence": "volnote.py:12 HOLDING_DAYS=3、:15 EARNINGS_WINDOW_DAYS=3、stopcheck.py:14 HOLDING_DAYS_DEFAULT=3.0；DAYS_PER_YEAR 在 volnote.py:13 与 stopcheck.py:15 各定义一次。我实测 volnote 侧扰动：HOLDING_DAYS=1/3/5 时预期波动均值 3.45%/5.98%/7.72%（报告给 3.63/6.28/8.12，比例关系一致，为 IV 数据漂移）。",
+            "correction": "断言成立，数值随快照漂移。这是纯耦合风险，当前三处值一致、未产生实际不一致输出，故 P2 而非 P1。",
+            "fix_hint": "建单一 PolicyHorizon（持仓天数 + 年化 convention），三处共享并随 payload 输出。"
+          },
+          {
+            "claim": "9.3 65 个 policy 测试全过，但缺三个关键反例：结构前低/前高核心矩阵、tradeable 真但 signal 假不得进机会、S13 第二次超卖",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "测试缺口",
+            "evidence": "我实跑 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -s -p no:cacheprovider tests/test_policy_*.py tests/test_dashboard_overview.py → 65 passed。逐行核对：test_policy_location.py 的 parametrize 表 10 行里没有 (trend_up, pivot_low, support) 与 (trend_down, pivot_high, resistance)；test_dashboard_overview.py 的 _item 工厂第 33 行写死 signal_ok = True if at=='at_support' else None，且 tradeable=True 的用例一律 signal_ok=True，确实不存在 tradeable=True + signal_ok=False 的分区用例。",
+            "correction": "完全成立。",
+            "fix_hint": "三条反例加为失败优先的契约测试；并补一张「policy 原文每个矩阵行至少一正一否」的覆盖表。"
+          },
+          {
+            "claim": "路线10 阈值审计表（30 行常量的来源、扰动敏感性、是否应版本化、校准建议）",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "审计资料（非缺陷）",
+            "evidence": "我用只读实跑独立复算了基线与 8 项扰动，数字逐字命中：基线 74 品种 / candidate 15 / 共振 2 / near 28 / middle 29 / unavailable 2；RANGE_WINDOW=40 → 18/共振3/changed 20，=80 → 10/changed 22；RANGE_HIGH_Q=0.85 → 11/3/25；MERGE_ATR=0.30 → 14/22；MAX_ZONE_ATR=1.0 → 13/27；AT_ZONE_ATR=0.75 → 18/3/7；PIVOTS_PER_SIDE=6 → 17/3/9；ATR_PERIOD=10 → 14/17；POC_WINDOW_1H=336 → POC 72→0（因调用方 OVERVIEW_VOL1H_HOURS=260，coverage 上界 260/336=0.774 < POC_MIN_COVERAGE 0.80，数学上必然全灭）；MAX_STOP_DIST_ATR=2.0 → 结构止损 17→16，=4.0 无变化。另核实 regime/features/volatility.py:34 确为 SMA 而非 Wilder，EMA_PERIODS 确实来自 policy 原文 §0/§1。",
+            "correction": "这是本报告质量最高的部分，可复现性极好，建议直接作为阈值校准的基线资料保留。唯一需要说明的是 HOLDING_DAYS 与 IV30_HIGH_RANK 两行的绝对数值会随 IV 快照漂移（我复算得 3.45/5.98/7.72 而非 3.63/6.28/8.12），扰动方向与量级不变。POC_WINDOW_1H 的跨常量耦合是全表最有价值的一条真发现。",
+            "fix_hint": "落地 assert VOL1H_HOURS >= POC_WINDOW_1H 与 OVERVIEW_OHLCV_LIMIT >= max(EMA_PERIODS)+warmup 两条跨常量断言；表本身入档作为后续 shadow 校准基线。"
+          }
+        ],
+        "missed": [
+          "【P1·报告完全漏掉】信号周期与 policy 原文不符：policy §0 接口契约明确 signals 是「小周期（3m-1h）信号」，本项目自己的 docs/DESIGN_POLICY_LAYER_20260805.md:82 也写「1h 是我们的最细周期，policy 要 3m-1h，阶段一用 1h」。但实现里 _build_policy_payload(dashboard.py:1162,1229) 与 _scan_overview_symbol(dashboard.py:1324,1358) 都是对 **4h** 的 df 调 crsi_features(df)，即信号与决策/位置同周期。这让 GATE 4「位置+信号共振」失去了原文的「大周期定位置、小周期定入场时机」结构，且 4h 超卖比 1h 超卖稀有得多、滞后得多——直接解释了为什么 15 个候选里只有 2 个共振。库里 1h 数据齐备（74 品种，最新 15:00Z，比 4h 的 12:00Z 更新），实现成本不高。这是一份自称「路线1 policy 原文保真度」的报告最该抓而没抓的一条。",
+          "【P1·报告只擦到边】止损宽度校验的跨尺度口径错误，导致三档判定退化成常量：结构止损锚在 4h zone 边缘外推，数学上界只有 2.25 ATR(4h)（实测最大 2.108），而 check_stop_vs_iv 拿它去比 3 天（=18 根 4h）的 IV 预期波动。结果我实测全宇宙 **12/12 全部 too_tight**（ratio 0.10–0.71），即「止损在 1 倍预期波动内，正常波动就会打掉」这条严重提示对每一个品种都亮。报告只在阈值表里把它当 TOO_TIGHT_RATIO 的敏感性写了一笔，没识别出这是分子分母不同交易级别的口径错配。一条 100% 触发的警告等于没有警告，且用户很快会学会忽略它——这比调阈值更根本。修法方向：要么把预期波动按实际计划持仓期（可能就是 1 根 4h 到 1 天）算，要么把结构止损放到与 3 天持仓匹配的日线结构位（policy GATE 1 原文正是「止损宽度与交易级别匹配」）。",
+          "【P2·5.1 的扩展】美股侧同样存在期限失真且范围更大：stock_iv_term.t3 列当前全为 2（抽样 AAPL/ADBE/AMD/AMZN/APP/ARM 均为 2），即所有个股的「IV3 / 3日预期波动」实际基于 2 天期限。加上报告已发现的 DOGE 1.65d、XAU/XAG 2.19d，全宇宙只有 BTC/ETH/SOL/BNB/XRP 五个是真 3.0d interp。storage.py:751 的 docstring 本来就写明「实际期限随值落库（t3/t9/t30）」——数据层诚实，是 policy 层把它丢了。",
+          "【P2·7.1 的扩展】overview.js:209 无条件执行 $('updated').className = 'badge ok'，只有 fetch 失败才转 bad。也就是说页面对数据新鲜度给出的是一个恒为绿色的视觉断言，而不仅仅是「只显示重新生成时间」。修 7.1 时必须一并改这行，否则加了 stale 字段前端也不会变色。"
+        ]
+      },
+      {
+        "route": "路线11：与既有系统的一致性（policy 决策层 · out11.md 共 13 条）",
+        "verdicts": [
+          {
+            "claim": "第1条：policy 用 4h cRSI 当入场信号，违反 policy 原文「小周期 3m–1h」与设计文档「阶段一用 1h」，已造成当前机会判断假阳性",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "信号口径/保真",
+            "evidence": "dashboard.py:1162 与 1324 都是 storage.get_ohlcv(conn, symbol, '4h', ...)，1215/1359 直接 crsi_features(df) 复用同一个 4h df，全链无 1h 读取。我独立跑：JPM-USDT 4h cRSI=63.85→超买区 / 1h cRSI=62.97→带内；XBI-USDT 4h=78.6→超买区 / 1h=60.85→带内。两者正是当前 15 个机会里仅有的 2 个 signal_ok=True。policy 原文 eric-policy.md:20 要求 signals 来自 3m–1h；设计文档承诺 1h 的是 DESIGN_POLICY_LAYER_20260805.md:82（报告写的 :78 是 cRSI 主口径那行，行号错位）。git log bb0a184 提交信息「5 个完整共振：ARM/JPM/MSTR/V/XBI 区间上沿+cRSI超买」证明 4h 是实现时的有意选择，但无任何裁决记录推翻设计文档的 1h。",
+            "correction": "断言成立，两处细节需修：(a) 设计文档承诺 1h 的是 :82 不是 :78；(b) 不宜叫「假阳性」——4h cRSI 超买是真实测量，问题是它不是 policy 要求的周期，属口径偏离而非造假。降 P1：本层只输出「建议关注」不下单，且信号阈值按 policy §9 与项目铁律本就未校准；但这是全报告最实质的一条。",
+            "fix_hint": "signal 单独读 1h 已收线序列并截到当前 4h 收线时刻，输出 signal_tf；1h 缺失时 signal_ok=None 不回退 4h。若确定改用 4h，须把设计文档 §3.3 的 1h 承诺显式作废并入档，不能沉默偏离。"
+          },
+          {
+            "claim": "第2条：infer_approach 只比较首尾收盘，会把「跌穿区间再反抽回来」误判成合格回踩并置 tradeable=True",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "路径判定",
+            "evidence": "location.py:84-93 确实只取 first=values[0]、last=values[-1]，中间根不参与。原样复现：zone[99,101]、路径[105,95,100] → infer_approach='from_above'；locate(100.0,2.0,[zone],'trend_up',prices=[105,95,100]) → pullback_long_opportunity / tradeable=True / approach=from_above。行号与结论都对。",
+            "correction": "机制与实跑都成立，但严重度过高。降 P2：(1) 窗口只有 APPROACH_BARS=3 根 4h，需两根内完成「上方→跌破下沿→回带内」往返，样本稀少；(2) 一根插针下穿又收回带内在交易语义上本就歧义，判 from_above 不是明确错误，只是把模糊路径当成干净路径；(3) 不产生伪造值、不污染判定层。属实现不完整而非错误输出。",
+            "fix_hint": "from_above 要求窗内所有收盘不低于区间下沿（from_below 对称）；出现穿越对侧或二次进入返回 None，reason 区分 crossed_through 与 wrong_approach。"
+          },
+          {
+            "claim": "第3条：支撑/压力来源合并后用多数票/价低者强行生成单一 origin_role，会把角色冲突区间判成可交易机会",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "关键位角色",
+            "evidence": "levels.py:125-131 多数票+平票取 mid 最低者、location.py:110-113 带内沿用 origin_role，代码事实成立。合成用例可复现：kinds=[ema21,pivot_high]、origin_role=support、trend_up、price 带内 → tradeable=True。但我 monkeypatch _merged_cluster 全宇宙统计：本轮共 92 个角色冲突合并带，而 15 个机会位的命中带逐个 lo/hi 精确比对后**无一**是冲突带（命中 0）。报告点名的 CRWD-USDT（trend_up/at_resistance）与 XLE-USDT（high_vol_chop/at_support）实测 tradeable 均为 False。",
+            "correction": "「机制存在」CONFIRMED，「已造成可交易误判」在当前库 REFUTED（0 例）。且报告的建议修法有反作用：价格带内返回 role=None 会废掉整层——15 个机会位 dist_atr 极小、绝大多数落在带内，那正是 at_support/at_resistance 唯一有意义的场景。真问题是这条兜底缺少可见标注，不是兜底本身错。",
+            "fix_hint": "zone 保留逐成员 origin_role 与 role_conflict 标记，location 透传并在面板降级栏显示；判定仍可沿用多数票，但让使用者知道角色是投票出来的。"
+          },
+          {
+            "claim": "第4条：BTC/ETH/SOL 的 Deribit OHLCV/ATR 与 Binance 1h 量流 POC 被混算并聚成同一关键区间，突破既有跨源不混算纪律",
+            "status": "REFUTED",
+            "severity": "P2",
+            "kind": "跨源数据",
+            "evidence": "数据事实成立：BTC/ETH/SOL 的 4h ohlcv source 全为 deribit（各 2015 根），vol1h 各 7056 条且 collector.py:512 只调 fetch_binance_vol1h。但「违反既有纪律」不成立——regime/features/vwap.py 开头是 2026-08-03 已入档的决策原文：「量源统一取币安 fapi 1h 量流……与各序列的 OHLCV 主源解耦——价格被套利钉死可跨源，量是场馆局部量必须单源」。vwap_payload(vwap.py:59-64) 算的正是 (deribit close − binance VWAP)/deribit ATR，与 POC 用 binance quote/volume 得价、deribit ATR 分桶、与 deribit close 比角色是同一构造。SYSTEM_LOG:887 那条讲的是 ohlcv 日界主键锚点冲突，与量价跨源无关，不能当纪律来源。levels.py:3 也已明写量流来自币安，不是隐瞒。",
+            "correction": "policy 层遵循的正是既有纪律，而非打破它；审查者未查 vwap.py 这个直接前例。残留的合理关切只有 P2 一条：POC 带在 zone 里没有随行行情源标记，使用者看不出该关键位的价格基准与其余关键位不同源。",
+            "fix_hint": "zone 加 price_source 字段（poc→binance_futures，其余→OHLCV 主源），面板来源列标注即可；不必禁用跨源 POC。"
+          },
+          {
+            "claim": "第5条：location/volnote/stopcheck 阈值无版本线，唯一的 LEVELS_VERSION 又被 dashboard 丢弃",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "阈值版本",
+            "evidence": "levels.py:18 只有 LEVELS_VERSION='lv1'；location.py:14-15、volnote.py:12-16、stopcheck.py:12-17 的阈值常量确无版本号。实跑 _build_policy_payload 得 13 键（tf/regime_4h/regime_1d/price/atr/location/crsi/signal_ok/play/zones/vol_notes/stop_check/degraded），extract_levels 的 version 字段确在装配时被丢弃。",
+            "correction": "事实成立但不构成 P0。项目的版本铁律（升版即重算/版本谓词进跳过条件）服务的是**入库的派生值**；policy 层当前完全不落库、每次现算，版本号尚无消费者，丢弃它是缺陷但不产生错误读数。所有阈值旁都写了「起步值，待校准」，来源语义未被伪装成已校准。",
+            "fix_hint": "先把 levels 的 version 透传进 payload 并在降级栏显示；LOCATION/VOLNOTE/STOPCHECK 各加版本常量，与第 8 条落库同批做，避免只加常量没有消费者。"
+          },
+          {
+            "claim": "第6条：S13 的「第二次超卖确认 + 强制 DCA + 顺势仓位 1/2–1/3」没有结构化实现，任意一次当前 cRSI 超卖就得 signal_ok=True",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "policy 保真",
+            "evidence": "机制复现：kinds=[ema200]、trend_down、price 带内 → meaning=deep_long_requires_second_confirmation、tradeable=True；_signal_ok('at_support','超卖区')=True；_policy_play 返回「S13 深跌逆势做多（需二次确认·半仓）」。确无第二次事件字段，dashboard.py:1056-1064 只看当前 zone。",
+            "correction": "「无结构化二次确认」成立，「被伪装成已满足」不成立——location 的 meaning 常量字面就是 deep_long_requires_second_confirmation，剧本展示名也带「需二次确认」，使用者不会被告知该单已合格。DCA 部分越界：position/account/position_building 状态层本期明确不建设，policy §4/§5 不在本期，据此判 P0 属「把未实现的下一期功能当 bug」。当前全宇宙无一例 S13 命中（trend_down+at_support 只有 CL/UVXY 两个 prior_low_support_not_tradeable）。真正残留的是措辞：policy 原文「顺势仓位的 1/2–1/3」被压成「半仓」，抹掉了 1/3 那一档。",
+            "fix_hint": "剧本名改「需二次确认·顺势仓位 1/2–1/3」；加 second_confirmation_ok 三态字段，未实现期恒为 None（不是 False），面板显示「二次确认不可判定」。"
+          },
+          {
+            "claim": "第7条：tradeable 实际只是「位置候选」，总览却直接归入「机会位」；15 个机会里 13 个 signal_ok=False",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "命名口径",
+            "evidence": "数字精确复现：counts={opportunity:15, near:28, risk:60, middle:29, unavailable:2}，signal true=2 / false=13 / none=0；dashboard.py:1438 分层确实只看 tradeable。但报告漏读展示层：overview.html:84 标题旁已有 <span class=\"sub\">位置候选按距关键位 ATR 升序</span>；overview.js:100-102 对 signal_ok 为假的卡片加 waiting 样式、文案带「（位置到了信号没到）」、title 写「位置与信号共振后才满足 policy P06；仍需统一风控门槛」。",
+            "correction": "字段命名不精确成立；「会误导使用者以为 13 个可交易」不成立——同屏三处已明示。属命名整洁度问题，不是判定或展示失真。",
+            "fix_hint": "字段改名 location_eligible，另设 setup_ready = location_eligible && signal_ok && approach_ok；改名会动 payload 契约与前端，建议与第 5/8 条同批。"
+          },
+          {
+            "claim": "第8条：policy 每次现算、无 as_of/source/version 快照，历史判断无法 point-in-time 重放",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "PIT/持久化",
+            "evidence": "sqlite_master 无任何含 policy 的表；ls data/ 确认 policy.db 不存在（只有 market.db / backtest_ledger.sqlite3 / vvv.db）。payload 无 as_of/source/version（见第 5 条 13 键）。设计文档 :40、:72 与裁决 5 确实要求独立库 data/policy.db。",
+            "correction": "事实成立，定性需修：不是「破坏既有纪律」，而是设计已规划、本期尚未交付的能力（policy 层刚落三批：levels/location → 总览 → 政策卡+止损校验）。按 P0 门槛「功能未实现不是 P0，除非导致错误输出」——它未导致任何错误读数。",
+            "fix_hint": "落 policy_snapshot 到独立 policy.db：至少存 4h bar_ts、各输入 ts/source、组件版本、degraded 原因；不必立刻做纯函数 as_of 重放。"
+          },
+          {
+            "claim": "第9条：政策语义散落在 dashboard 并通过私有函数耦合，UI 层成了第二个决策权威",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "依赖/分层",
+            "evidence": "dashboard.py:37 确为 from regime.policy.location import APPROACH_BARS, _eligible, _zone_state, locate（两个下划线私有函数）；_signal_ok/_policy_play/_policy_side 定义在 dashboard.py:1056-1134。反向依赖扫描：regime/classify.py、regime/features/*.py、regime/storage.py 均无 import policy。git diff ba449ef..HEAD -- regime/classify.py 空输出，classify.py 确未变。",
+            "correction": "全部成立。按 P0 门槛不够：不产生错误输出、无循环依赖、classify 未被污染，是架构整洁度债务。",
+            "fix_hint": "把 _signal_ok/_policy_play/_policy_side 上收成 regime/policy/evaluate.py 的公共函数，同时把 _eligible/_zone_state 提成公共 API；dashboard 只做装配与渲染。"
+          },
+          {
+            "claim": "第10条：设计文档仍要求 mapping/TU、背离与爆量、policy.db 和回测阶段，与最高裁决及实际实现同时冲突",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "文档",
+            "evidence": "DESIGN_POLICY_LAYER_20260805.md:34-41 的包结构写的是 mapping/location/signals/engine/state + data/policy.db；:80 要求背离分级、:81 confluence 计票；:120-126 把「期 2 p4 回测 + 阈值校准」写成放行门槛。实际包只有 levels/location/volnote/stopcheck——两边都对不上（文档要的四个模块没有，实际有的 levels/volnote/stopcheck 文档没写）。用户已裁决不做回测、signals 只做 cRSI 超买超卖。",
+            "correction": "成立。属文档同步债务，不影响任何运行输出。",
+            "fix_hint": "在设计文档顶部加「用户最终裁决 + 截至本批的 as-built」章节（明确否决 mapping/TU/背离爆量/回测，补上 levels/volnote/stopcheck），旧方案整段移入「已废弃提案」。"
+          },
+          {
+            "claim": "第11条：65 个 policy 测试全绿但未覆盖信号 TF、穿越后反抽、角色冲突和跨源输入；宽度断言含 or len(kinds)==1 会放过单来源超限",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "测试",
+            "evidence": "复跑 tests/test_policy_batch3.py + levels/location/stopcheck/volnote + test_dashboard_overview.py：65 passed in 0.26s，与报告一致（注意集合含 test_policy_batch3.py，只跑另外四个是 62）。test_policy_location.py:24-30 的来向用例确实只有平滑路径。test_policy_levels.py:80-83 断言确为 width_atr <= MAX_ZONE_ATR or len(kinds) == 1。",
+            "correction": "覆盖缺口成立；「会放过最危险的单体宽区间回归」需修正——levels.py:81-84 的 _zone() 已对单体做 MAX_ZONE_ATR 居中截断，该 or 分支在当前实现下不可达，当下不会放过任何东西。它是形同虚设的松弛条款（真风险是将来有人拿掉截断时该断言不报警），不是现存漏网。",
+            "fix_hint": "宽度断言去掉 or 分支改无条件；补三例反例测试（跨越后反抽、角色冲突带、4h 截面 vs 1h 信号对齐）。"
+          },
+          {
+            "claim": "第12条：policy 用的是已收线 4h 收盘价，前端却标成「距现价」",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "展示口径",
+            "evidence": "dashboard.py:1162-1174 取 df['close'].iloc[-1]，df 来自 storage.get_ohlcv 已收线序列。前端 index.html:91 表头「距现价 ATR」、app.js:489「距现价 {stop_dist_pct}%」都用这个已收线价。2026-08-06 复查 GOOGL-USDT：最后已收线 4h close=376.17（ts 1785931200000 / 2026-08-05 12:00 UTC），live_bars 形成中 close=363.22（ts 1785945600000），差 -3.44%（报告快照为 363.82 / -3.28%，随采集轮漂移，方向与量级一致）。政策卡 policyMeta 只写「4h · regime」，全卡不显示价格也不显示 bar_close_ts，使用者无从察觉参照价是几小时前的。",
+            "correction": "断言成立。维持 P1 而非 P0：不制造伪造值、不改变判定；但同页别处已按既有纪律显式标注「预览(未收线)」「实时」（app.js:344/543/910），这里反向把已收线值叫「现价」，且 3.4% 的偏差与 stop_dist_pct 的 1–3% 量级同级，足以让使用者算错仓位。本报告第二实质的一条。",
+            "fix_hint": "文案改「距最近已收线 4h 收盘价」，政策卡 meta 补 bar_close_ts；形成中价格单开「未收线预览」字段，不并入止损距离。"
+          },
+          {
+            "claim": "第13条：止损校验把「距离超 3ATR、方向错误、zone 不匹配」等不同失败全压成 None，前端统一误称为「结构位或 IV3 缺失」",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "可审计理由",
+            "evidence": "stopcheck.py:46-78 确有八处无理由 return None（side 非法 / zones 非法 / price·atr 非法 / at·role 不匹配 / zone 非 dict / 未在完整列表命中 / edge 缺失 / 方向错或超 MAX_STOP_DIST_ATR）。app.js:491-492 确写「结构位或 IV3 缺失，止损宽度校验不可计算」。tests/test_policy_stopcheck.py:51-55 证明数据齐全仍可因距离/方向返回 None。",
+            "correction": "「压成 None」成立，「前端只有一句泛化文案」不成立——dashboard.py:1237/1242 会把 structural_stop_unavailable 与 iv3_missing_for_stop_check 两个不同降级码写进 degraded，app.js:494-495 的 policyDegraded 原样渲染「降级标注：…」。所以「结构位缺失」与「IV3 缺失」界面上分得开；分不开的只是结构位内部那八种子原因。",
+            "fix_hint": "find_structural_stop 改返回 {'value': None, 'reason': 'too_far_atr'|'wrong_side'|'zone_not_matched'|...}，dashboard 拼进降级码；前端兜底文案随之细化。"
+          }
+        ],
+        "missed": [
+          "详情页政策卡的结论行不看 tradeable：app.js:433 直接渲染「建议关注 · {p.play}」，而 dashboard.py:1067-1089 的 _policy_play 全程不检查 location['tradeable']。实测 DIS-USDT、EWJ-USDT 当前 tradeable=False / reason=wrong_approach，详情页头条仍是「建议关注 · S5 突破回踩加仓（位置到了信号没到）」，路径否决只出现在下方「APPROACH 路径」小格（app.js:470-476 写「未满足该剧本要求（需要从上方回踩）」）。结构上「tradeable=False + signal_ok=True」可同时成立，届时头条是干净剧本名、徽章是「位置 + 信号共振」、否决藏在小格——当前实测 0 例，但这比报告第 7 条更接近真实误导路径。建议 P2：把 tradeable=False 的否决理由提到结论行。",
+          "_policy_side（dashboard.py:1121-1134）同样不看 tradeable，导致对政策已否决的位置照样计算并展示止损宽度校验。实测两例：DIS-USDT 多头结构失效参考、stop_dist 2.34%、判 too_tight；EWJ-USDT 1.05%、too_tight。一个「不该开」的位置却给出完整止损宽度结论，容易被读成风控已过关。",
+          "时间基混用：_overview_vol_inputs（dashboard.py:1267、1282-1285）用墙钟 time.time() 判 IV 期限曲线新鲜度与财报邻近天数，而同一 payload 的 price/location/POC 全部锚在最后一根已收线 4h bar。美股永续隔夜与周末两者可差数十小时，「持仓窗内财报」这类标注与结构测量不在同一时点。与项目「时间戳口径硬约束」直接相关，报告第 8 条只当 PIT 附注带过、未单列。建议 P2。",
+          "方法缺口（给下一轮审查）：报告第 4 条之所以站不住，关键前例是 regime/features/vwap.py 的模块 docstring（2026-08-03 决策原文：价格被套利钉死可跨源、量必须单源），且 vwap_payload 算的就是 (deribit close − binance VWAP)/deribit ATR。凡是断言「破坏了既有纪律」，须先在仓库里检索同构实现与已入档裁决再定性。",
+          "顺带核实为非问题、不必再查的两点：(a) POC 覆盖率闸对美股永续不构成系统性缺失——我对全部 72 个有 4h 数据的品种复算 extract_levels，poc 可用 72/72、无一条 poc_* 降级；(b) cRSI 自带 40 个有效值的暖机闸（regime/features/crsi.py 模块 docstring 明写「宁缺毋滥」），XBI 仅 163 根 4h 仍出带是合法的，policy 信号路径不存在用中性值伪装缺失。"
+        ]
+      },
+      {
+        "route": "路线12：使用者视角的对抗审查（out12.md，12 条发现，其中自称 P0 四条）",
+        "verdicts": [
+          {
+            "claim": "总览分层只看 location.tradeable、不要求 signal_ok=True，把 policy 规定的 WAIT 错列为「机会位」，且继续显示「做多/做空」",
+            "status": "CORRECTED",
+            "severity": "P1",
+            "kind": "P06 门槛失真",
+            "evidence": "代码事实成立：dashboard.py:1438-1444 分层判据只有 `if item[\"tradeable\"] is True`，signal_ok 全程不参与。我独立复跑 overview_payload()：opportunity=15，其中 signal_ok True=2 / False=13（JPM、XBI 共振，其余 13 个 cRSI 都在「带内」），与报告一致。但影响描述夸大：_policy_play（dashboard.py:1086-1088）在 signal_ok is False 时会把剧本名改成「S3 区间上沿做空（位置到了信号没到）」；overview.js:98-100 给该卡加 `opp-play waiting` 警示色；agent.render_overview_context 逐条注明「信号未共振」。所以并非「继续显示做多/做空」而无限定。真正的问题是分层名（「机会位 15」）与「建议关注 ·」前缀与 §3 GATE 4 不同构。",
+            "correction": "断言应为：分层边界未实现 P06，但同一行文案与配色已明示信号未到；失真在「机会位」这个层名与计数，不在剧本文案。",
+            "fix_hint": "把 opportunity 拆成 `armed`（tradeable && signal_ok is True）与 `wait_signal`，计数分开；层名从「机会位」改为「位置候选」，`建议关注` 前缀只保留给 armed。"
+          },
+          {
+            "claim": "没有 GATE 3 盈亏比、也不因结构止损不可用/偏紧把剧本降级为 WAIT，所以不是完整 condition→action 决策",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "未实现的下一期功能",
+            "evidence": "GATE 3 确实零实现：`grep -RsnE \"RR|盈亏比|GATE|1\\.5R|target\" regime/policy dashboard.py web/` 在 policy 语义上零命中（仅 levels.py:201/206 的 target_key 与 JS 的 event.target）。JPM 复现：signal_ok=True、play=「S3 区间上沿做空」、stop ratio=0.2004、verdict=too_tight（报告写 0.1902，快照漂移）。但「不回写动作」是明写的设计而非疏漏——commit 6e7946a 正文：「**只警告不改变 play**」；docs/DESIGN_POLICY_LAYER_20260805.md §3.7 把决策引擎与 §3 五道 GATE 排在期 3，期 0 只装配 PolicyInput。GATE 1 已有部分实现（stopcheck.find_structural_stop）。",
+            "correction": "这是路线图未到期项，不是缺陷。残余的真问题只有一个：详情页卡片标题叫「政策判断」，而五道 GATE 只落了 1 道半，标题超出实际能力。",
+            "fix_hint": "卡片标题改为「政策测量（位置/信号/止损宽度）」并列出未实现门槛清单；GATE 3 需要目标位定义，等 §2 矩阵目标列落地后再做。"
+          },
+          {
+            "claim": "S13（trend_down + EMA100/200 支撑）在第一次 cRSI 超卖就能成为机会，policy 要求的「第二次确认」只写在文案里没被执行",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "保真度（本期范围外）",
+            "evidence": "代码事实精确：location.py:145-146 `if kinds & _SLOW_EMAS: return \"deep_long_requires_second_confirmation\", True, None`；dashboard._signal_ok 只读当根 cRSI zone，无前次事件状态；tests/test_policy_location.py:52 确实固定断言单个 EMA200 命中即 tradeable。但「只写在文案里」的指控不成立：meaning 枚举名本身就是 deep_long_requires_second_confirmation，play 名是「S13 深跌逆势做多（需二次确认·半仓）」——系统在诚实标注自己没做二次确认，不是伪装成已确认。而「第二次超卖/底背离」属 signals 层因果状态，用户裁决本期 signals 只做 cRSI 超买超卖。当前快照 0 个 S13 实例（2 个 trend_down at_support 的 kinds 不含 ema100/200，tradeable=False）。",
+            "correction": "事实成立但性质是本期明确不做的范围外项，且已用枚举名+剧本名双重标注；不是「文案与执行不一致」。",
+            "fix_hint": "若要提前防住：在 location 层给 slow-EMA 支撑加 `requires_confirmation: true` 字段，前端把它渲染成独立徽标而不是并入剧本名尾巴。"
+          },
+          {
+            "claim": "location/stopcheck/volnote 的关键先验没有版本；唯一的 LEVELS_VERSION 被 dashboard 丢弃，用户无法审计某次建议用了哪代参数",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "阈值治理",
+            "evidence": "我实测 build_dashboard('ARM-USDT')['policy'] 的键为 ['atr','crsi','degraded','location','play','price','regime_1d','regime_4h','signal_ok','stop_check','tf','vol_notes','zones']——无任何 version 字段。levels.py:18 定义 LEVELS_VERSION='lv1'、277 行放进 extract_levels 返回值，dashboard 两处调用点（1188、1350）都只取 atr/zones/degraded，version 被丢弃。location.py:14-15、stopcheck.py:12-17、volnote.py:12-16 共 13 个标注「起步值，待校准」的常量，零版本线。对照组说明这是本仓库自己的纪律：classify.py:45/58 有 RULES_VERSION/AUDIT_VERSION 且入库参与谓词；coupling 的 THRESHOLD_VERSION 在 dashboard.py:1519 明确送到前端。policy 层是唯一破例的。",
+            "fix_hint": "给三模块各设 LOCATION_VERSION / STOPCHECK_VERSION / VOLNOTE_VERSION，随 payload 一并下发，前端在政策卡角落显示「先验 lv1/loc1/stop1 · 未校准」。"
+          },
+          {
+            "claim": "一周回放：3024 截面、机会卡 510、其中无信号 406（79.6%）、位置事件 206、真实共振事件 45；zone 宽度中位 1.24 ATR/P90 1.50、54.9% 命中时价格已在 zone 内",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "频率/噪声实证",
+            "evidence": "我独立重写回放脚本（同窗口 2026-07-29 16:00→08-05 12:00 UTC、逐 bar 取最多 400 根、extract_levels→locate→crsi_features→_signal_ok），逐个数字精确复现：cross=3024、no_regime=39、opp_card=510、opp_nosignal=406、opp_signal(截面)=104、合并后位置事件=206、共振事件=45、bars=42；宽度 median=1.241、p90=1.500、max=1.500、in-zone frac=0.549（280/510）。universe=74。报告的实证部分可信度高。",
+            "correction": "数字全部成立。但结论定性要收窄：这是「位置层触发频率」的描述，报告自己也声明不能据此断言盈利/噪声。另注意 P90 宽度 1.50 恰好等于 levels.MAX_ZONE_ATR=1.5——说明相当比例的 zone 是被上限裁出来的，不是被数据定义的，这比频率本身更值得修（已有待办 P4）。",
+            "fix_hint": "先做 (symbol, zone, side) 去重与事件生命周期；同时把宽度触顶比例作为 zone 质量指标暴露出来。"
+          },
+          {
+            "claim": "方向剧本/信号/IV/止损没有最终优先级，用户容易只读顶部「建议关注」而忽略下方否定证据（ARM/JPM/XBI 三场景）",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "展示优先级",
+            "evidence": "三个样本我都复现了：ARM signal_ok=False + IV30 分位 0.9 + 倒挂 + stop ratio 0.3769/too_tight；JPM signal_ok=True + 倒挂 + ratio 0.2004/too_tight；XBI signal_ok=True + 分位 0.9 + ratio 0.3197/too_tight。但场景描述有事实错误：**总览页根本不显示 stop_check**——它只存在于 build_dashboard 的详情页 payload（_scan_overview_symbol 不算 stop）。所以「顶部剧本 + 下方止损结论」的并置只发生在详情页；而详情页里 policyConclusion 右侧紧挨着就是 badge「位置已到 · 信号未共振」（app.js:435-441，warn 色），止损行也直接印「严重提示：偏紧（止损在 1 倍预期波动内，正常波动就会打掉）」。",
+            "correction": "否定证据不是「在下方被埋没」，而是「与结论同排/同卡但未合成单一状态」。单一最高优先级状态需要 §3 聚合器，属期 3。",
+            "fix_hint": "低成本折中：在结论行左侧加一枚状态徽标（WAIT-信号未到 / WAIT-止损偏紧 / 候选），由已有的 signal_ok + stop_check.verdict 直接推导，不需要完整决策引擎。"
+          },
+          {
+            "claim": "「风险」不是互斥分层且把普通预期波动也算作风险，五项计数相加 131 而宇宙只有 74，容易误读为 57 个独立危险品种",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "计数语义",
+            "evidence": "重叠属实：dashboard.py:1429-1436 无条件先 append risk，1438-1444 再分 opportunity/near/middle，测试函数名 test_overview_partition_is_opportunity_first_and_risk_can_overlap 在 tests/test_dashboard_overview.py:**88**（报告写 87）。我的快照 counts={'opportunity':15,'near':28,'risk':60,'middle':29,'unavailable':2}，合计 **134**（报告 131），去重后 distinct=74；risk 60 条里 **11** 条只有「3日预期波动」（报告 9/57）。数字差异是快照漂移。缓解事实：overview.html:96-97 标题已写「风险提示 · 只标注，不改变位置与动作」，且每行原文照登，用户看得到那只是预期波动。",
+            "correction": "数字应为 134/74、11/60（随时间变）；语义指控成立，但「误读为独立危险品种」被标题与逐行原文部分对冲。",
+            "fix_hint": "counts 增加 universe 与「风险∩机会」交集数；把「3日预期波动」从 risk 判据里剔除，只作卡片内嵌信息。"
+          },
+          {
+            "claim": "系统不知道用户空仓/持多/持空，却展示带方向的政策剧本，无法执行 §5 的 WAIT/MANAGE/CLOSE 分支",
+            "status": "REFUTED",
+            "severity": "P2",
+            "kind": "把未建设的下一期当缺陷",
+            "evidence": "缺失属实（_policy_play(regime, at, signal_ok, role_flipped, zone) 无 position 入参；库内 20 张表无 position/account/pos_event；grep 无 DCA/PARTIAL_TP/TRAIL）。但这正是用户已裁决的本期范围外项，且 DESIGN_POLICY_LAYER §3.5/§3.7 把持仓账户层排在期 1（手工录入）。把它记为缺陷等于把路线图当 bug。",
+            "correction": "应改述为：当前输出是「市场候选 setup」而系统未在任何地方声称它是完整 policy 动作——除了详情页卡片标题「政策判断」这一处措辞越界。",
+            "fix_hint": "只需把详情页标题与 Hermes 措辞统一为「候选 setup / 政策测量」，不必等持仓层。"
+          },
+          {
+            "claim": "「触碰次数」不是关键位建立后的有效测试次数，而是用今天的静态 zone 回扫整个历史窗口，显著夸大关键位可信度",
+            "status": "CONFIRMED",
+            "severity": "P1",
+            "kind": "非因果展示",
+            "evidence": "levels.py:97-108 `_touch_stats` 对传入的整个 df 统计 K 线与当前 [lo,hi] 相交；EMA zone 在 levels.py:**338-348**（报告写 343-349）用**当前** EMA 值建带后同样回扫全史；prev_day/prev_week（201/206）同理。我做了量化：25 个品种 229 条 zone 的 touches 中位 10、P90 20.2、最大 27；只由 EMA 构成的 24 条 zone，全史统计中位 10.5 次 vs 仅最近 60 根统计中位 2.5 次——约 4 倍虚增。web/app.js:458 与 index.html:91 无限定地标为「触碰次数」。",
+            "correction": "报告未指出的关键缓解：touches **不进任何判定路径**（_eligible 不看它，location 候选排序按 dist_atr 与 kinds 数），纯展示量。因此是展示失真而非判定污染，够不上 P0。",
+            "fix_hint": "最小修法：改名为「静态价格带历史重叠次数（非因果）」；根治按待办 P4 用触碰散布定义宽度时一并给 established_ts。"
+          },
+          {
+            "claim": "只显示当前候选、折叠 WAIT，没有历史触发/失效审计，也没有显著告知政策效果未经验证，形成幸存者偏差",
+            "status": "CONFIRMED",
+            "severity": "P2",
+            "kind": "审计缺位",
+            "evidence": "库表核对属实：sqlite_master 共 20 张表（bbo/breadth/chat/deriv/dvol/earnings/live_bars/meta/ohlcv/opt_iv_near/ref_daily/regime_history/stock_iv_term/stock_option_stat/stock_vol/stock_vol_live/universe_snapshot/usvol/vol1h/sqlite_sequence），无 policy_history/location_history/signal_history/decision_history。overview 只有 60 秒缓存（OVERVIEW_TTL_SEC=60）。agent.py:443 确实只给观望区数量不逐条列。",
+            "correction": "两处需修正：① 观望区是**折叠但计数可见**（overview.html:102 summary 里印数量），Hermes 也给全部五个分层计数，分母并没有丢；② 未验证的告知不是完全没有——页脚有「仅供研究参考 · 系统不下单 · 不构成投资建议」，缺的是专门的「胜率/盈亏比未经回测验证」这一句。且落库本身是 DESIGN §3.2/§3.4 的期 0/期 3 计划项。",
+            "fix_hint": "先补最便宜的一半：主页头注加一句「本政策的统计表现未经回测验证（policy §9）」；决策审计账等 location 落库时一起做。"
+          },
+          {
+            "claim": "在信号和 GATE 未通过时仍给出方向及精确止损价，形成接近执行指令的价格锚",
+            "status": "CORRECTED",
+            "severity": "P2",
+            "kind": "执行边界措辞",
+            "evidence": "数值精确复现：ARM signal_ok=False，stop_price=288.64571428571435（报告 288.645714… 一致），因为 _policy_side（dashboard.py:1119-1133）只看 regime+location，不消费 signal_ok。但「精确止损价」的定性偏了：app.js:488-490 的措辞是「空头**结构失效参考** 288.65 · 距现价 3.89% · 持仓期预期波动 10.32% · 比值 0.38 · **严重提示：偏紧**（止损在 1 倍预期波动内，正常波动就会打掉）」，位于卡片小节「止损宽度校验」下，且只在详情页出现，总览卡片完全没有价格锚。",
+            "correction": "应改述为：结构失效参考价在信号未共振时照算照显，且带满格反对证据；「接近执行指令」是解读上的放大。",
+            "fix_hint": "在该行前置一句「未进入共振前不可用于挂单」即可，无须改结构。"
+          },
+          {
+            "claim": "照界面操作一个月的最可能亏损来源是把位置候选当入场、被落在正常 IV 波动内的止损反复扫、并被多品种并发放大",
+            "status": "UNVERIFIABLE",
+            "severity": "P2",
+            "kind": "推断（报告自认）",
+            "evidence": "支撑事实全部复现：510 张机会卡里 406 张无信号；JPM/XBI 两个真共振的 stop 比值 0.2004/0.3197（均 <1 倍预期波动）；45 个共振事件/6.75 天；无 position/account/相关暴露门槛。但因果链（→ 亏损来源排序）在「用户裁决不做回测」的前提下无法被证实或证伪，报告本人也标注为推断。",
+            "correction": "当作「风险假设」保留，不作为发现计入缺陷清单。",
+            "fix_hint": "若将来做期 2 回测，这条正好是可预注册的假设（位置-only 消融 vs 共振组）。"
+          }
+        ],
+        "missed": [
+          "【比第9条更直接的失真，报告只在第5条里一笔带过】命中距离显示为「距 0.00ATR」但 zone 本身很宽：ARM 命中带 [273.81, 286.00]，宽 12.19 美元 = 1.153 ATR，dist_atr=0.0，overview.js:92-94 直接印「区间上沿 · 距 0.00ATR」。全周回放 54.9%（280/510）的机会卡都是这种 dist=0，而宽度 P90=1.500 恰好等于 levels.MAX_ZONE_ATR 上限（被裁出来的，不是量出来的）。用户读到「距 0.00ATR」会以为价格精确贴在关键位上，实际可能离带子另一端 4%。建议：卡片同时显示 width_atr，或把 dist 改为「距带中点」。（现有待办 P4 只覆盖宽度定义，不覆盖这个显示口径）",
+          "【判定双源，本仓库有前科】web/app.js:467-469 在 JS 里重新推导 approach 门槛（trend_up+at_support→from_above、trend_down+at_resistance→from_below），与 regime/policy/location.py:_semantics 的 required_approach 是同一条规则的两份实现。location 一旦改矩阵，前端的「未满足该剧本要求」结论会静默漂移。本项目「批 A：判定/展示语义（标签单源）」正是为治这类问题做的。建议：把 required_approach 放进 location 返回值，前端只渲染不推导。P2。",
+          "【总览页吞掉降级标注】dashboard.py:1364-1368 `_scan_overview_symbol` 里 vol_inputs 异常被静默吞成 notes=[]，不记 degraded；而详情页的 _build_policy_payload:1236-1238 会把同类失败写进 degraded。加上 _OVERVIEW_FULL_KEYS（dashboard.py:1394-1398）根本不含 degraded 字段，主页卡片永远无法显示任何降级信息。后果：一个 IV 取数出错的品种在主页看起来与「确实没有风险标注」完全相同——这是「用沉默伪装缺失」的弱化版。建议：item 加 degraded 并在卡片角落渲染。P2。",
+          "【实现超前于自家分期计划，文档未同步】docs/DESIGN_POLICY_LAYER_20260805.md §3.7 期 0 明写「只装配 PolicyInput（mapping + location + signals 落库），**不出任何动作**」，放行门槛是「三层读数在面板上被人工核对两周无系统性错误」；同文档 §6 还把「用户把建议当指令」列为最可能出错的第一处。当前主页已经输出「建议关注 · S3 区间上沿做空」，且 location/signals 都未落库。设计文档与实现已经不一致却未标注改期，这会让后续任何审查都拿错基准。建议：要么更新 §3.7 记录用户的改期裁决，要么在文档顶部加一条现状偏差说明。P2。",
+          "【信号周期被压平成同周期，报告在盲区里主动放弃了这条】policy §0/§7 要求 signals 来自小周期（3m-1h），DESIGN §3.3 自己也定了「1h 是我们的最细周期，阶段一用 1h」。但实现两处 crsi_features 都直接吃 4h df（dashboard.py:1209 与 1359），即信号与决策同周期。P06「位置（大周期结构）+ 信号（小周期择时）」的双尺度结构因此塌成单尺度——这不只是保真度问题，它直接改变了 signal_ok 的触发分布（4h cRSI 极值远稀于 1h）。库里有 1h 数据（vol1h/ohlcv 1h），改动成本不高。建议列为需用户裁决项而非默默沿用。P1。",
+          "【潜伏的跨源倒挂判定，当前快照未触发】dashboard.py:_overview_vol_inputs 对美股先用 stock_iv_term 的 iv3/iv30 判 term_inverted；若该行 iv30 为空，会落到函数末尾的兜底 `out[\"term_inverted\"] = bool(out[\"iv3\"] > out[\"iv30\"])`，而此时 out[\"iv30\"] 来自 _stock_iv_block（读的是另一张表 stock_vol 的 moomoo 结算 IV，dashboard.py:352），与 term 的 ATM iv3 不同源不同法。库里 stock_iv_term 有 51/187 行 iv30 为 NULL、7 个品种的最新行 iv30 为 NULL。我实测当前快照可达数为 0（那些行已过新鲜度闸），属潜伏路径。触发时会印出「3d>30d 倒挂：近端定价高于制度层，短期有事」这样一条纯口径差造成的假警报。建议：兜底分支加同源断言，跨源时不给结论。P2。"
+        ]
+      }
+    ]
+  },
+  "workflowProgress": [
+    {
+      "type": "workflow_phase",
+      "index": 1,
+      "title": "核验"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "核验:t1",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "ad1556b84c4399677",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947939976,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线1（policy 原文保真度）对抗复核。方法：①逐行读 eric-poli…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out1.md（主题：policy原文保真度），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=r…",
+      "lastProgressAt": 1785948524057,
+      "tokens": 120016,
+      "toolCalls": 47,
+      "durationMs": 584080,
+      "resultPreview": "{\"route\":\"路线1（policy 原文保真度）对抗复核。方法：①逐行读 eric-policy.md 与 regime/policy/{location,levels,stopcheck,volnote}.py、dashboard.py 的 _signal_ok/_policy_play/_policy_side/_build_policy_payload/_scan_overview_symbol/_partition_overview、web/{overview.js,app.js,overview.html}、regime/agent.py 的 render_overview_context/system_brief/PANEL_LEGEND、hermes_system.md；②核对报告全部 26 处行号引用（policy 原文 10 处全对，代码 2 处微偏：locatio…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "核验:t2",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a845e40b90e9b1fe3",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947940068,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线2（levels.py 深审）复核路径：①通读 regime/policy/levels…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out2.md（主题：levels深审），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" …",
+      "lastProgressAt": 1785948695168,
+      "tokens": 121201,
+      "toolCalls": 45,
+      "durationMs": 755100,
+      "resultPreview": "{\"route\":\"路线2（levels.py 深审）复核路径：①通读 regime/policy/levels.py(402行)、location.py、stopcheck.py、features/volatility.py、features/structure.py、dashboard.py:1140-1250、web/overview.js、tests/test_policy_levels.py 全文；②用 .venv/bin/python + storage.connect_ro() 按 dashboard 完全相同的装配口径（get_ohlcv limit=400 + get_vol1h since=-260h + 截到 last_close_ms）对 72 个有 4h 数据的品种全宇宙实跑 extract_levels/locate/find_structural_stop，统…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 3,
+      "label": "核验:t3",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a863a00f0890f0219",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947940338,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线3 location.py 深审（6 条发现，其中 4 条自称 P0）。核验…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out3.md（主题：location深审），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro…",
+      "lastProgressAt": 1785948930894,
+      "tokens": 127006,
+      "toolCalls": 57,
+      "durationMs": 990556,
+      "resultPreview": "{\"route\":\"路线3 location.py 深审（6 条发现，其中 4 条自称 P0）。核验方式：①逐条回读 regime/policy/location.py 与 levels.py 全文 + eric-policy.md §2/§6 原文 + docs/DESIGN_POLICY_LAYER_20260805.md（本项目自己的设计裁决）；②最小构造复现每条断言；③写只读 point-in-time 回放器（按 dashboard._scan_overview_symbol 同口径切 df/vol1h，regime 取 regime_history 当时值）复核报告点名的 GOOGL/XAG/BNB 历史样本；④做 72 品种 × 250 根 4h = 13030 个 point-in-time bar 的全量历史扫描，量化每条缺陷的真实触发率；⑤复跑当前横截面做阈值/K 敏感…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 4,
+      "label": "核验:t4",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "aae3baa1140bb8331",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947940385,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线4：波动率层与 policy 的接缝（volnote + stopcheck）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out4.md（主题：波动率接缝），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"..…",
+      "lastProgressAt": 1785948604880,
+      "tokens": 130239,
+      "toolCalls": 49,
+      "durationMs": 664495,
+      "resultPreview": "{\"route\":\"路线4：波动率层与 policy 的接缝（volnote + stopcheck）\",\"verdicts\":[{\"claim\":\"结构止损找不到时只追加 structural_stop_unavailable 降级标记，原做多/做空剧本仍保留并展示，违反 §3 GATE 1「找不到→不开仓」，未降级为 WAIT\",\"status\":\"CORRECTED\",\"severity\":\"P2\",\"kind\":\"GATE 语义/展示披露\",\"evidence\":\"代码事实成立：dashboard.py:1221 先生成 play，1233-1237 才算 structural，None 时只 degraded.append(\\\"structural_stop_unavailable\\\")，play 从不回滚；web/app.js:431-433 照常渲染「建议关注 · <play…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 5,
+      "label": "核验:t5",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "aaf4e58f153c001e8",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947942900,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线5：overview 横截面的正确性与性能（out5.md，7 条发现）",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out5.md（主题：overview正确性），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=r…",
+      "lastProgressAt": 1785948455037,
+      "tokens": 103463,
+      "toolCalls": 39,
+      "durationMs": 512136,
+      "resultPreview": "{\"route\":\"路线5：overview 横截面的正确性与性能（out5.md，7 条发现）\",\"verdicts\":[{\"claim\":\"overview 既不校验 4h K线与 regime 的时间戳一致，也不持有全扫描只读事务，采集提交期间可能新价格配旧 regime，74 品种来自不同快照（自称 P0）\",\"status\":\"CONFIRMED\",\"severity\":\"P2\",\"kind\":\"时点一致性\",\"evidence\":\"dashboard.py:1051-1053 `_latest_state` 只返回 rows[-1]['state']，而 storage.get_states(regime/storage.py:427-436) 明明带出 ts，时间戳被主动丢弃；dashboard.py:1324-1331 先 get_ohlcv 再两次 _latest_sta…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 6,
+      "label": "核验:t6",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "ab63f41c904ab45cd",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947940558,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线6：前端两页（overview 总览页 + /symbol 详情页）— 对抗核…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out6.md（主题：前端两页），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...…",
+      "lastProgressAt": 1785948462714,
+      "tokens": 117944,
+      "toolCalls": 44,
+      "durationMs": 522155,
+      "resultPreview": "{\"route\":\"路线6：前端两页（overview 总览页 + /symbol 详情页）— 对抗核验 5 条发现（原报告自称 2 条 P0），另附 4 条原报告漏掉的问题\",\"verdicts\":[{\"claim\":\"信号未共振时系统没降级为 WAIT，反而把 13 个品种放进首页「机会位」并展示做空剧本（自称 P0）\",\"status\":\"CORRECTED\",\"severity\":\"P1\",\"kind\":\"信息架构 / 分层与排序\",\"evidence\":\"数字复现无误：`.venv/bin/python -c 'import dashboard; p=dashboard.overview_payload()'` → opportunity=15，其中 signal_ok=False 13 个、True 2 个（JPM-USDT、XBI-USDT）。dashboard.py:143…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 7,
+      "label": "核验:t7",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "aa4b359da049bd555",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947940598,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线7：Hermes 集成（单品种 + 横截面双模）——out7.md 共 6 条…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out7.md（主题：Hermes双模），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" …",
+      "lastProgressAt": 1785948484652,
+      "tokens": 105014,
+      "toolCalls": 37,
+      "durationMs": 544054,
+      "resultPreview": "{\"route\":\"路线7：Hermes 集成（单品种 + 横截面双模）——out7.md 共 6 条，全部复核完毕\",\"verdicts\":[{\"claim\":\"单品种 Hermes 的 <panel> 完全丢弃 policy 块（剧本/止损校验/位置全看不到），造成决策层严重失真（原报 P0）\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"注入缺失（事实成立，但\\\"严重失真\\\"定性偏重）\",\"evidence\":\"grep 全文：regime/agent.py 里唯一出现 policy 的是第 652 行注释，render_context()（149-386 行）没有任何 p[\\\"policy\\\"] 读取路径。实跑 dashboard.build_dashboard('JPM-USDT')：payload['policy']={play:'…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 8,
+      "label": "核验:t8",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a7b74c0ada4c77530",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785947941717,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "端到端对拍复核（严格只读）。路径：①通读 out8.md 与 eric-pol…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out8.md（主题：端到端对拍），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"..…",
+      "lastProgressAt": 1785948594985,
+      "tokens": 124085,
+      "toolCalls": 57,
+      "durationMs": 653268,
+      "resultPreview": "{\"route\":\"端到端对拍复核（严格只读）。路径：①通读 out8.md 与 eric-policy.md 原文；②读 regime/policy/{location,volnote,stopcheck,levels}.py + dashboard.py 政策装配段（_signal_ok/_policy_play/_policy_side/_build_policy_payload/_overview_vol_inputs/_scan_overview_symbol/_partition_overview/overview_payload）+ web/app.js renderPolicy + web/overview.js + regime/agent.py `<panel>` 装配；③读 docs/DESIGN_POLICY_LAYER_20260805.md 确认分期路线（期0 …"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 9,
+      "label": "核验:t9",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "ad5c0f9fba66c48a7",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785948458728,
+      "queuedAt": 1785947935577,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线9（失败模式与降级路径）· 复核对象 out9.md 全文：7 条路…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out9.md（主题：失败模式），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...…",
+      "lastProgressAt": 1785949244301,
+      "tokens": 157614,
+      "toolCalls": 54,
+      "durationMs": 785572,
+      "resultPreview": "{\"route\":\"路线9（失败模式与降级路径）· 复核对象 out9.md 全文：7 条路线共 13 条表格发现 + 路线9 的 5 组叙述断言，逐条独立复现。原报告 13 条里自称 P0 的 8 条，我判定后仅剩 0 条 P0（3 条 P1、5 条降 P2、1 条 REFUTED）。关键背景：docs/DESIGN_POLICY_LAYER_20260805.md §3.7 明确当前处于「期 0：只装配 PolicyInput，不出任何动作」，OPEN_* 建议要到期 3 才开放——多条自称 P0 的发现把「期 0 的测量/展示层」当成了「决策引擎」来审。\",\"verdicts\":[{\"claim\":\"路线1-1：总览把『位置成立但信号未共振』的 WAIT 标的计入『机会位』，15 个机会里 13 个不满足信号门槛，构成 GATE 4 失效\",\"status\":\"CORRECTED\",…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 10,
+      "label": "核验:t10",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "ac5a9f6625240d050",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785948467000,
+      "queuedAt": 1785947935578,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "out10.md 的对抗复核：14 条编号发现 + 1 张 30 行阈值扰动表。…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out10.md（主题：（跑偏：实为矩阵/GATE审查）），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?…",
+      "lastProgressAt": 1785949458975,
+      "tokens": 146863,
+      "toolCalls": 45,
+      "durationMs": 991975,
+      "resultPreview": "{\"route\":\"out10.md 的对抗复核：14 条编号发现 + 1 张 30 行阈值扰动表。复核方式为读 eric-policy.md 原文与 regime/policy/{levels,location,stopcheck,volnote}.py、dashboard.py、web/{overview.js,app.js,style.css}、tests/，并用 .venv/bin/python 对现库 74 品种做只读全宇宙实跑与单常量扰动（含 monkeypatch 反事实），用只读 sqlite3 核对 opt_iv_near / stock_iv_term / ohlcv。总结论：事实层几乎全部可复现且精度很高（阈值表 8 项扰动数字逐字命中、基线 74/15/28/29/2 完全一致），但严重度系统性夸大——4 条自称 P0 无一达到 P0 门槛（无一条造成当前错误交易输…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 11,
+      "label": "核验:t11",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a3588a8b795368b53",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785948490330,
+      "queuedAt": 1785947935578,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线11：与既有系统的一致性（policy 决策层 · out11.md 共 13 …",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out11.md（主题：既有系统一致性），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" …",
+      "lastProgressAt": 1785949192903,
+      "tokens": 133375,
+      "toolCalls": 46,
+      "durationMs": 702572,
+      "resultPreview": "{\"route\":\"路线11：与既有系统的一致性（policy 决策层 · out11.md 共 13 条）\",\"verdicts\":[{\"claim\":\"第1条：policy 用 4h cRSI 当入场信号，违反 policy 原文「小周期 3m–1h」与设计文档「阶段一用 1h」，已造成当前机会判断假阳性\",\"status\":\"CONFIRMED\",\"severity\":\"P1\",\"kind\":\"信号口径/保真\",\"evidence\":\"dashboard.py:1162 与 1324 都是 storage.get_ohlcv(conn, symbol, '4h', ...)，1215/1359 直接 crsi_features(df) 复用同一个 4h df，全链无 1h 读取。我独立跑：JPM-USDT 4h cRSI=63.85→超买区 / 1h cRSI=62.97→带内；XB…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 12,
+      "label": "核验:t12",
+      "phaseIndex": 1,
+      "phaseTitle": "核验",
+      "agentId": "a6801730bdb1bda6d",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785948528439,
+      "queuedAt": 1785947935578,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "路线12：使用者视角的对抗审查（out12.md，12 条发现，其中自称…",
+      "promptPreview": "你在对抗核验一份关于 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）新建 policy 决策层的审查报告。\n报告在 /private/tmp/claude-501/-Users-luoyingdong-Documents-VVV-Trade/4a89252e-f06a-4804-a878-d8d446f7774f/scratchpad/policy/audit/out12.md（主题：使用者视角），先完整读它，也要读 /Users/luoyingdong/Documents/VVV_Trade/eric-policy.md 原文。\n\n严格只读，不得修改任何文件、不得重启进程。查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \".…",
+      "lastProgressAt": 1785949214084,
+      "tokens": 126904,
+      "toolCalls": 51,
+      "durationMs": 685645,
+      "resultPreview": "{\"route\":\"路线12：使用者视角的对抗审查（out12.md，12 条发现，其中自称 P0 四条）\",\"verdicts\":[{\"claim\":\"总览分层只看 location.tradeable、不要求 signal_ok=True，把 policy 规定的 WAIT 错列为「机会位」，且继续显示「做多/做空」\",\"status\":\"CORRECTED\",\"severity\":\"P1\",\"kind\":\"P06 门槛失真\",\"evidence\":\"代码事实成立：dashboard.py:1438-1444 分层判据只有 `if item[\\\"tradeable\\\"] is True`，signal_ok 全程不参与。我独立复跑 overview_payload()：opportunity=15，其中 signal_ok True=2 / False=13（JPM、XBI 共振，其余…"
+    }
+  ],
+  "totalTokens": 1513724,
+  "totalToolCalls": 571
+}

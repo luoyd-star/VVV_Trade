@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from regime.policy.location import infer_approach, locate
+from regime.policy.location import _eligible, infer_approach, locate
 
 
 def _zone(kind: str, role: str, lo: float = 99.0, hi: float = 101.0) -> dict:
@@ -42,6 +42,45 @@ def test_role_flip_above_old_resistance_and_below_old_support():
     assert down["at"] == "at_resistance"
     assert down["role"] == "resistance" and down["role_flipped"] is True
     assert down["tradeable"] is True
+
+
+@pytest.mark.parametrize(
+    "regime",
+    ["trend_up", "trend_down"],
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "pivot_high", "pivot_low", "prev_day_hi", "prev_day_lo",
+        "prev_week_hi", "prev_week_lo", "ema21", "ema55", "ema100",
+        "ema200", "range_hi", "range_lo",
+    ],
+)
+@pytest.mark.parametrize("role", ["support", "resistance"])
+@pytest.mark.parametrize("flipped", [False, True])
+def test_source_role_flip_eligibility_full_matrix(regime, kind, role, flipped):
+    """R1-1：每一种来源 × 当前角色 × 是否翻转都锁定，不留对称缺口。"""
+    highs = {"pivot_high", "prev_day_hi", "prev_week_hi"}
+    lows = {"pivot_low", "prev_day_lo", "prev_week_lo"}
+    fast = {"ema21", "ema55"}
+    slow = {"ema100", "ema200"}
+    if regime == "trend_up" and role == "support":
+        expected = (
+            kind in fast | {"range_lo"}
+            or (kind in highs and flipped)
+            or (kind == "pivot_low" and not flipped)
+        )
+    elif regime == "trend_up":
+        expected = kind in highs and not flipped
+    elif role == "support":
+        expected = kind in slow or (kind in lows and not flipped)
+    else:
+        expected = (
+            kind in fast | slow | {"range_hi"}
+            or (kind in lows and flipped)
+            or (kind == "pivot_high" and not flipped)
+        )
+    assert _eligible(regime, role, {kind}, flipped) is expected
 
 
 @pytest.mark.parametrize(
@@ -137,4 +176,3 @@ def test_unavailable_inputs_propagate_none(price, atr, zones, reason):
     assert result["meaning"] is None
     assert result["tradeable"] is False
     assert result["degraded"] == [reason]
-

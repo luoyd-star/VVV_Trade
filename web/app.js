@@ -69,11 +69,25 @@ function ago(ms) {
 }
 
 /* ---------- 数据加载 ---------- */
+function syncSymbolUrl(symbol) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('symbol', symbol);
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
 async function loadSymbols() {
   const r = await fetch('/api/symbols');
   const j = await r.json();
   S.symbols = (j.symbols && j.symbols.length) ? j.symbols : ['BTC-USDT'];
-  S.symbol = S.symbol || S.symbols[0];
+  const deepLinked = new URLSearchParams(window.location.search).get('symbol');
+  if (deepLinked) {
+    if (!S.symbols.includes(deepLinked)) {
+      throw new Error(`URL 中的品种不存在：${deepLinked}`);
+    }
+    S.symbol = deepLinked;
+  } else {
+    S.symbol = S.symbol || S.symbols[0];
+  }
   renderSymList();
   setActiveTab();
   $('symBtn').onclick = (e) => {
@@ -100,6 +114,7 @@ function renderSymList() {
     b.innerHTML = `<span class="sym">${esc(sym)}</span>`;
     b.onclick = () => {
       S.symbol = sym;
+      syncSymbolUrl(sym);
       $('symMenu').hidden = true;
       setActiveTab();
       load();
@@ -415,6 +430,7 @@ function renderPolicy() {
   if (!p) {
     $('policyMeta').textContent = 'policy payload 不可用';
     $('policyConclusion').textContent = '建议关注 · 政策测量不可用';
+    $('policyConclusion').style.color = '';
     $('policySignal').textContent = '共振不可判定';
     $('policySignal').className = 'badge';
     rowsHost.innerHTML = '<tr><td colspan="6">关键位不可用</td></tr>';
@@ -430,14 +446,18 @@ function renderPolicy() {
   const location = p.location || {};
   let conclusion = p.play;
   if (!conclusion && location.at === 'middle_zone') conclusion = '中间区域，默认观望';
-  $('policyConclusion').textContent = `建议关注 · ${conclusion || '暂无匹配剧本'}`;
+  const gatedReference = location.tradeable !== true && Boolean(p.play);
+  $('policyConclusion').textContent = gatedReference
+    ? p.play
+    : `建议关注 · ${conclusion || '暂无匹配剧本'}`;
+  $('policyConclusion').style.color = gatedReference ? COL.muted : '';
   const sig = $('policySignal');
   if (p.signal_ok === true) {
-    sig.textContent = '位置 + 信号共振'; sig.className = 'badge ok';
+    sig.textContent = `${p.signal_tf || '信号周期不可用'} 位置 + 信号共振`; sig.className = 'badge ok';
   } else if (p.signal_ok === false) {
-    sig.textContent = '位置已到 · 信号未共振'; sig.className = 'badge warn';
+    sig.textContent = `${p.signal_tf || '信号周期不可用'} 位置已到 · 信号未共振`; sig.className = 'badge warn';
   } else {
-    sig.textContent = '共振不可判定'; sig.className = 'badge';
+    sig.textContent = `${p.signal_tf || '信号周期不可用'} 共振不可判定`; sig.className = 'badge';
   }
 
   const hit = location.zone;
@@ -464,15 +484,11 @@ function renderPolicy() {
     from_above: '从区间上方回踩而来',
     from_below: '从区间下方反弹而来',
   }[location.approach] || '来向不可判定';
-  let required = null;
-  if (p.regime_4h === 'trend_up' && location.at === 'at_support') required = 'from_above';
-  if (p.regime_4h === 'trend_down' && location.at === 'at_resistance') required = 'from_below';
-  let pathCheck = '该剧本不设方向路径门槛';
-  if (required) {
-    pathCheck = location.approach === required
-      ? '满足该剧本的来向要求'
-      : `未满足该剧本要求（需要${required === 'from_above' ? '从上方回踩' : '从下方反弹'}）`;
-  }
+  const pathCheck = location.reason === 'wrong_approach'
+    ? '路径未确认（P09），后端门槛未通过'
+    : location.tradeable === true
+      ? '后端位置与路径门槛已成立'
+      : '后端未将该位置标为候选';
   $('policyApproach').textContent = `${approachName}；${pathCheck}`;
 
   const notes = p.vol_notes || [];

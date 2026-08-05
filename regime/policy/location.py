@@ -122,12 +122,23 @@ def _eligible(regime: str, role: str, kinds: set[str], flipped: bool) -> bool:
     """用户裁决的 regime × 来源表；未列入的来源仍保留为 level，但不冒充机会位。"""
     if regime == "trend_up":
         if role == "support":
-            return bool(kinds & (_FAST_EMAS | {"range_lo"}) or (kinds & _HIGH_KINDS and flipped))
+            return bool(
+                kinds & (_FAST_EMAS | {"range_lo"})
+                or (kinds & _HIGH_KINDS and flipped)
+                # policy §2.1：未翻转的结构前低也是上升趋势回踩支撑。
+                or ("pivot_low" in kinds and not flipped)
+            )
         return bool(kinds & _HIGH_KINDS and not flipped)
     if regime == "trend_down":
         if role == "support":
             return bool(kinds & _SLOW_EMAS or (kinds & _LOW_KINDS and not flipped))
-        return bool(kinds & (_FAST_EMAS | {"range_hi"}) or (kinds & _LOW_KINDS and flipped))
+        return bool(
+            # policy §2.2：压力可以是任一 EMA，包含 EMA100/200。
+            kinds & (_FAST_EMAS | _SLOW_EMAS | {"range_hi"})
+            or (kinds & _LOW_KINDS and flipped)
+            # policy §2.2：未翻转的结构前高也是下降趋势反弹压力。
+            or ("pivot_high" in kinds and not flipped)
+        )
     if regime in {"range", "squeeze", "high_vol_chop"}:
         expected = "range_lo" if role == "support" else "range_hi"
         return expected in kinds
