@@ -932,8 +932,11 @@ def _heartbeat(conn) -> list:
     lanes = []
     a = age("opt_iv_near")   # 30 分钟节流 → 45 分内新鲜
     lanes.append({"key": "近端IV", "age_min": a, "state": judge(a, 45, 120), "note": "币安期权 24/7·30分频"})
-    a = age("stock_vol_live")  # RTH 内 30 分钟节流
-    lanes.append({"key": "个股IV", "age_min": a, "state": judge(a, 75, 150, gated=True), "note": "moomoo RTH·30分频"})
+    # RTH 内**每轮都采、不节流**（collector.sync_moomoo_iv_live 的既定设计）→ 5 分钟一行。
+    # warn 线钉在 30 分钟：与 _stock_iv_block 丢弃实时值的闸同值，否则会出现
+    # "心跳说正常、面板已不显示实时 IV" 的自相矛盾。
+    a = age("stock_vol_live")
+    lanes.append({"key": "个股IV", "age_min": a, "state": judge(a, 15, 30, gated=True), "note": "moomoo RTH·每轮(5分)"})
     a = age("stock_iv_term")   # RTH 内小时频
     lanes.append({"key": "期限曲线", "age_min": a, "state": judge(a, 90, 180, gated=True), "note": "moomoo RTH·小时频"})
     a = age("deriv")           # 每轮 5 分钟
