@@ -43,11 +43,11 @@
     <div class="board-states" id="stateCards"></div>
     <div class="board-lower">
       <div>
-        <div class="board-lbl">波动率分位 · 刻线 0.15 挤压 / 0.85 高波</div>
+        <div class="board-lbl">波动率分位 · ATR &lt;0.30 与 BBW &lt;0.15 共判挤压 · 高波仅 ATR &gt;0.85</div>
         <div class="ranks" id="volRanks"></div>
       </div>
       <div>
-        <div class="board-lbl">待确认切换与边界</div>
+        <div class="board-lbl">待确认切换与原始树边界</div>
         <div class="alerts" id="alerts"></div>
       </div>
     </div>
@@ -133,7 +133,7 @@
       </div>
       <div class="row">
         <div class="card span12">
-          <div class="card-h"><h3>ATR / BBW 分位历史（当前周期）</h3><span class="sub">0.15 挤压线 / 0.85 高波线</span></div>
+          <div class="card-h"><h3>ATR / BBW 分位历史（当前周期）</h3><span class="sub">挤压：ATR 0.30 + BBW 0.15 · 高波：仅 ATR 0.85</span></div>
           <div id="volRankChart" class="chart half"></div>
         </div>
       </div>

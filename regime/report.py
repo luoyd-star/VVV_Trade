@@ -1,7 +1,7 @@
 """文本报告输出。表格列用英文缩写保证终端对齐，解读用中文。"""
 from __future__ import annotations
 
-from .classify import Regime
+from .classify import RULES_VERSION, Regime
 
 W = 86
 
@@ -87,9 +87,12 @@ def render(symbol: str, sources, regimes: dict, dfs: dict, iv: dict = None) -> s
 
     lines = [
         "=" * W,
+        f" VVV CLI · 规则 {RULES_VERSION} · 原始态(单根规则树，无迟滞确认)",
+        " 面板差异: 面板展示逐根历史经非对称迟滞后的确认态；CLI 是轻量对照通道，"
+        "直连行情且不读取/重放确认历史。",
         f" {symbol} · 最新收盘 {_fmt_price(last)}（{ref_tf} @ {ts}，已收线） · 数据源 {_fmt_sources(sources)}",
         "=" * W,
-        f" {'TF':<5}{'state':<15}{'conf':>5}{'dir':>7}{'ER%':>7}{'ATR%':>7}{'BBW%':>7}{'tilt':>7}   flags",
+        f" {'TF':<5}{'raw_state':<15}{'conf':>5}{'dir':>7}{'ER%':>7}{'ATR%':>7}{'BBW%':>7}{'tilt':>7}   flags",
     ]
     for tf, r in regimes.items():
         f = r.features
@@ -122,7 +125,8 @@ def render(symbol: str, sources, regimes: dict, dfs: dict, iv: dict = None) -> s
         lines.append(line)
     lines.append("-" * W)
     lines.append(
-        " 状态: " + " | ".join(f"{tf} {r.label}({r.confidence:.2f})" for tf, r in regimes.items())
+        " 原始态(单根规则树，无迟滞确认): "
+        + " | ".join(f"{tf} {r.label}({r.confidence:.2f})" for tf, r in regimes.items())
     )
     lines.append(" 解读: " + interpret(regimes))
     lines.append(

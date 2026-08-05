@@ -3,11 +3,11 @@
 'use strict';
 
 const SM = {
-  trend_up:      { label: '趋势上行',   color: '#0a8a66' },
-  trend_down:    { label: '趋势下行',   color: '#b91f31' },
-  range:         { label: '震荡',       color: '#4a90d9' },
-  squeeze:       { label: '低波动挤压', color: '#a87c05' },
-  high_vol_chop: { label: '高波动非趋势', color: '#5f35c9' },
+  trend_up:      { color: '#0a8a66' },
+  trend_down:    { color: '#b91f31' },
+  range:         { color: '#4a90d9' },
+  squeeze:       { color: '#a87c05' },
+  high_vol_chop: { color: '#5f35c9' },
 };
 const COL = {
   up: '#0a8a66', down: '#b91f31',
@@ -32,6 +32,13 @@ const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
   (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const hasEcharts = typeof echarts !== 'undefined';
+
+// 中文标签只消费 dashboard.states_map；前端仅保留经过可视化校验的状态颜色。
+function stateMeta(state) {
+  const local = SM[state] || {};
+  const labels = (S.data && S.data.states_map) || {};
+  return { label: esc(labels[state] || state), color: local.color || COL.muted };
+}
 
 /* ---------- 格式化 ---------- */
 const pad = (n) => String(n).padStart(2, '0');
@@ -107,7 +114,7 @@ function setActiveTab() {
   $('symName').textContent = S.symbol || '--';
   $('hermesSym').textContent = S.symbol || '--';
   const t = S.data && S.data.tfs && (S.data.tfs['1d'] || S.data.tfs['4h'] || S.data.tfs['1h']);
-  $('symDot').style.background = t ? ((SM[t.state] || {}).color || COL.muted) : COL.muted;
+  $('symDot').style.background = t ? stateMeta(t.state).color : COL.muted;
   document.querySelectorAll('#symList button').forEach((b) =>
     b.classList.toggle('active', b.textContent === S.symbol));
 }
@@ -316,7 +323,7 @@ function renderStateCards() {
   host.innerHTML = '';
   TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
     const t = d.tfs[tf];
-    const meta = SM[t.state] || { label: esc(t.state), color: COL.muted };
+    const meta = stateMeta(t.state);
     const f = t.features;
     const cl = (t.crsi || {}).last || {};
 
@@ -333,25 +340,25 @@ function renderStateCards() {
 
     const dyn = [];
     if (t.preview) {
-      const pm = SM[t.preview.state] || { label: esc(t.preview.state) };
+      const pm = stateMeta(t.preview.state);
       dyn.push(`预览(未收线) <b>${pm.label}</b> ${fmtN(t.preview.confidence, 2)}`);
     }
     if (t.candidate) {
-      const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
+      const cm = stateMeta(t.candidate.state);
       dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`
         + (t.candidate.gated ? '（事件窗·门槛+1）' : (t.candidate.event_win ? '（事件窗）' : ''))
         + (diverged && t.candidate.state === t.raw_state ? ` · ${confTxt}` : ''));
     }
     if (diverged && !(t.candidate && t.candidate.state === t.raw_state)) {
-      const rm = SM[t.raw_state] || { label: esc(t.raw_state) };
+      const rm = stateMeta(t.raw_state);
       dyn.push(`原始判定 <b>${rm.label}</b> ${confTxt}`);
     }
     const mg = (f.margin || {});
     if (mg.margin != null && mg.margin < 0.15) {
-      dyn.push(`⚡边界过渡 m=${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
+      dyn.push(`⚡原始树边界 m=${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
     }
     if (!dyn.length) dyn.push('稳定 · 无待确认切换'
-      + (mg.margin != null ? ` · margin ${fmtN(mg.margin, 2)}` : ''));
+      + (mg.margin != null ? ` · 原始树 margin ${fmtN(mg.margin, 2)}` : ''));
 
     // 标记（原 chips）压成一行灰字，优先级前 4 个
     const flags = [];
@@ -396,29 +403,36 @@ function renderStateCards() {
   setActiveTab(); // 顶栏圆点跟随 1d 状态色
 }
 
-// 六条分位条：1d/4h/1h × ATR/BBW。<0.15 涂挤压色、>0.85 涂高波色，其余 accent。
+// 六条分位条：挤压侧 ATR<0.30 且 BBW<0.15；高波只由 ATR>0.85 判定。
 function renderVolRanks() {
   const d = S.data;
   const items = [];
   TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
     const v = d.tfs[tf].features.volatility;
-    items.push([`${tf} ATR`, v.atr_rank]);
-    items.push([`${tf} BBW`, v.bbw_rank]);
+    items.push({ label: `${tf} ATR`, val: v.atr_rank, squeezeAt: 0.30, highVolAt: 0.85,
+      rule: 'ATR<0.30 为挤压侧条件；ATR>0.85 判高波' });
+    items.push({ label: `${tf} BBW`, val: v.bbw_rank, squeezeAt: 0.15, highVolAt: null,
+      rule: 'BBW<0.15 为挤压侧条件；高波不看 BBW' });
   });
-  $('volRanks').innerHTML = items.map(([k, val]) => {
+  $('volRanks').innerHTML = items.map(({ label, val, squeezeAt, highVolAt, rule }) => {
+    const squeezeMark = squeezeAt === 0.30
+      ? '<u class="t30" title="挤压ATR 0.30"></u>'
+      : '<u class="t15" title="挤压BBW 0.15"></u>';
+    const highVolMark = highVolAt == null ? '' : '<u class="t85" title="高波ATR 0.85"></u>';
     if (val == null) {
-      return `<div class="rank"><div class="rank-h"><span>${k}</span><b class="muted">—</b></div>
-              <div class="bar"><u class="t15"></u><u class="t85"></u></div></div>`;
+      return `<div class="rank" title="${rule}"><div class="rank-h"><span>${label}</span><b class="muted">—</b></div>
+              <div class="bar">${squeezeMark}${highVolMark}</div></div>`;
     }
-    const c = val < 0.15 ? 'var(--squeeze)' : (val > 0.85 ? 'var(--chop)' : 'var(--accent)');
-    return `<div class="rank">
-      <div class="rank-h"><span>${k}</span><b style="color:${c}">${fmtN(val, 2)}</b></div>
+    const c = val < squeezeAt ? 'var(--squeeze)'
+      : (highVolAt != null && val > highVolAt ? 'var(--chop)' : 'var(--accent)');
+    return `<div class="rank" title="${rule}">
+      <div class="rank-h"><span>${label}</span><b style="color:${c}">${fmtN(val, 2)}</b></div>
       <div class="bar"><i style="width:${Math.round(val * 100)}%;background:${c}"></i>
-        <u class="t15"></u><u class="t85"></u></div></div>`;
+        ${squeezeMark}${highVolMark}</div></div>`;
   }).join('');
 }
 
-// 每个周期一行：酝酿中的候选 > 未收线预览 > 边界过渡 > 数据健康 > 稳定
+// 每个周期一行：酝酿中的候选 > 未收线预览 > 原始树边界 > 数据健康 > 稳定
 function renderAlerts() {
   const d = S.data;
   const rows = TF_ORDER.filter((tf) => d.tfs[tf]).map((tf) => {
@@ -427,18 +441,18 @@ function renderAlerts() {
     const bits = [];
     let cls = '';
     if (t.candidate) {
-      const cm = SM[t.candidate.state] || { label: esc(t.candidate.state) };
+      const cm = stateMeta(t.candidate.state);
       bits.push(`酝酿 ${cm.label} ${t.candidate.count}/${t.candidate.need}`
         + (t.candidate.event_win ? '（事件窗）' : ''));
       cls = 'warn';
     }
     if (t.preview) {
-      const pm = SM[t.preview.state] || { label: esc(t.preview.state) };
+      const pm = stateMeta(t.preview.state);
       bits.push(`预览(未收线) ${pm.label} ${fmtN(t.preview.confidence, 2)}`);
       cls = cls || 'warn';
     }
     if (mg.margin != null && mg.margin < 0.15) {
-      bits.push(`margin ${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
+      bits.push(`原始树 margin ${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
       cls = cls || 'warn';
     }
     if (t.health && t.health.stale) {
@@ -450,7 +464,7 @@ function renderAlerts() {
     }
     if (!bits.length) {
       bits.push('稳定 · 无待确认切换'
-        + (mg.margin != null ? ` · margin ${fmtN(mg.margin, 2)}` : ''));
+        + (mg.margin != null ? ` · 原始树 margin ${fmtN(mg.margin, 2)}` : ''));
     }
     return `<div class="alert ${cls}"><span class="tf">${tf}</span><span>${bits.join(' · ')}</span></div>`;
   });
@@ -481,9 +495,12 @@ function renderPriceChart() {
   $('priceMeta').textContent =
     `${S.symbol}${disp ? `（${disp}）` : ''} · ${S.tf} · ${t.candles.length} 根 · 源 ${t.source || '—'} · UTC`;
   const legend = $('priceLegend');
-  legend.innerHTML = Object.entries(SM).map(([k, m]) =>
+  legend.innerHTML = Object.keys(SM).map((k) => {
+    const m = stateMeta(k);
+    return (
     `<span class="li"><span class="sw" style="background:${m.color};opacity:.5"></span>${m.label}</span>`
-  ).join('') + `<span class="li"><span class="sw" style="background:${COL.blue}"></span>EMA50 / cRSI</span>
+    );
+  }).join('') + `<span class="li"><span class="sw" style="background:${COL.blue}"></span>EMA50 / cRSI</span>
     <span class="li"><span class="sw" style="background:${COL.azure}"></span>cRSI 自适应带</span>
     <span class="li"><span class="sw" style="background:${COL.muted}"></span>H/L 摆动点 · ●背离</span>
     <span class="li"><span class="sw" style="background:${COL.ink}"></span>VWAP（币安量）/ 偏离</span>`;
@@ -501,7 +518,7 @@ function renderPriceChart() {
   const stateByIdx = new Array(N).fill(null);
   t.segments.forEach((sg) => { for (let i = sg.s; i <= sg.e; i++) stateByIdx[i] = sg.state; });
   const markData = t.segments.map((sg) => [
-    { xAxis: sg.s, itemStyle: { color: (SM[sg.state] || {}).color || COL.muted, opacity: 0.09 } },
+    { xAxis: sg.s, itemStyle: { color: stateMeta(sg.state).color, opacity: 0.09 } },
     { xAxis: sg.e },
   ]);
   const pivH = t.pivots.filter((p) => p.kind === 'H').map((p) => [p.i, p.price]);
@@ -530,7 +547,7 @@ function renderPriceChart() {
         const i = params[0].dataIndex;
         const r = rows[i];
         const st = stateByIdx[i];
-        const m = st ? SM[st] : null;
+        const m = st ? stateMeta(st) : null;
         const chg = (r[4] - r[1]) / r[1] * 100;
         const cv = cr.crsi[i];
         let zone = '';
@@ -636,7 +653,12 @@ function renderVolRank() {
     tooltip: {
       trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
       textStyle: { color: COL.ink, fontSize: 11.5 },
-      valueFormatter: (v) => (v == null ? '—' : Number(v).toFixed(2)),
+      formatter: (params) => {
+        const values = params.filter((p) => p.seriesType === 'line').map((p) =>
+          `${p.marker}${p.seriesName} ${p.value == null ? '—' : Number(p.value).toFixed(2)}`);
+        return [`<b>${esc((params[0] || {}).axisValue || '')}</b>`, ...values,
+          '<span style="color:#7c8595">规则：ATR&lt;0.30 且 BBW&lt;0.15 才判挤压；高波仅 ATR&gt;0.85</span>'].join('<br>');
+      },
     },
     legend: { top: 0, right: 10, textStyle: { color: COL.sub, fontSize: 10.5 },
       itemWidth: 12, itemHeight: 3, icon: 'rect' },
@@ -651,10 +673,14 @@ function renderVolRank() {
         markLine: { silent: true, symbol: 'none',
           lineStyle: { type: 'dashed', color: '#c3c9d4' },
           label: { color: COL.muted, fontSize: 9, position: 'insideEndTop' },
-          data: [{ yAxis: 0.15, label: { formatter: '挤压 0.15' } },
-                 { yAxis: 0.85, label: { formatter: '高波 0.85' } }] } },
+          data: [{ yAxis: 0.30, label: { formatter: '挤压ATR' } },
+                 { yAxis: 0.85, label: { formatter: '高波ATR' } }] } },
       { name: 'BBW分位', type: 'line', data: t.bbw_rank_series, symbol: 'none',
-        lineStyle: { width: 2 } },
+        lineStyle: { width: 2 },
+        markLine: { silent: true, symbol: 'none',
+          lineStyle: { type: 'dashed', color: '#c3c9d4' },
+          label: { color: COL.muted, fontSize: 9, position: 'insideEndBottom' },
+          data: [{ yAxis: 0.15, label: { formatter: '挤压BBW' } }] } },
     ],
   }, true);
 }
@@ -929,15 +955,17 @@ function renderDeriv() {
 function renderStrips() {
   const host = $('strips');
   host.innerHTML = '';
-  $('stripLegend').innerHTML = Object.entries(SM).map(([k, m]) =>
-    `<span class="li"><span class="sw" style="background:${m.color}"></span>${m.label}</span>`).join('');
+  $('stripLegend').innerHTML = Object.keys(SM).map((k) => {
+    const m = stateMeta(k);
+    return `<span class="li"><span class="sw" style="background:${m.color}"></span>${m.label}</span>`;
+  }).join('');
   TF_ORDER.filter((tf) => S.data.tfs[tf]).forEach((tf) => {
     const t = S.data.tfs[tf];
     const N = t.candles.length;
     const row = document.createElement('div');
     row.className = 'strip-row';
     const segs = t.segments.map((sg) => {
-      const m = SM[sg.state] || { label: esc(sg.state), color: COL.muted };
+      const m = stateMeta(sg.state);
       const w = ((sg.e - sg.s + 1) / N * 100).toFixed(3);
       const tip = `${tf} · ${m.label} · ${fmtTs(t.candles[sg.s][0], tf)} → ${fmtTs(t.candles[sg.e][0], tf)} UTC`;
       return `<span class="seg" style="width:${w}%;background:${m.color};opacity:.85" title="${tip}"></span>`;
@@ -952,7 +980,7 @@ function renderStrips() {
 }
 
 function stchip(state) {
-  const m = SM[state] || { label: esc(state), color: COL.muted };
+  const m = stateMeta(state);
   return `<span class="stchip"><span class="dot" style="background:${m.color}"></span>${m.label}</span>`;
 }
 
@@ -966,7 +994,7 @@ function renderFeatTable() {
     ['波动率', ['ATR%', 'ATR%ds', 'BBW%', 'RV年化%', '加速度', '下行方差']],
     ['量能', ['tilt', 'volZ', '突破']],
     ['cRSI', ['值', '带位%', '区域', '背离']],
-    ['路径几何·影子', ['频率', '主周期', 'τ', 'margin', '滞后']],
+    ['路径几何·影子', ['频率', '主周期', 'τ', 'margin(原始树)', '滞后']],
   ];
   const grpRow = groups.map(([g, cols], i) =>
     `<th class="grp${i ? ' gs' : ''}" colspan="${cols.length}">${g}</th>`).join('');
@@ -980,7 +1008,7 @@ function renderFeatTable() {
     const cl = (t.crsi || {}).last || {};
     const dv = (t.crsi || {}).last_divergence;
     const rawTxt = t.raw_state && t.raw_state !== t.state
-      ? ((SM[t.raw_state] || {}).label || t.raw_state) : '—';
+      ? stateMeta(t.raw_state).label : '—';
     // [值, 模式('s'=正负着色/'l'=左对齐), 组首列?]
     const cells = [
       [tf], [stchip(t.state), 'l'], [rawTxt], [fmtN(t.confidence, 2)],

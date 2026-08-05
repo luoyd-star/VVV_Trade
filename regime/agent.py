@@ -43,7 +43,8 @@ CODEX_FALLBACK_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex"
 # 面板数据的格式说明属于"机制"，始终随 <panel> 一起注入，不占用用户的提示词文件。
 PANEL_LEGEND = """<panel_legend>
 下方 <panel> 是面板此刻的实时数据（每次提问自动注入）。字段说明：dir 方向分[-1,1]；
-ER% 趋势效率分位；ATR%/BBW% 波动率分位(0-1，低=挤压 高=高波)；tilt 近20根多空量差[-1,1]；
+ER% 趋势效率分位；ATR%/BBW% 波动率分位(0-1，挤压需 BBW<0.15 且 ATR<0.30，
+高波只看 ATR>0.85)；tilt 近20根多空量差[-1,1]；
 cRSI 为周期自适应RSI，带位 0=下带 100=上带（可超界）；conf 是原始逐根判定的子信号一致度，
 确认态没有独立置信度；摆动高/低是近端结构边界，突破量分位是突破当根成交量的历史分位；
 VWAP偏离以 ATR 为单位，使用币安量窗，仅为展示层指标、不进规则。
@@ -61,8 +62,9 @@ squeeze→趋势需 3 根）；[原始判定]为未折叠的逐根判定，[酝�
 路径几何（影子特征，不参与状态判定）：频率=去趋势残差每100根的均值穿越次数
 （低≈慢摆动、高≈快噪声，可区分震荡的"可交易性"），主周期≈一个完整震荡的根数，
 τ=Mann-Kendall 秩趋势[-1,1]（与 dir 交叉验证，两者背离时提示结构异常）；
-margin=到最近可翻转状态边界的距离（<0.15 表示状态处于边界过渡中，是领先预警，
-与滞后确认的"酝酿中"互补）。这组读数滞后约60根（窗口120的一半），解读时注意。
+margin=原始逐根判定态到最近可翻转状态边界的距离（<0.15 表示原始树处于边界过渡中，
+与滞后确认的"酝酿中"互补；它按原始判定树计算，与当前确认态可能不同）。
+这组读数滞后约60根（窗口120的一半），解读时注意。
 美股永续专属：ATR%ds=按(小时,是否周末)桶去季节化后的 ATR 分位（影子字段，不参与判定）
 ——与 ATR% 分歧大说明当前读数主要是时段效应（盘中/盘外/周末）而非真实波动状态变化；
 个股IV=该标的自身的聚合隐含波动率（moomoo 口径，非严格常数30天；2023-06 起约 3.1 年史），
@@ -117,7 +119,12 @@ def _api_key(cfg: dict) -> str:
     return os.environ.get(env, "") if env else ""
 
 
-def _pathgeom_str(f: dict) -> str:
+def _pathgeom_str(
+    f: dict,
+    *,
+    raw_state: str | None = None,
+    confirmed_state: str | None = None,
+) -> str:
     pg = f.get("pathgeom") or {}
     mg = f.get("margin") or {}
     parts = []
@@ -125,8 +132,11 @@ def _pathgeom_str(f: dict) -> str:
         dp = f" 主周期≈{pg['dom_period']}根" if pg.get("dom_period") is not None else ""
         parts.append(f"频率={pg['chop_freq']}/100根{dp} τ={pg.get('kendall_tau')}")
     if mg.get("margin") is not None:
-        warn = "（<0.15 边界过渡中）" if mg["margin"] < 0.15 else ""
-        parts.append(f"margin={mg['margin']}({mg.get('nearest')}){warn}")
+        warn = "（<0.15 原始树边界过渡中）" if mg["margin"] < 0.15 else ""
+        basis = "（相对原始态）"
+        if raw_state and confirmed_state and raw_state != confirmed_state:
+            basis = f"；margin 相对原始态 {raw_state} 而非当前确认态 {confirmed_state}"
+        parts.append(f"margin={mg['margin']}({mg.get('nearest')}){warn}{basis}")
     return " ".join(parts) if parts else "路径几何=暂无(历史<120根)"
 
 
@@ -155,6 +165,15 @@ def render_context(p: dict) -> str:
         b = vol.get("breakout")
         cand = t.get("candidate")
         raw = t.get("raw_state")
+        confirmed = t.get("state")
+        states_map = p.get("states_map") or {}
+        raw_label = states_map.get(raw, raw)
+        confirmed_label = t.get("state_label") or states_map.get(confirmed, confirmed)
+        raw_desc = (f"{raw_label}({raw})" if raw and raw_label != raw else raw)
+        confirmed_desc = (
+            f"{confirmed_label}({confirmed})"
+            if confirmed and confirmed_label != confirmed else confirmed
+        )
         parts = [
             f"[{tf}] 状态={t['state_label']}(原始判定conf {t['confidence']:.2f}——确认态无独立置信度)"
             + (f"[原始判定={raw}]" if raw and raw != t.get("state") else "")
@@ -174,7 +193,11 @@ def render_context(p: dict) -> str:
             )
             + f" BBW%={v['bbw_rank']:.2f} RV年化={v['rv30_annual_pct']}%",
             f"加速度={v.get('vol_accel')}(分位{v.get('vol_accel_rank')}) 下行方差占比={v.get('downside_share')}",
-            _pathgeom_str(f),
+            _pathgeom_str(
+                f,
+                raw_state=raw_desc,
+                confirmed_state=confirmed_desc if raw != confirmed else None,
+            ),
             f"tilt={vol['updown_tilt_20']:+.2f}",
             f"摆动高/低={s['swing_high']}/{s['swing_low']}",
             f"cRSI={c.get('crsi')} 带位={c.get('pos')}% {c.get('zone') or ''}",

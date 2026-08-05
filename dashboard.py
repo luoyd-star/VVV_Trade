@@ -209,6 +209,11 @@ def _tf_payload(conn, symbol: str, tf: str):
         "last_close_age_min": round(last_close_age / 60),
     }
 
+    # margin 由 analyze_timeframe 的当根原始规则树产出；确认层只折叠 state，
+    # 不会重算这项影子读数。仅在 dashboard 展示副本中补口径，不改变 a8 入库键集。
+    display_features = dict(reg.features)
+    display_features["margin_basis"] = "raw"
+
     return {
         "source": storage.last_source(conn, symbol, tf),
         "health": health,
@@ -226,7 +231,7 @@ def _tf_payload(conn, symbol: str, tf: str):
         "candidate": candidate,
         "preview": preview,
         "confidence": reg.confidence,
-        "features": reg.features,
+        "features": display_features,
     }
 
 

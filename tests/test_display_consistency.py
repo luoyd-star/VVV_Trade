@@ -9,7 +9,7 @@ import pandas as pd
 import dashboard
 from regime.agent import PANEL_LEGEND, render_context
 from regime.classify import Regime
-from regime.report import interpret
+from regime.report import interpret, render
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +19,27 @@ def _base_payload(**extra):
     payload = {"symbol": "TEST-USDT", "tfs": {}, "collector": {}}
     payload.update(extra)
     return payload
+
+
+def _display_features():
+    return {
+        "structure": {"direction": 0.1, "swing_high": 102.0, "swing_low": 98.0},
+        "er_rank": 0.4,
+        "volatility": {
+            "atr_rank": 0.2,
+            "bbw_rank": 0.1,
+            "rv30_annual_pct": 25.0,
+            "vol_accel": 1.0,
+            "vol_accel_rank": 0.5,
+            "downside_share": 0.5,
+            "squeeze": True,
+            "high_vol": False,
+        },
+        "volume": {"updown_tilt_20": 0.0, "breakout": None},
+        "pathgeom": {},
+        "margin": {"margin": 0.02, "nearest": "to_trend"},
+        "margin_basis": "raw",
+    }
 
 
 def test_crypto_context_includes_near_iv_and_suppresses_missing_dvol():
@@ -229,10 +250,50 @@ def test_interpret_declares_missing_period_instead_of_three_period_alignment():
     assert "三周期同向" not in text
 
 
+def test_margin_basis_and_diverged_states_are_explicit_in_hermes_context():
+    text = render_context(_base_payload(
+        states_map={"range": "震荡", "trend_up": "趋势上行"},
+        tfs={"1h": {
+            "state": "trend_up",
+            "state_label": "趋势上行",
+            "raw_state": "range",
+            "confidence": 0.7,
+            "features": _display_features(),
+            "crsi": {"last": {}},
+        }},
+    ))
+
+    assert "margin 相对原始态 震荡(range) 而非当前确认态 趋势上行(trend_up)" in text
+    assert "原始树边界过渡中" in text
+
+
+def test_cli_report_labels_raw_single_tree_basis_and_panel_difference():
+    features = _display_features()
+    regime = Regime("squeeze", 0.8, features)
+    frame = pd.DataFrame({
+        "ts": [pd.Timestamp("2026-08-05T00:00:00Z")],
+        "close": [100.0],
+    })
+
+    text = render(
+        "TEST-USDT",
+        {"1h": "demo"},
+        {"1h": regime},
+        {"1h": frame},
+    )
+
+    assert "原始态(单根规则树，无迟滞确认)" in text
+    assert "面板展示逐根历史经非对称迟滞后的确认态" in text
+    assert "轻量对照通道" in text
+    assert "raw_state" in text
+
+
 def test_legend_and_frontend_copy_keep_display_contracts_explicit():
     assert "504 日同财报状态条件分位" in PANEL_LEGEND
     assert "样本不足回退 252 日原始分位" in PANEL_LEGEND
     assert "squeeze→趋势需 3 根" in PANEL_LEGEND
+    assert "挤压需 BBW<0.15 且 ATR<0.30" in PANEL_LEGEND
+    assert "高波只看 ATR>0.85" in PANEL_LEGEND
     assert "采集心跳固定列五路 lane" in PANEL_LEGEND
     assert "近端IV" in PANEL_LEGEND and "RV3" in PANEL_LEGEND and "3dIV−RV3" in PANEL_LEGEND
 
@@ -242,3 +303,21 @@ def test_legend_and_frontend_copy_keep_display_contracts_explicit():
     assert "条件分位" in app
     assert ".filter((f) => f.tf !== '1h')" not in app
     assert "Hermes/API 可查全量" not in app + index
+
+    dashboard_src = (ROOT / "dashboard.py").read_text(encoding="utf-8")
+    assert 'display_features["margin_basis"] = "raw"' in dashboard_src
+    assert "原始树边界" in app
+
+    sm_block = app.split("const SM = {", 1)[1].split("};", 1)[0]
+    assert "label:" not in sm_block, "状态中文名不得在前端颜色表中保留第二份"
+    assert "S.data.states_map" in app
+    assert "低波动挤压（蓄势）" not in sm_block
+    assert "高波动非趋势（趋势条件未齐）" not in sm_block
+
+    assert "squeezeAt: 0.30, highVolAt: 0.85" in app
+    assert "squeezeAt: 0.15, highVolAt: null" in app
+    assert "highVolAt != null && val > highVolAt" in app
+    assert "yAxis: 0.30, label: { formatter: '挤压ATR' }" in app
+    assert "yAxis: 0.15, label: { formatter: '挤压BBW' }" in app
+    assert "高波仅 ATR&gt;0.85" in app
+    assert "ATR &lt;0.30 与 BBW &lt;0.15 共判挤压" in index

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""市场状态系统 v1 —— 命令行入口。
+"""市场状态系统命令行轻量对照入口（规则版本从 RULES_VERSION 读取）。
 
 用法:
   python main.py                            # 默认 BTC-USDT, ETH-USDT · 1d/4h/1h
@@ -33,7 +33,9 @@ def _fetch_iv(symbol: str):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="市场状态系统：价格结构 × 成交量 × 波动率")
+    ap = argparse.ArgumentParser(
+        description="市场状态系统轻量对照：原始态(单根规则树，无迟滞确认)"
+    )
     ap.add_argument("--symbols", default="BTC-USDT,ETH-USDT")
     ap.add_argument("--timeframes", default="1d,4h,1h", help="可选 1d/4h/1h，逗号分隔")
     ap.add_argument(
