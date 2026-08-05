@@ -98,6 +98,15 @@
 **建议顺序**：D（文档，零风险）→ C（文案）→ B（口径）→ A（语义，含裁决）→ E（死物，含裁决）。
 测试补位随批走：B 批必须补 settled_only 跨年测试与 `_rolling_rank` 对拍测试。
 
+> **✅ 五批全部完成（2026-08-05 晚，用户批准"全部修改"）**：codex gpt-5.6-sol（xhigh）执行、
+> Claude 监工逐批 diff 审核 + 实测 + 提交。提交链：批 D `9b2a194` → 批 C `275aae6` →
+> 批 B `e057c5f` → 批 A `12d9b40` → 批 E `0e2afe8`。测试 69→93 全绿（+24 例回归）。
+> 裁决记录：margin 保持 raw 计算只加标注（margin_basis:'raw'，Hermes 双态明示）；
+> CLI 保持轻量但明示"原始态(无迟滞)"；已落库数据一律保留（rules 列接 opt-in 出口、
+> ref_daily/breadth 在 vvvquery 露出、采而不用账本入档 GAPS）；meta 15 死键由监工亲删。
+> codex 报告的"未动清单"三处均经复核确认合理（E1/E2 历史报告不回写、.bak 留待 E 批已删、
+> stock_iv_term 表结构不加列）。
+
 ---
 
 ## 附录一：178 条判定全量清单
