@@ -369,9 +369,13 @@ def test_live_never_contaminates_settled_percentile():
         {"ts": moomoo_iv.day_ms(date.fromordinal(base + i)), "iv": 40.0, "hv": 30.0}
         for i in range(300)])
     before = dashboard._stock_iv_block(conn, "NVDA-USDT")
-    # 写入一个极端实时值
+    # 写入一个极端实时值。ts 必须动态取当前时刻：30 分钟新鲜度闸对墙钟比较，
+    # 写死的时间戳会在钟走过后让测试变成定时炸弹（实发过：写死"当天 01:00 UTC"
+    # 的行在 01:30 后全部转陈旧，两个测试无声失效）
+    import time as _t
     storage.upsert_stock_vol_live(conn, "moomoo", [
-        {"symbol": "NVDA-USDT", "ts": 1785900000000, "iv": 999.0, "pre_iv": 40.0}])
+        {"symbol": "NVDA-USDT", "ts": int(_t.time() * 1000) - 60_000,
+         "iv": 999.0, "pre_iv": 40.0}])
     after = dashboard._stock_iv_block(conn, "NVDA-USDT")
     assert after["last"] == before["last"], "结算值不得被实时值改写"
     assert after["rank"] == before["rank"], "正式分位不得被实时值污染"
@@ -389,8 +393,10 @@ def test_live_preview_rank_uses_settled_reference():
     storage.upsert_stock_vol(conn, "QQQ-USDT", "moomoo", [
         {"ts": moomoo_iv.day_ms(date.fromordinal(base + i)), "iv": 20.0 + i}
         for i in range(300)])
-    storage.upsert_stock_vol_live(conn, "moomoo", [
-        {"symbol": "QQQ-USDT", "ts": 1785900000000, "iv": 100.0, "pre_iv": 319.0}])
+    import time as _t
+    storage.upsert_stock_vol_live(conn, "moomoo", [   # ts 动态：见上一测试的定时炸弹注释
+        {"symbol": "QQQ-USDT", "ts": int(_t.time() * 1000) - 60_000,
+         "iv": 100.0, "pre_iv": 319.0}])
     blk = dashboard._stock_iv_block(conn, "QQQ-USDT")
     # 无财报记录（ETF）：退回全集参照（tail 252，与结算侧 rank_raw 同口径）——
     # 序列 20..319 的 tail(252)=68..319，iv=100 → (100−68)/252 ≈ 0.127
@@ -658,6 +664,31 @@ def test_breadth_slot_respects_half_day_close():
         return
     assert collector.breadth_slot(datetime.combine(half, dtime(12, 50), tzinfo=et)) == "1559"
     assert collector.breadth_slot(datetime.combine(half, dtime(15, 50), tzinfo=et)) is None
+
+
+def test_heartbeat_lane_states(monkeypatch):
+    """分管线心跳：空表盘中=断流；落库=转正常；盘外 RTH 门控管线=idle 不算故障。"""
+    import time as _t
+
+    import dashboard
+    import regime.calendar_nyse as cal
+
+    conn = _mem_conn()
+    monkeypatch.setattr(cal, "is_rth", lambda ms: True)
+    by = {l["key"]: l for l in dashboard._heartbeat(conn)}
+    for k in ("近端IV", "个股IV", "期限曲线", "衍生品"):
+        assert by[k]["state"] == "bad", k
+    assert "OpenD" in by  # 探活结果依环境，只验存在
+
+    storage.upsert_opt_iv_near(conn, {"symbol": "BTC-USDT", "ts": int(_t.time() * 1000),
+                                      "iv": 30.0, "tenor_days": 3.0, "method": "interp",
+                                      "n_expiries": 5, "index_price": 1.0})
+    assert {l["key"]: l for l in dashboard._heartbeat(conn)}["近端IV"]["state"] == "ok"
+
+    monkeypatch.setattr(cal, "is_rth", lambda ms: False)
+    by3 = {l["key"]: l for l in dashboard._heartbeat(conn)}
+    assert by3["个股IV"]["state"] == "idle" and by3["期限曲线"]["state"] == "idle"
+    assert by3["近端IV"]["state"] == "ok", "24/7 管线不受 RTH 门控"
 
 
 if __name__ == "__main__":

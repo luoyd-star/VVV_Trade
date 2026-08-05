@@ -1031,6 +1031,24 @@ function renderFresh() {
   if (age == null) { el.textContent = '无采集数据'; el.className = 'badge bad'; }
   else if (age < staleMs) { el.textContent = `数据新鲜 · ${ago(c.last_run)}`; el.className = 'badge ok'; }
   else { el.textContent = `数据过期 · ${ago(c.last_run)}`; el.className = 'badge warn'; }
+  renderHeartbeat();
+}
+
+// 分管线采集心跳：整体"数据新鲜"只证明循环活着，某条管线静默断流（OpenD 登出、
+// 单接口持续失败）时循环照常转——这排点逐管线看 MAX(ts)。灰=盘外按预期不采。
+function renderHeartbeat() {
+  const el = $('hbStrip');
+  if (!el) return;
+  const lanes = (S.data && S.data.heartbeat) || [];
+  if (!lanes.length) { el.innerHTML = ''; return; }
+  el.innerHTML = lanes.map((l) => {
+    const ageTxt = l.age_min == null ? '' :
+      l.age_min < 90 ? `${Math.round(l.age_min)}分前` : `${(l.age_min / 60).toFixed(1)}小时前`;
+    const stateTxt = { ok: '正常', warn: '迟滞', bad: '断流', idle: '盘外' }[l.state] || l.state;
+    const tip = `${l.key}：${stateTxt}${ageTxt ? '·最后落库 ' + ageTxt : ''}（${l.note}）`;
+    return `<span class="lane ${esc(l.state)}" title="${esc(tip)}">` +
+           `<span class="dot"></span>${esc(l.key)}${l.state === 'bad' ? '⚠' : ''}</span>`;
+  }).join('');
 }
 
 /* ---------- Hermes（历史在服务端 SQLite，面板与终端共享同一份对话） ---------- */

@@ -887,6 +887,64 @@ def _collector_info(conn):
     }
 
 
+_OPEND_PROBE = {"ts": 0.0, "ok": False}
+
+
+def _opend_alive() -> bool:
+    """OpenD TCP 探活（0.4s 超时，60s 缓存）。OpenD 登出→美股 IV 静默断流是
+    已立案的哑故障模式（GAPS C3），心跳条必须能直接看见它，而不是等 IV 变陈旧才发现。"""
+    import socket
+
+    now = time.time()
+    if now - _OPEND_PROBE["ts"] > 60:
+        try:
+            with socket.create_connection(("127.0.0.1", 11111), timeout=0.4):
+                _OPEND_PROBE["ok"] = True
+        except OSError:
+            _OPEND_PROBE["ok"] = False
+        _OPEND_PROBE["ts"] = now
+    return _OPEND_PROBE["ok"]
+
+
+def _heartbeat(conn) -> list:
+    """分管线采集心跳：每条管线按自己的采集节奏判新鲜度。
+
+    整体循环的"数据新鲜"徽章只能证明 collector 活着；某条管线静默断流
+    （OpenD 登出、单接口持续失败）时循环照常转——这里按 MAX(ts) 逐管线看。
+    RTH 门控的管线在盘外不算故障（idle），但盘外 OpenD 离线给 warn：
+    不修复的话开盘后个股 IV 就会断流。"""
+    from regime.calendar_nyse import is_rth
+
+    now = int(time.time() * 1000)
+    rth = bool(is_rth(now))
+
+    def age(table):
+        row = conn.execute(f"SELECT MAX(ts) FROM {table}").fetchone()  # noqa: S608 表名白名单
+        return None if not row or row[0] is None else round((now - int(row[0])) / 60000.0, 1)
+
+    def judge(a, ok_min, warn_min, gated=False):
+        if gated and not rth:
+            return "idle"
+        if a is None:
+            return "bad"
+        return "ok" if a <= ok_min else ("warn" if a <= warn_min else "bad")
+
+    lanes = []
+    a = age("opt_iv_near")   # 30 分钟节流 → 45 分内新鲜
+    lanes.append({"key": "近端IV", "age_min": a, "state": judge(a, 45, 120), "note": "币安期权 24/7·30分频"})
+    a = age("stock_vol_live")  # RTH 内 30 分钟节流
+    lanes.append({"key": "个股IV", "age_min": a, "state": judge(a, 75, 150, gated=True), "note": "moomoo RTH·30分频"})
+    a = age("stock_iv_term")   # RTH 内小时频
+    lanes.append({"key": "期限曲线", "age_min": a, "state": judge(a, 90, 180, gated=True), "note": "moomoo RTH·小时频"})
+    a = age("deriv")           # 每轮 5 分钟
+    lanes.append({"key": "衍生品", "age_min": a, "state": judge(a, 15, 30), "note": "币安永续·5分频"})
+    op = _opend_alive()
+    lanes.append({"key": "OpenD", "age_min": None,
+                  "state": "ok" if op else ("bad" if rth else "warn"),
+                  "note": "moomoo 网关探活" + ("" if op else "·离线（美股 IV 断流" + ("中" if rth else "风险，开盘前需恢复") + "）")})
+    return lanes
+
+
 def _instrument_payload(symbol: str) -> dict:
     """品种元信息；美股永续附带标的正股是否盘中。
 
@@ -939,6 +997,7 @@ def build_dashboard(symbol: str) -> dict:
                 "health": {"issues": issues},
                 "flips": _flips(conn, symbol, tfs_payload.keys()),
                 "collector": _collector_info(conn),
+                "heartbeat": _heartbeat(conn),
             }
         )
     finally:

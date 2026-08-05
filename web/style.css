@@ -83,6 +83,16 @@ header {
 .hbtn.primary:disabled { opacity: .45; cursor: default; }
 
 .badge { padding: 3px 9px; font-size: var(--fs-lbl); border: 1px solid var(--border); color: var(--sub); }
+/* 采集心跳条：逐管线一个点，悬停 title 看最后落库时间 */
+.hb { display: inline-flex; align-items: center; gap: 8px; margin-right: 6px; }
+.hb .lane { display: inline-flex; align-items: center; gap: 3.5px; font-size: 10px;
+            color: var(--muted); cursor: default; }
+.hb .dot { width: 7px; height: 7px; border-radius: 50%; background: #c3c9d4; }
+.hb .lane.ok .dot   { background: #0a8a66; }
+.hb .lane.warn .dot { background: #d99e06; }
+.hb .lane.bad .dot  { background: #b91f31; box-shadow: 0 0 0 3px rgba(185,31,49,.15); }
+.hb .lane.bad       { color: var(--bad-fg); font-weight: 600; }
+.hb .lane.idle .dot { background: #c3c9d4; }
 .badge.ok   { color: #0a7a5c; border-color: rgba(10,138,102,.45); background: rgba(10,138,102,.08); }
 .badge.warn { color: var(--warn-fg); border-color: rgba(168,124,5,.5);  background: rgba(168,124,5,.08); }
 .badge.bad  { color: var(--bad-fg); border-color: rgba(185,31,49,.45); background: rgba(185,31,49,.07); }
