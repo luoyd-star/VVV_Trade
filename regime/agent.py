@@ -183,6 +183,10 @@ def render_context(p: dict) -> str:
             f"波动率: DVOL隐含={dv['iv_last']}(一年分位{dv['iv_rank']}) "
             f"RV30={dv['rv_last']}"
             + (f" IV−RV={dv['spread']:+.1f}pt" if dv.get("spread") is not None else "")
+            # 3d 对照层（持仓前端）：近端IV−RV3 是"这笔 1-3 天仓的保险贵不贵"
+            + (f" RV3={dv['rv3_last']}" if dv.get("rv3_last") is not None else "")
+            + (f" 3dIV−RV3={dv['spread3']:+.1f}pt(持仓期限口径)"
+               if dv.get("spread3") is not None else "")
         )
     uv = p.get("usvol")
     if uv:
@@ -261,6 +265,10 @@ def render_context(p: dict) -> str:
             + f" {iv30_txt}{ts_txt}"
             + (f" 币安近端IV={uv['xopt']['iv']}(期限~{uv['xopt']['tenor_days']}天,"
                f"24/7报价,与30天口径不可比)" if uv.get("xopt") else "")
+            # 3d 对照层（持仓前端）：美股=期限曲线iv3−RV3，商品=近端IV−RV3
+            + (f" RV3={uv['rv3_last']}" if uv.get("rv3_last") is not None else "")
+            + (f" 3dIV−RV3={uv['spread3']:+.1f}pt(持仓期限口径)"
+               if uv.get("spread3") is not None else "")
         )
     dr = p.get("deriv")
     if dr:

@@ -13,6 +13,7 @@ const COL = {
   up: '#0a8a66', down: '#b91f31',
   upDim: 'rgba(10,138,102,.45)', downDim: 'rgba(185,31,49,.4)',
   blue: '#3861fb', amber: '#a87c05', azure: '#4a90d9',
+  gold: '#dd8500',   // 3d 持仓前端层专属（IV3 实线 / RV3 虚线同色配对）
   ink: '#171a20', muted: '#7c8595', sub: '#46505f',
   grid: '#edeff3', border: '#dfe3e9', tipBg: '#ffffff',
 };
@@ -657,6 +658,9 @@ function renderDvol() {
     xTxt,
     `RV30 ${fmtN(d.rv_last, 1)}`,
     d.spread == null ? null : `IV−RV ${fmtN(d.spread, 1, true)}pt`,
+    d.rv3_last == null ? null : `RV3 ${fmtN(d.rv3_last, 1)}`,
+    // 3d 剪刀差 = 近端IV − RV3：同期限对照，1-3 天仓的"保险贵不贵"
+    d.spread3 == null ? null : `3dIV−RV3 ${fmtN(d.spread3, 1, true)}pt`,
   ].filter(Boolean).join(' · ');
   if (!c) return;
   c.setOption({
@@ -682,6 +686,16 @@ function renderDvol() {
       { name: 'RV30 已实现', type: 'line', data: d.rv, symbol: 'none',
         lineStyle: { width: 2 },
         endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 } },
+      // 3d 持仓前端对：同色配对（金），IV 实线 / RV 虚线。IV3 自 2026-08-05 自攒，
+      // 初期只在图右缘生长；RV3（72×1h）历史即刻可用
+      ...(d.iv3 && d.iv3.length ? [{ name: '3d 隐含', type: 'line', data: d.iv3,
+        symbol: 'none', itemStyle: { color: COL.gold },
+        lineStyle: { width: 2, color: COL.gold },
+        endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
+      ...(d.rv3 && d.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: d.rv3,
+        symbol: 'none', itemStyle: { color: COL.gold },
+        lineStyle: { width: 1.5, color: COL.gold, type: 'dashed', opacity: 0.75 },
+        endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
     ],
   }, true);
 }
@@ -728,6 +742,9 @@ function renderUsvol(uv, meta, c) {
     `RV30 ${fmtN(uv.rv_last, 1)}`,
     uv.spread == null ? null
       : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,
+    uv.rv3_last == null ? null : `RV3 ${fmtN(uv.rv3_last, 1)}`,
+    // 3d 剪刀差：美股=期限曲线 iv3−RV3，商品=币安近端IV−RV3（同期限对照）
+    uv.spread3 == null ? null : `3dIV−RV3 ${fmtN(uv.spread3, 1, true)}pt`,
     uv.index == null ? null
       : `${uv.index}${uv.index_settled === false ? '°' : ''} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
     t.fast && t.slow
@@ -768,6 +785,16 @@ function renderUsvol(uv, meta, c) {
       // 商品无指数锚（uv.index 为空即不画）
       ...(uv.index ? [{ name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none',
         lineStyle: { width: 1, type: 'dashed', opacity: 0.55 } }] : []),
+      // 3d 持仓前端对：同色配对（金），IV 实线 / RV 虚线。美股 IV3 来自期限曲线自攒
+      //（2026-08-05 起），商品来自币安近端 IV——初期只在图右缘生长
+      ...(uv.iv3_hist && uv.iv3_hist.length ? [{ name: '3d 隐含', type: 'line',
+        data: uv.iv3_hist, symbol: 'none', itemStyle: { color: COL.gold },
+        lineStyle: { width: 2, color: COL.gold },
+        endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
+      ...(uv.rv3 && uv.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: uv.rv3,
+        symbol: 'none', itemStyle: { color: COL.gold },
+        lineStyle: { width: 1.5, color: COL.gold, type: 'dashed', opacity: 0.75 },
+        endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
     ],
   }, true);
 }

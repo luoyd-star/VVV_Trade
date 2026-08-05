@@ -6,7 +6,11 @@
 **它独有的东西：夜间与周末的贵金属隐波**——GLD 期权只在美股 RTH 更新，
 而币安期权 24/7 报价。
 
-合成法：每个到期取 ATM（行权价最贴指数价）的 call/put markIV 均值；
+合成法（2026-08-05 稳健化，历史清零重攒）：每个到期先剔除**占位 mark 簇**
+（完全相同的 markIV 出现 ≥3 次＝平台钉住的占位值，实测 XAG 链一半报价钉在 110.0），
+再取距指数价最近 K_NEAR_STRIKES 个行权价上的全部有效 call/put 报价，取**中位数**。
+首版"单 ATM 行权价 C/P 均值"对单个坏 mark 极敏感——实测 XAU 35 分钟内 23.7→38.2→31.0
+来回跳、XAG 瞬时 87.5，全是单点坏报价，非行情。中位数聚合后同链复探稳定。
 目标常数期限 3 天，两到期夹住则按总方差线性插值（σ²T 线性），
 夹不住取最近到期并记 method='nearest'。**期限逐日漂移（日内合约 1 天 +
 周五周合约），tenor_days 必须随值一起落库**——不同期限的 IV 不是同一个量，
@@ -31,6 +35,8 @@ UNDERLYINGS = {
 TARGET_DAYS = 3.0          # 目标常数期限（贴近实际挂牌结构）
 MIN_TENOR_DAYS = 0.2       # 距到期 <4.8 小时的合约临近结算 IV 不稳，剔除
 YEAR_DAYS = 365.0
+K_NEAR_STRIKES = 5         # ATM 邻域宽度：距指数价最近的 5 个行权价（其上全部报价进中位数）
+DUP_PLACEHOLDER = 3        # 同一到期内完全相同的 markIV ≥3 次 → 占位值簇，整簇剔除
 
 
 def _get(path: str):
@@ -80,8 +86,12 @@ def snapshot_all(symbols=None, now_ms: int | None = None) -> list:
 def synth_near_iv(contracts, marks, index_price: float, now_ms: int) -> dict | None:
     """纯函数：期权链 → 近端 ATM IV。返回 {iv(百分比), tenor_days, method, n_expiries}。
 
-    每到期：ATM=行权价最贴指数价；IV=该行权价上可得的 call/put markIV 均值
-    （markIV<=0 视为无效）。目标期限 TARGET_DAYS 被两到期夹住 → 总方差插值；
+    每到期的稳健 ATM 估计（防单点坏 mark）：
+    1. 剔除占位值簇——同一到期内完全相同的 markIV 出现 ≥DUP_PLACEHOLDER 次
+       （真实 mark 逐行权价必然不同，成簇相同＝平台钉住的占位报价）；
+    2. 取距指数价最近 K_NEAR_STRIKES 个行权价上的全部有效报价（call/put 都算）；
+    3. 取中位数——单个坏 mark（宽价差/陈旧报价）拉不动它。
+    目标期限 TARGET_DAYS 被两到期夹住 → 总方差插值；
     否则取最近到期（method='nearest'，tenor_days 记实际期限）。
     """
     by_exp: dict[int, dict] = {}
@@ -106,11 +116,21 @@ def synth_near_iv(contracts, marks, index_price: float, now_ms: int) -> dict | N
 
     points = []   # (tenor_days, atm_iv)
     for exp, d in sorted(by_exp.items()):
-        if not d["quotes"]:
+        quotes = d["quotes"]
+        # ① 占位值簇剔除（在选邻域**之前**做——占位报价不许占据邻域名额）
+        cnt: dict[float, int] = {}
+        for _, iv in quotes:
+            cnt[iv] = cnt.get(iv, 0) + 1
+        quotes = [(dist, iv) for dist, iv in quotes if cnt[iv] < DUP_PLACEHOLDER]
+        if not quotes:
             continue
-        best = min(q[0] for q in d["quotes"])
-        atm = [iv for dist, iv in d["quotes"] if abs(dist - best) < 1e-9]
-        points.append((d["tenor"], sum(atm) / len(atm)))
+        # ② ATM 邻域：最近 K 个不同距离档（对称行权价共享距离档，一并纳入）
+        keep = set(sorted({dist for dist, _ in quotes})[:K_NEAR_STRIKES])
+        sel = sorted(iv for dist, iv in quotes if dist in keep)
+        # ③ 中位数
+        n = len(sel)
+        med = sel[n // 2] if n % 2 else (sel[n // 2 - 1] + sel[n // 2]) / 2
+        points.append((d["tenor"], med))
     if not points:
         return None
 

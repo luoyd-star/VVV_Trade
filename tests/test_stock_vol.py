@@ -428,19 +428,42 @@ def _mk_chain(specs, now_ms=0):
 
 
 def test_binance_opt_synth_interp_and_atm():
-    """两到期夹住目标期限 → 总方差插值；ATM 取行权价最贴指数者；C/P 取均值。"""
+    """两到期夹住目标期限 → 总方差插值；每到期取 ATM 邻域报价的**中位数**。"""
     from regime import binance_opt_iv as b
 
-    # 到期 1d 与 5d，指数 100：ATM=100（95 与 105 都更远）
+    # 到期 1d 与 5d，指数 100：邻域含 K=100/95/105 的全部报价，取中位数
     contracts, marks = _mk_chain([
         (1.0, 100, "CALL", 0.20), (1.0, 100, "PUT", 0.22), (1.0, 95, "CALL", 0.40),
         (5.0, 100, "CALL", 0.30), (5.0, 100, "PUT", 0.32), (5.0, 105, "PUT", 0.50),
     ])
     out = b.synth_near_iv(contracts, marks, 100.0, 0)
     assert out["method"] == "interp" and out["tenor_days"] == b.TARGET_DAYS
-    # 手工复算：σ1=0.21@1d, σ2=0.31@5d, t*=3 → w=(5-3)/(5-1)=0.5
-    var = (0.5 * 0.21**2 * 1 + 0.5 * 0.31**2 * 5) / 3.0
+    # 手工复算：σ1=median(0.20,0.22,0.40)=0.22@1d, σ2=median(0.30,0.32,0.50)=0.32@5d,
+    # t*=3 → w=(5-3)/(5-1)=0.5
+    var = (0.5 * 0.22**2 * 1 + 0.5 * 0.32**2 * 5) / 3.0
     assert abs(out["iv"] - round(var**0.5 * 100, 2)) < 1e-9, out
+
+
+def test_binance_opt_synth_robust_to_pins_and_outliers():
+    """占位 pin 簇（≥3 个完全相同的 markIV）整簇剔除；单个坏 mark 拉不动中位数。
+
+    实测原型（2026-08-05 XAG 链）：一半报价钉在 110.0，正常簇 32-44 里混一个 88.5——
+    首版单 ATM 点估计器读出 87.5 的假 IV，XAU 同因 35 分钟内 23.7→38.2→31.0 来回跳。
+    """
+    from regime import binance_opt_iv as b
+
+    contracts, marks = _mk_chain([
+        # 占位 pin ×4（值完全相同）——若不剔除，中位数会被拖进 1.10
+        (2.0, 100, "PUT", 1.10), (2.0, 99, "CALL", 1.10),
+        (2.0, 101, "PUT", 1.10), (2.0, 98, "CALL", 1.10),
+        # 正常簇 + 一个坏 mark（0.885）
+        (2.0, 100, "CALL", 0.33), (2.0, 99, "PUT", 0.34),
+        (2.0, 101, "CALL", 0.35), (2.0, 98, "PUT", 0.885),
+        (2.0, 102, "CALL", 0.36),
+    ])
+    out = b.synth_near_iv(contracts, marks, 100.0, 0)
+    # pin 全剔后剩 5 个报价：0.33/0.34/0.35/0.885/0.36 → 中位数 0.35
+    assert out["method"] == "nearest" and out["iv"] == 35.0, out
 
 
 def test_binance_opt_synth_nearest_and_tenor_recorded():

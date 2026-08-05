@@ -249,6 +249,22 @@ def _xopt_block(conn, symbol: str):
             "captured_at": int(r["ts"])}
 
 
+def _rv3_pairs(conn, symbol: str):
+    """3 天已实现波动率：72×1h 收盘，年化 24×365。持仓前端层的 RV 对照——
+    RV30 对 1-3 天持仓"太慢"，72 根 1h 窗与 3d IV 期限对齐。
+    美股永续周末价格近似冻结，含周末的窗会被稀释——与本卡 RV30 同一已知口径。"""
+    h1 = storage.get_ohlcv(conn, symbol, "1h", limit=2472)
+    if len(h1) < 80:
+        return [], None
+    rv = realized_vol(h1["close"], 72, 24 * 365) * 100
+    pairs = [
+        [int(t), round(float(v), 2)]
+        for t, v in zip(storage.ts_to_ms(h1["ts"]), rv)
+        if math.isfinite(float(v))
+    ][-2400:]
+    return pairs, (pairs[-1][1] if pairs else None)
+
+
 def _dvol_payload(conn, symbol: str):
     """加密波动率卡：DVOL（BTC/ETH，30 天制度层）+ 币安近端 IV（6 币，持仓前端层）。
 
@@ -279,6 +295,13 @@ def _dvol_payload(conn, symbol: str):
             if math.isfinite(float(v))
         ]
         rv_last = float(rv.dropna().iloc[-1]) if rv.notna().any() else None
+    # 3d 对照层：近端 IV 历史（30 分钟一点，自 2026-08-05 自攒）+ RV3（72×1h）。
+    # 历史序列独立于 xopt 的 2h 新鲜度闸——采集停了历史照画，只是最新点消失
+    xh = storage.get_opt_iv_near(conn, symbol, limit=4800)
+    iv3_pairs = ([[int(t), round(float(v), 2)]
+                  for t, v in zip(xh["ts"], xh["iv"]) if v == v]
+                 if len(xh) else [])
+    rv3_pairs, rv3_last = _rv3_pairs(conn, symbol)
     return {
         "iv": iv_pairs[-365:],
         "rv": rv_pairs[-365:],
@@ -288,6 +311,12 @@ def _dvol_payload(conn, symbol: str):
         "spread": (round(iv_last - rv_last, 1)
                    if iv_last is not None and rv_last is not None else None),
         "xopt": xopt,
+        "iv3": iv3_pairs,
+        "rv3": rv3_pairs,
+        "rv3_last": rv3_last,
+        # 3d 剪刀差 = 近端 IV − RV3：同期限对照，"这笔 1-3 天仓的保险贵不贵"
+        "spread3": (round(xopt["iv"] - rv3_last, 1)
+                    if xopt is not None and rv3_last is not None else None),
     }
 
 
@@ -653,6 +682,22 @@ def _usvol_payload(conn, symbol: str):
                                  if iv3 is not None and iv30_c is not None else None),
                     "age_min": round(age_ms / 60_000),
                 }
+    # 3d 对照层：IV3 历史（美股走 stock_iv_term 自攒；商品走币安近端 IV）+ RV3（72×1h 永续）
+    rv3_pairs, rv3_last = _rv3_pairs(conn, symbol)
+    iv3_hist = []
+    if is_us:
+        tfull = storage.get_stock_iv_term(conn, symbol, limit=700)
+        if len(tfull):
+            iv3_hist = [[int(t), round(float(v), 2)]
+                        for t, v in zip(tfull["ts"], tfull["iv3"]) if v == v]
+    elif proxy:
+        xh = storage.get_opt_iv_near(conn, symbol, limit=4800)
+        if len(xh):
+            iv3_hist = [[int(t), round(float(v), 2)]
+                        for t, v in zip(xh["ts"], xh["iv"]) if v == v]
+    # 3d 剪刀差：美股用期限曲线的 iv3，商品用近端 IV——都与 RV3 同期限对照
+    front3 = (term_stock["iv3"] if term_stock else None) if is_us \
+        else (xopt["iv"] if xopt else None)
     base_iv = iv["last"] if iv else idx_last
     return {
         "index": idx,
@@ -671,6 +716,11 @@ def _usvol_payload(conn, symbol: str):
         "proxy": proxy,           # 非空表示 iv 来自代理标的（GLD/SLV），前端须标注
         "xopt": xopt,             # 币安期权近端 IV（24/7；期限 1-3 天，非 30 天口径）
         "term_stock": term_stock,  # 个股期限曲线 3d/9d/30d ATM（无历史，自采积累中）
+        "iv3_hist": iv3_hist,     # 3d IV 历史序列（自 2026-08-05 自攒，初期很短）
+        "rv3": rv3_pairs,
+        "rv3_last": rv3_last,
+        "spread3": (round(front3 - rv3_last, 1)
+                    if front3 is not None and rv3_last is not None else None),
         "iv30_last": iv30_last,   # CBOE 自采影子值：口径对比用，不算分位
         "iv30_days": iv30_days,
         "ts_ratio": ts_ratio,
