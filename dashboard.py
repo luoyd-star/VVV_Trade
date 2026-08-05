@@ -230,33 +230,64 @@ def _tf_payload(conn, symbol: str, tf: str):
     }
 
 
+def _xopt_block(conn, symbol: str):
+    """币安期权近端 IV（1-3 天期限，24/7）。**持仓前端层**：DVOL/IV30 是 30 天口径，
+    对 1-3 天持仓"太深"；近端期限与持仓周期天然匹配。2 小时新鲜度闸（4 个采集周期），
+    method/n_expiries 必须出到消费方——nearest+单到期时读数对单点 mark 极敏感。"""
+    xdf = storage.get_opt_iv_near(conn, symbol, limit=1)
+    if not len(xdf) or xdf["iv"].iloc[-1] != xdf["iv"].iloc[-1]:
+        return None
+    r = xdf.iloc[-1]
+    age_ms = int(time.time() * 1000) - int(r["ts"])
+    if age_ms > 2 * 3600_000:
+        return None
+    return {"iv": round(float(r["iv"]), 2),
+            "tenor_days": float(r["tenor_days"]),
+            "method": r["method"],
+            "n_expiries": int(r["n_expiries"]) if r["n_expiries"] == r["n_expiries"] else None,
+            "age_min": round(age_ms / 60_000),
+            "captured_at": int(r["ts"])}
+
+
 def _dvol_payload(conn, symbol: str):
+    """加密波动率卡：DVOL（BTC/ETH，30 天制度层）+ 币安近端 IV（6 币，持仓前端层）。
+
+    SOL/BNB/XRP/DOGE 无 DVOL，但有近端 IV 与 RV30——同样出卡，iv 序列为空。
+    """
     base = symbol.upper().replace("/", "-").split("-")[0]
-    if base not in ("BTC", "ETH"):
+    if instruments.get(symbol).get("class") != "crypto":
         return None
-    dv = storage.get_dvol(conn, base, limit=730)
-    if not len(dv):
+    xopt = _xopt_block(conn, symbol)
+    dv = storage.get_dvol(conn, base, limit=730) if base in ("BTC", "ETH") else []
+    if not len(dv) and xopt is None:
         return None
-    iv_pairs = [
-        [int(t), round(float(v), 2)]
-        for t, v in zip(storage.ts_to_ms(dv["ts"]), dv["dvol"])
-    ]
+    iv_pairs, iv_last, iv_rank = [], None, None
+    if len(dv):
+        iv_pairs = [
+            [int(t), round(float(v), 2)]
+            for t, v in zip(storage.ts_to_ms(dv["ts"]), dv["dvol"])
+        ]
+        iv_last = float(dv["dvol"].iloc[-1])
+        iv_rank = round(pct_rank(dv["dvol"], 365), 3)
     d1 = storage.get_ohlcv(conn, symbol, "1d", limit=1200)
-    rv = realized_vol(d1["close"], 30, 365) * 100
-    rv_pairs = [
-        [int(t), round(float(v), 2)]
-        for t, v in zip(storage.ts_to_ms(d1["ts"]), rv)
-        if math.isfinite(float(v))
-    ]
-    iv_last = float(dv["dvol"].iloc[-1])
-    rv_last = float(rv.dropna().iloc[-1]) if rv.notna().any() else None
+    rv_pairs, rv_last = [], None
+    if len(d1) >= 40:
+        rv = realized_vol(d1["close"], 30, 365) * 100
+        rv_pairs = [
+            [int(t), round(float(v), 2)]
+            for t, v in zip(storage.ts_to_ms(d1["ts"]), rv)
+            if math.isfinite(float(v))
+        ]
+        rv_last = float(rv.dropna().iloc[-1]) if rv.notna().any() else None
     return {
         "iv": iv_pairs[-365:],
         "rv": rv_pairs[-365:],
-        "iv_last": round(iv_last, 1),
-        "iv_rank": round(pct_rank(dv["dvol"], 365), 3),
+        "iv_last": round(iv_last, 1) if iv_last is not None else None,
+        "iv_rank": iv_rank,
         "rv_last": round(rv_last, 1) if rv_last is not None else None,
-        "spread": round(iv_last - rv_last, 1) if rv_last is not None else None,
+        "spread": (round(iv_last - rv_last, 1)
+                   if iv_last is not None and rv_last is not None else None),
+        "xopt": xopt,
     }
 
 
@@ -597,24 +628,9 @@ def _usvol_payload(conn, symbol: str):
     ts_ratio, term = _term_structure(conn) if is_us else (None, None)
 
     iv = _stock_iv_block(conn, symbol)
-    # 币安期权近端 IV（仅配了 vol_proxy 的商品）：24/7 的独有信息，期限随值展示
-    xopt = None
-    if proxy:
-        xdf = storage.get_opt_iv_near(conn, symbol, limit=1)
-        if len(xdf) and xdf["iv"].iloc[-1] == xdf["iv"].iloc[-1]:
-            r = xdf.iloc[-1]
-            age_min = (int(time.time() * 1000) - int(r["ts"])) / 60_000
-            # 新鲜度闸（审计：币安宕机后一年前的值仍冒充"24/7 当前 IV"）：
-            # 采集节奏 30 分钟，超 2 小时即陈旧不给。method/n_expiries 一并出——
-            # nearest+单到期意味着读数对单点 mark 极敏感（实测 66 分钟 ±95%），用户须可见
-            if age_min <= 120:
-                xopt = {"iv": round(float(r["iv"]), 2),
-                        "tenor_days": float(r["tenor_days"]),
-                        "method": r["method"],
-                        "n_expiries": (int(r["n_expiries"])
-                                       if r["n_expiries"] == r["n_expiries"] else None),
-                        "age_min": round(age_min),
-                        "captured_at": int(r["ts"])}
+    # 币安期权近端 IV（仅配了 vol_proxy 的商品）：与加密卡共用 _xopt_block
+    #（同一新鲜度闸/同一字段集，两处口径不许漂移）
+    xopt = _xopt_block(conn, symbol) if proxy else None
     base_iv = iv["last"] if iv else idx_last
     return {
         "index": idx,

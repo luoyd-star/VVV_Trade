@@ -168,14 +168,16 @@ def sync_binance_opt_iv(conn) -> tuple:
         return None, []
     errors, parts = [], []
     now = int(_t.time() * 1000)
-    for sym in binance_opt_iv.UNDERLYINGS:
+    try:
+        rows = binance_opt_iv.snapshot_all(now_ms=now)
+    except Exception as e:  # noqa: BLE001
+        return None, [f"binance_opt: {e}"]
+    for row in rows:
         try:
-            row = binance_opt_iv.snapshot(sym, now_ms=now)
-            if row:
-                storage.upsert_opt_iv_near(conn, row)
-                parts.append(f"{sym.split('-')[0]}={row['iv']:.1f}(~{row['tenor_days']}d)")
+            storage.upsert_opt_iv_near(conn, row)
+            parts.append(f"{row['symbol'].split('-')[0]}={row['iv']:.1f}(~{row['tenor_days']}d)")
         except Exception as e:  # noqa: BLE001
-            errors.append(f"binance_opt {sym}: {e}")
+            errors.append(f"binance_opt {row.get('symbol')}: {e}")
     return (f"币安近端IV: {' '.join(parts)}" if parts else None), errors
 
 

@@ -643,12 +643,21 @@ function renderDvol() {
   const c = chart('dvolChart');
   if (uv) { renderUsvol(uv, meta, c); return; }
   if (!d) {
-    meta.textContent = '该品种无 DVOL（仅 BTC/ETH）';
+    meta.textContent = '该品种无期权 IV 数据';
     if (c) c.clear();
     return;
   }
-  meta.textContent =
-    `IV(日结算) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 2)}）· RV ${fmtN(d.rv_last, 1)} · IV−RV ${fmtN(d.spread, 1, true)}pt`;
+  // 近端 IV（币安期权，1-3 天期限，24/7）：持仓前端层，与 30 天口径的 DVOL 分开标注
+  const x = d.xopt;
+  const xTxt = !x ? null
+    : `近端IV ${fmtN(x.iv, 1)}（~${fmtN(x.tenor_days, 1)}d·${x.method === 'nearest' ? '单点' : '插值'}${x.n_expiries != null ? '·' + x.n_expiries + '到期' : ''}）`;
+  meta.textContent = [
+    d.iv_last == null ? null
+      : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 2)}）`,
+    xTxt,
+    `RV30 ${fmtN(d.rv_last, 1)}`,
+    d.spread == null ? null : `IV−RV ${fmtN(d.spread, 1, true)}pt`,
+  ].filter(Boolean).join(' · ');
   if (!c) return;
   c.setOption({
     animation: false,

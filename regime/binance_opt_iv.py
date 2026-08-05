@@ -19,7 +19,15 @@ import time
 import urllib.request
 
 EAPI = "https://eapi.binance.com/eapi/v1"
-UNDERLYINGS = {"XAU-USDT": "XAUUSDT", "XAG-USDT": "XAGUSDT"}
+# 近端 IV 覆盖的标的（2026-08-05 扩容：加密 6 个——持仓周期 1-3 天与近端期限天然匹配，
+# DVOL/IV30 是 30 天口径、对该周期"太深"。实测到期结构：BTC/ETH 有日+周+月，
+# SOL/BNB 至 ~24 天，XRP/DOGE 较浅——3 天目标期限全部可达）
+UNDERLYINGS = {
+    "XAU-USDT": "XAUUSDT", "XAG-USDT": "XAGUSDT",
+    "BTC-USDT": "BTCUSDT", "ETH-USDT": "ETHUSDT",
+    "SOL-USDT": "SOLUSDT", "BNB-USDT": "BNBUSDT",
+    "XRP-USDT": "XRPUSDT", "DOGE-USDT": "DOGEUSDT",
+}
 TARGET_DAYS = 3.0          # 目标常数期限（贴近实际挂牌结构）
 MIN_TENOR_DAYS = 0.2       # 距到期 <4.8 小时的合约临近结算 IV 不稳，剔除
 YEAR_DAYS = 365.0
@@ -37,6 +45,36 @@ def fetch_chain(underlying: str) -> tuple:
     marks = {m["symbol"]: m for m in _get("/mark")}
     idx = float(_get(f"/index?underlying={underlying}")["indexPrice"])
     return contracts, marks, idx
+
+
+def snapshot_all(symbols=None, now_ms: int | None = None) -> list:
+    """一轮取全部标的的近端 IV。exchangeInfo 与 mark 是**全市场响应**，
+    只拉一次共用（8 个标的逐个调 fetch_chain 会浪费 14 次全量请求）；
+    仅 index 价逐标的取。单个标的失败不拖累其余。"""
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    want = {s: u for s, u in UNDERLYINGS.items()
+            if symbols is None or s in symbols}
+    if not want:
+        return []
+    info = _get("/exchangeInfo")
+    by_u: dict[str, list] = {}
+    for c in info["optionSymbols"]:
+        by_u.setdefault(c.get("underlying"), []).append(c)
+    marks = {m["symbol"]: m for m in _get("/mark")}
+    out = []
+    for sym, u in want.items():
+        contracts = by_u.get(u) or []
+        if not contracts:
+            continue
+        try:
+            idx = float(_get(f"/index?underlying={u}")["indexPrice"])
+            r = synth_near_iv(contracts, marks, idx, now)
+            if r:
+                r.update(symbol=sym, ts=now, index_price=idx)
+                out.append(r)
+        except Exception:  # noqa: BLE001  单标的失败不拖累整轮
+            continue
+    return out
 
 
 def synth_near_iv(contracts, marks, index_price: float, now_ms: int) -> dict | None:
