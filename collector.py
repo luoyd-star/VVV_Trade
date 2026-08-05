@@ -181,6 +181,54 @@ def sync_binance_opt_iv(conn) -> tuple:
     return (f"币安近端IV: {' '.join(parts)}" if parts else None), errors
 
 
+def sync_stock_iv_term(conn, symbols) -> tuple:
+    """美股个股 IV 期限曲线（3d/9d/30d ATM）→ stock_iv_term。RTH 内每小时。
+
+    期权链按 ET 日缓存（链盘中不变；到期 distance 每日在变故跨日失效）；
+    盘中每轮只做批量快照（61 品种 ≈366 代码 ≈2 次请求）。
+    """
+    import time as _t
+
+    from regime import moomoo_iv, stock_iv_term
+    from regime.calendar_nyse import is_rth
+
+    now = int(_t.time() * 1000)
+    if not is_rth(now):
+        return None, []
+    if not moomoo_iv.opend_alive():
+        return None, []
+    if not _should(conn, "stock_iv_term_last", 3600):
+        return None, []
+    us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
+    if not us:
+        return None, []
+    try:
+        ctx = moomoo_iv.open_ctx()
+    except Exception as e:  # noqa: BLE001
+        return None, [f"iv_term 连接: {e}"]
+    try:
+        codes = stock_iv_term.load_codes_cache(conn)
+        if codes is None:
+            codes = stock_iv_term.build_codes(ctx, us)
+            if codes:
+                stock_iv_term.save_codes_cache(conn, codes)
+        if not codes:
+            return None, ["iv_term: 代码表构建为空"]
+        rows = stock_iv_term.fetch_term(ctx, codes, now_ms=now)
+        if rows:
+            storage.upsert_stock_iv_term(conn, rows)
+        inv = sum(1 for r in rows
+                  if r.get("iv3") and r.get("iv30") and r["iv3"] > r["iv30"])
+        return f"IV期限曲线 {len(rows)} 品种（3d>30d 倒挂 {inv} 个）", []
+    except Exception as e:  # noqa: BLE001
+        return None, [f"iv_term: {e}"]
+    finally:
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
 def sync_moomoo_iv_live(conn, symbols) -> tuple:
     """盘中实时 IV 快照 → stock_vol_live（**每轮都跑，不节流**）。
 
@@ -687,6 +735,12 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
 
     # 币安期权近端 IV（XAU/XAG，24/7）：30 分钟节流
     msg, errs = sync_binance_opt_iv(conn)
+    if msg:
+        log.info("%s", msg)
+    errors.extend(errs)
+
+    # 个股 IV 期限曲线（3d/9d/30d）：RTH 内每小时，链日缓存 + 批量快照
+    msg, errs = sync_stock_iv_term(conn, symbols)
     if msg:
         log.info("%s", msg)
     errors.extend(errs)

@@ -241,6 +241,12 @@ def render_context(p: dict) -> str:
             ts_txt = f" 期限结构9D/3M={uv['ts_ratio']}"
         else:
             ts_txt = ""
+        # 个股期限曲线（3d/9d/30d ATM）：3d 是 1-3 天持仓窗的直接定价；
+        # 3d>30d 倒挂=近期有已知事件或急性压力；无历史暂无分位
+        _ts2 = uv.get("term_stock") or {}
+        if _ts2.get("iv3") is not None:
+            ts_txt += (f" 个股期限3d/9d/30d={_ts2['iv3']}/{_ts2.get('iv9')}/{_ts2.get('iv30')}"
+                       + ("(倒挂:近期定价高于制度层)" if _ts2.get("inverted") else ""))
         ts_txt = _vrp + ts_txt
         lines.append(
             ("商品波动率" if uv.get("proxy") else "美股波动率") + ": "

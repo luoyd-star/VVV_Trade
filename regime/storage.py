@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS stock_option_stat(
   option_oi REAL, call_oi REAL, put_oi REAL, pc_oi_ratio REAL,
   PRIMARY KEY(symbol, ts, source)
 );
+CREATE TABLE IF NOT EXISTS stock_iv_term(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL,
+  iv3 REAL, t3 INTEGER, iv9 REAL, t9 INTEGER, iv30 REAL, t30 INTEGER,
+  PRIMARY KEY(symbol, ts)
+);
 CREATE TABLE IF NOT EXISTS opt_iv_near(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL,
   iv REAL, tenor_days REAL, method TEXT, n_expiries INTEGER, index_price REAL,
@@ -720,6 +725,32 @@ def get_breadth(conn, slot: str, source: str, limit: int = 800) -> pd.DataFrame:
         f"SELECT ts,{','.join(_BREADTH_COLS)} FROM breadth"
         " WHERE slot=? AND source=? ORDER BY ts DESC LIMIT ?",
         conn, params=(slot, source, limit),
+    )
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+_TERM_COLS = ("iv3", "t3", "iv9", "t9", "iv30", "t30")
+
+
+def upsert_stock_iv_term(conn, rows) -> None:
+    """个股 IV 期限曲线快照（3d/9d/30d ATM）。实际期限随值落库（t3/t9/t30）。"""
+    cols = ",".join(_TERM_COLS)
+    ph = ",".join("?" * len(_TERM_COLS))
+    sets = ",".join(f"{c}=COALESCE(excluded.{c},{c})" for c in _TERM_COLS)
+    conn.executemany(
+        f"INSERT INTO stock_iv_term(symbol,ts,{cols}) VALUES(?,?,{ph})"
+        f" ON CONFLICT(symbol,ts) DO UPDATE SET {sets}",
+        [(r["symbol"], int(r["ts"]), *(_f(r.get(c)) for c in _TERM_COLS))
+         for r in rows],
+    )
+    conn.commit()
+
+
+def get_stock_iv_term(conn, symbol: str, limit: int = 500) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        f"SELECT ts,{','.join(_TERM_COLS)} FROM stock_iv_term"
+        " WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+        conn, params=(symbol, limit),
     )
     return df.iloc[::-1].reset_index(drop=True)
 

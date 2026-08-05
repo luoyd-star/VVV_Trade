@@ -631,6 +631,28 @@ def _usvol_payload(conn, symbol: str):
     # 币安期权近端 IV（仅配了 vol_proxy 的商品）：与加密卡共用 _xopt_block
     #（同一新鲜度闸/同一字段集，两处口径不许漂移）
     xopt = _xopt_block(conn, symbol) if proxy else None
+    # 个股 IV 期限曲线（3d/9d/30d ATM，仅美股）：持仓前端/中段/制度层分离。
+    # 2h 新鲜度闸；无历史（自 2026-08-05 积累），暂不算分位
+    term_stock = None
+    if is_us:
+        tdf = storage.get_stock_iv_term(conn, symbol, limit=1)
+        if len(tdf):
+            r0 = tdf.iloc[-1]
+            age_ms = int(time.time() * 1000) - int(r0["ts"])
+            if age_ms <= 2 * 3600_000:
+                def _n(v):
+                    return float(v) if v is not None and v == v else None
+                iv3, iv30_c = _n(r0["iv3"]), _n(r0["iv30"])
+                term_stock = {
+                    "iv3": iv3, "t3": _n(r0["t3"]),
+                    "iv9": _n(r0["iv9"]), "t9": _n(r0["t9"]),
+                    "iv30": iv30_c, "t30": _n(r0["t30"]),
+                    "slope": (round(iv3 - iv30_c, 2)
+                              if iv3 is not None and iv30_c is not None else None),
+                    "inverted": (iv3 > iv30_c
+                                 if iv3 is not None and iv30_c is not None else None),
+                    "age_min": round(age_ms / 60_000),
+                }
     base_iv = iv["last"] if iv else idx_last
     return {
         "index": idx,
@@ -648,6 +670,7 @@ def _usvol_payload(conn, symbol: str):
         "iv": iv,                 # 个股 IV 主线（moomoo 口径，含自有分位）
         "proxy": proxy,           # 非空表示 iv 来自代理标的（GLD/SLV），前端须标注
         "xopt": xopt,             # 币安期权近端 IV（24/7；期限 1-3 天，非 30 天口径）
+        "term_stock": term_stock,  # 个股期限曲线 3d/9d/30d ATM（无历史，自采积累中）
         "iv30_last": iv30_last,   # CBOE 自采影子值：口径对比用，不算分位
         "iv30_days": iv30_days,
         "ts_ratio": ts_ratio,

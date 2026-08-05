@@ -541,6 +541,35 @@ def test_numeric_cleaners_reject_inf():
     assert storage._f(1.5) == 1.5
 
 
+def test_iv_term_pick_and_atm():
+    """期限选取：每目标取最近到期、实际期限如实记录；ATM 取最贴现价行权价的 C/P 对。"""
+    from regime import stock_iv_term as t
+
+    rows = [("2026-08-05", 1), ("2026-08-07", 3), ("2026-08-12", 8),
+            ("2026-08-14", 10), ("2026-09-04", 31)]
+    picks = t.pick_expiries(rows)
+    assert picks[3] == ("2026-08-07", 3)
+    assert picks[9] in (("2026-08-12", 8), ("2026-08-14", 10))   # 8 与 10 等距，取其一
+    assert picks[30] == ("2026-09-04", 31), "实际期限如实记录（31 而非谎称 30）"
+    assert t.pick_expiries([]) == {}
+
+    chain = [("C210", "CALL", 210.0), ("P210", "PUT", 210.0),
+             ("C212", "CALL", 212.5), ("P212", "PUT", 212.5)]
+    call, put, k = t.atm_pair(chain, 211.9)
+    assert (call, put, k) == ("C212", "P212", 212.5)
+    assert t.atm_pair([], 100.0) is None
+
+
+def test_iv_term_storage_roundtrip():
+    conn = _mem_conn()
+    storage.upsert_stock_iv_term(conn, [
+        {"symbol": "NVDA-USDT", "ts": 1785900000000,
+         "iv3": 44.4, "t3": 3, "iv9": 45.1, "t9": 8, "iv30": 48.0, "t30": 31}])
+    df = storage.get_stock_iv_term(conn, "NVDA-USDT")
+    assert len(df) == 1 and df["iv3"].iloc[0] == 44.4 and df["t30"].iloc[0] == 31
+    assert storage.get_stock_iv_term(conn, "AAPL-USDT").empty
+
+
 def test_earnings_event_windows_et_semantics():
     """v3.1 事件窗 = ET 日历日差 ∈ [0, 10]，**含财报当天**。
 

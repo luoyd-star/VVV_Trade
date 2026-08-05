@@ -734,6 +734,10 @@ function renderUsvol(uv, meta, c) {
       ? `期限${t.fast.settled === false ? '°' : ''} 9D/30D ${fmtN(t.fast.ratio, 2)}·${fmtN(t.fast.rank, 2)} / 30D/3M `
         + `${fmtN(t.slow.ratio, 2)}·${fmtN(t.slow.rank, 2)}${inv}`
       : (uv.ts_ratio == null ? null : `9D/3M ${fmtN(uv.ts_ratio, 2)}`),
+    // 个股期限曲线（3d/9d/30d ATM）：持仓前端层——3d 是"这笔 1-3 天仓"的直接定价
+    uv.term_stock == null ? null
+      : `个股期限 ${fmtN(uv.term_stock.iv3, 1)}/${fmtN(uv.term_stock.iv9, 1)}/${fmtN(uv.term_stock.iv30, 1)}`
+        + `（3d/9d/30d${uv.term_stock.inverted ? '·倒挂' : ''}）`,
   ];
   meta.textContent = bits.filter(Boolean).join(' · ');
   if (!c) return;
