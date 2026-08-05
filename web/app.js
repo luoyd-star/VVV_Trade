@@ -677,7 +677,7 @@ function renderDvol() {
     : `近端IV ${fmtN(x.iv, 1)}（~${fmtN(x.tenor_days, 1)}d·${x.method === 'nearest' ? '单点' : '插值'}${x.n_expiries != null ? '·' + x.n_expiries + '到期' : ''}）`;
   meta.textContent = [
     d.iv_last == null ? null
-      : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 2)}）`,
+      : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 3)}）`,
     `RV30 ${fmtN(d.rv_last, 1)}`,
     d.spread == null ? null : `IV−RV ${fmtN(d.spread, 1, true)}pt`,
   ].filter(Boolean).join(' · ');
@@ -770,8 +770,12 @@ function renderUsvol(uv, meta, c) {
   // 压到 0.94×。与原始分位差距大时两个都显示，让读者看到修正幅度。
   const rDiff = iv && iv.rank != null && iv.rank_raw != null
     && Math.abs(iv.rank - iv.rank_raw) >= 0.1;
+  const rankKindTxt = iv && iv.rank_kind === 'cond'
+    ? '条件分位' : '原始分位';
   const rankTxt = iv && iv.rank != null
-    ? `分位 ${fmtN(iv.rank, 2)}${rDiff ? `（原始 ${fmtN(iv.rank_raw, 2)}）` : ''}`
+    ? `${rankKindTxt} ${fmtN(iv.rank, 2)}`
+      + (iv.rank_kind === 'cond' ? '·同财报状态·504日' : '·252日')
+      + `${rDiff ? `（原始 ${fmtN(iv.rank_raw, 2)}）` : ''}`
       + (iv.rank_kind === 'cond' && iv.earn_in30 ? '·财报窗内' : '')
     : `样本 ${iv ? iv.n : 0}d·分位不足`;
   // 财报邻近度：分位在财报窗内是日程驱动而非市场压力，必须标出来
@@ -868,7 +872,9 @@ function renderDeriv() {
   }
   const sp = dr.spans || {};
   meta.textContent = `历史 OI ${sp.oi ?? dr.span_days}d · Funding ${sp.funding ?? '—'}d`
-    + `${sp.iv30 != null ? ` · iv30 ${sp.iv30}d` : ''}${dr.warmup ? '（OI<21天，分位仅供参考）' : ''}`;
+    + `${dr.iv30_span_days != null
+      ? ` · ${dr.iv30_src === 'moomoo' ? '个股IV(moomoo)' : 'iv30(CBOE影子)'} ${dr.iv30_span_days}d/${dr.iv30_n}点`
+      : ''}${dr.warmup ? '（OI<21天，分位仅供参考）' : ''}`;
   const chg = (v) => (v == null ? '—' : fmtN((Math.exp(v) - 1) * 100, 2, true) + '%');
   const rk = (v) => (v == null ? '' : `（分位 ${fmtN(v, 2)}）`);
   info.innerHTML = [
@@ -881,7 +887,8 @@ function renderDeriv() {
     [dr.funding_annual_pct == null ? '—' : `${fmtN(dr.funding_annual_pct, 1)}%`, 'Funding 年化'],
     [dr.premium_pct == null ? '—' : `${fmtN(dr.premium_pct * 100, 1)}bp`, `Premium${rk(dr.premium_rank)}`],
     dr.iv30 != null
-      ? [fmtN(dr.iv30, 1), `个股 iv30${dr.iv30_src === 'cboe' ? '(CBOE影子·短史)' : ''}${rk(dr.iv30_rank)}`]
+      ? [fmtN(dr.iv30, 1), `个股 iv30${dr.iv30_src === 'cboe' ? '(CBOE影子·短史)'
+        : dr.iv30_rank_kind === 'cond' ? '(moomoo·条件分位)' : '(moomoo·原始分位)'}${rk(dr.iv30_rank)}`]
       : [`${dr.span_days}d`, '样本跨度'],
   ].map(([v, k]) => `<div class="m"><span>${k}</span><b>${v}</b></div>`).join('');
   if (!c) return;
@@ -1008,8 +1015,8 @@ function renderFeatTable() {
 
 function renderFlips() {
   const flips = S.data.flips || [];
-  // 1h 翻转本身就多（噪音层），不进明细表——横向时间线仍画 1h，Hermes/API 可查全量
-  const shown = flips.filter((f) => f.tf !== '1h');
+  // 后端已先排除 1h 再给 4h/1d 40 条预算；横向时间线仍画 1h 状态。
+  const shown = flips;
   const rows = shown.map((f) =>
     `<tr><td>${fmtTs(f.ts, '4h')}</td><td>${esc(f.tf)}</td>` +
     `<td style="text-align:left">${stchip(f.from)} → ${stchip(f.to)}</td>` +

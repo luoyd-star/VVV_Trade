@@ -36,29 +36,38 @@ def interpret(regimes: dict) -> str:
     d1 = regimes.get("1d")
     h4 = regimes.get("4h")
     h1 = regimes.get("1h")
-    if not (d1 and h4):
-        only = " | ".join(f"{tf} {r.label}" for tf, r in regimes.items())
-        return f"{only}。（周期不足，无法做多周期对照）"
+    missing = [tf for tf in ("1d", "4h", "1h") if not regimes.get(tf)]
+    prefix = f"缺 {'、'.join(missing)} 周期；" if missing else ""
 
-    if d1.state.startswith("trend") and d1.state == h4.state and (not h1 or h1.state == d1.state):
-        return f"三周期同向（{d1.label}），趋势环境明确，顺势信号质量最高。"
+    def result(text: str) -> str:
+        return prefix + text
+
+    if not (d1 and h4):
+        only = " | ".join(f"{tf} {r.label}" for tf, r in regimes.items() if r)
+        return result(f"{only}。（周期不足，无法做多周期对照）")
+
+    if d1.state.startswith("trend") and d1.state == h4.state:
+        if h1 and h1.state == d1.state:
+            return result(f"三周期同向（{d1.label}），趋势环境明确，顺势信号质量最高。")
+        if not h1:
+            return result(f"日线与4小时两周期同向（{d1.label}），趋势环境明确；小周期方向尚不可核对。")
     if d1.state == "trend_up" and h4.state in ("range", "squeeze"):
-        return "日线上行趋势 + 4小时整理：典型的趋势中继情景，关注 4 小时区间边界的放量方向选择。"
+        return result("日线上行趋势 + 4小时整理：典型的趋势中继情景，关注 4 小时区间边界的放量方向选择。")
     if d1.state == "trend_down" and h4.state in ("range", "squeeze"):
-        return "日线下行趋势 + 4小时整理：反弹整理或下跌中继，关注区间下沿是否放量失守。"
+        return result("日线下行趋势 + 4小时整理：反弹整理或下跌中继，关注区间下沿是否放量失守。")
     if d1.state.startswith("trend") and h4.state.startswith("trend") and d1.state != h4.state:
-        return f"日线（{d1.label}）与 4 小时（{h4.label}）方向相反：逆势回调进行中，日线近端摆动点是多空分界。"
+        return result(f"日线（{d1.label}）与 4 小时（{h4.label}）方向相反：逆势回调进行中，日线近端摆动点是多空分界。")
     if d1.state == "squeeze":
-        return (
+        return result(
             "日线级别波动率挤压：大行情酝酿期（方向未知）。重点盯日线近端摆动高/低的"
             "放量突破，挤压期内小周期信号多为噪音，不宜提前押方向。"
         )
     if d1.state == "range" and h4.state == "squeeze":
-        return "日线震荡 + 4小时挤压：波动率蓄势末期，等待放量突破定方向，避免提前押注。"
+        return result("日线震荡 + 4小时挤压：波动率蓄势末期，等待放量突破定方向，避免提前押注。")
     if "high_vol_chop" in (d1.state, h4.state):
-        return "存在高波动非趋势状态：波动率极高且未过趋势判定（规则未证明无序，也可能是高波新趋势的启动段）。此时降低敞口、等待结构确认，比预测方向更重要。"
+        return result("存在高波动非趋势状态：波动率极高且未过趋势判定（规则未证明无序，也可能是高波新趋势的启动段）。此时降低敞口、等待结构确认，比预测方向更重要。")
     parts = " | ".join(f"{tf} {regimes[tf].label}" for tf in regimes)
-    return f"{parts}：以大周期为背景、小周期找位置。"
+    return result(f"{parts}：以大周期为背景、小周期找位置。")
 
 
 def _fmt_sources(sources) -> str:

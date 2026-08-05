@@ -571,19 +571,31 @@ def _term_structure(conn):
 
 
 def _iv30_fields(conn, symbol: str, cboe_last, cboe_hourly, spans) -> dict:
-    """deriv 卡的个股 IV 三元组：优先 moomoo 正牌序列，退化 CBOE 影子值。
+    """deriv 卡的个股 IV 来源绑定字段：优先 moomoo 正牌序列，退化 CBOE 影子值。
 
-    分开写是因为两条路的分位口径不同：moomoo 是 252 交易日窗的日频分位，
-    CBOE 是小时重采样后的短窗分位（样本不足时本就返回 None）。混在一个表达式里
-    迟早会有人把两者的分位当同一个统计量。
+    分开写是因为两条路的分位口径不同：moomoo 优先走 504 日条件分位并可回退
+    252 日原始分位，CBOE 是小时重采样后的短窗分位（样本不足时本就返回 None）。混在一个表达式里
+    迟早会有人把两者的分位当同一个统计量。source/span/n/rank_kind 必须随最终值
+    一起返回，前端不得再拿 deriv.iv30 的短史跨度替 moomoo 长史背书。
     """
     blk = _stock_iv_block(conn, symbol)
     if blk:
-        return {"iv30": blk["last"], "iv30_rank": blk["rank"], "iv30_src": blk["source"]}
+        return {
+            "iv30": blk["last"],
+            "iv30_rank": blk["rank"],
+            "iv30_src": blk["source"],
+            "iv30_span_days": blk["days"],
+            "iv30_n": blk["n"],
+            "iv30_rank_kind": blk["rank_kind"],
+        }
+    cboe_n = int(cboe_hourly["iv30"].dropna().shape[0]) if len(cboe_hourly) else 0
     return {
         "iv30": round(cboe_last, 1) if cboe_last is not None else None,
         "iv30_rank": _rank_or_none(cboe_hourly, cboe_last, spans),
         "iv30_src": "cboe" if cboe_last is not None else None,
+        "iv30_span_days": spans["iv30"] if cboe_last is not None else None,
+        "iv30_n": cboe_n if cboe_last is not None else 0,
+        "iv30_rank_kind": "hourly" if cboe_last is not None else None,
     }
 
 
@@ -851,6 +863,9 @@ def _deriv_payload(conn, symbol: str):
 def _flips(conn, symbol: str, tfs):
     flips = []
     for tf in tfs:
+        # 明细卡与 Hermes 共用此 payload：1h 噪音先在后端排除，再给 4h/1d 40 条预算。
+        if tf == "1h":
+            continue
         states = storage.get_states(conn, symbol, tf, limit=1500)
         for prev, curr in zip(states, states[1:]):
             if curr["state"] != prev["state"]:

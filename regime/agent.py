@@ -44,11 +44,18 @@ CODEX_FALLBACK_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex"
 PANEL_LEGEND = """<panel_legend>
 下方 <panel> 是面板此刻的实时数据（每次提问自动注入）。字段说明：dir 方向分[-1,1]；
 ER% 趋势效率分位；ATR%/BBW% 波动率分位(0-1，低=挤压 高=高波)；tilt 近20根多空量差[-1,1]；
-cRSI 为周期自适应RSI，带位 0=下带 100=上带（可超界）；IV=Deribit DVOL 隐含波动率，
-RV=已实现波动率，IV−RV 为波动率风险溢价；OI=永续未平仓量（张），Funding 为按品种结算周期的费率（显示值为下期预测、分位对照已结算分布），
+cRSI 为周期自适应RSI，带位 0=下带 100=上带（可超界）；conf 是原始逐根判定的子信号一致度，
+确认态没有独立置信度；摆动高/低是近端结构边界，突破量分位是突破当根成交量的历史分位；
+VWAP偏离以 ATR 为单位，使用币安量窗，仅为展示层指标、不进规则。
+DVOL=Deribit 30 天隐含波动率；近端IV=币安期权约 1-3 天口径，插值/单点、到期数与年龄
+用于判断读数稳健性；RV30=30 个日收益的年化已实现波动率，RV3=72 个小时收益的年化已实现波动率，
+3dIV−RV3 是 1-3 天持仓前端的同期限剪刀差；个股期限3d/9d/30d 是 moomoo ATM 期限曲线。
+OI=永续未平仓量（张），OI 分位前的天数是小时样本实际参照跨度，Δ4h/Δ24h 是持仓变化；
+Funding 为按品种结算周期的费率（显示值为下期预测、分位对照已结算分布），年化按实际结算周期换算；
 Premium=标记价对指数价的基差，Taker买卖比>1 表示主动买盘占优——这组是持仓/杠杆维度。
-状态为迟滞确认态（一般 2 根确认、恢复震荡 3 根、高波冲击立即）；[原始判定]为未折叠的逐根判定，
-[酝酿中]为尚未确认的候选切换，[未收线预览]用形成中的K线试算、只作预警不作确认依据。
+状态为迟滞确认态（一般 2 根确认、恢复震荡 3 根、高波冲击立即；未来10日财报事件窗内
+squeeze→趋势需 3 根）；[原始判定]为未折叠的逐根判定，[酝酿中]为尚未确认的候选切换，
+[未收线预览]用形成中的K线试算、只作预警不作确认依据；近期状态翻转只列 4h/1d 最近记录。
 加速度=快RV(12根)/慢RV(72根)，>1 表示波动率正在扩张；下行方差占比为近48根中
 下跌收益贡献的方差比例，0.5 中性、越高越"跌出来的波动"。
 路径几何（影子特征，不参与状态判定）：频率=去趋势残差每100根的均值穿越次数
@@ -58,13 +65,17 @@ margin=到最近可翻转状态边界的距离（<0.15 表示状态处于边界�
 与滞后确认的"酝酿中"互补）。这组读数滞后约60根（窗口120的一半），解读时注意。
 美股永续专属：ATR%ds=按(小时,是否周末)桶去季节化后的 ATR 分位（影子字段，不参与判定）
 ——与 ATR% 分歧大说明当前读数主要是时段效应（盘中/盘外/周末）而非真实波动状态变化；
-个股IV=该标的自身的 30 天隐含波动率（moomoo 口径，2023-06 起约 3.1 年史），
-其分位是**与自己历史比**（252 交易日窗）——绝对值高低跨品种不可比，分位才可比；
+个股IV=该标的自身的聚合隐含波动率（moomoo 口径，非严格常数30天；2023-06 起约 3.1 年史），
+分位优先使用 504 日同财报状态条件分位（rank_kind=cond），样本不足回退 252 日原始分位
+（rank_kind=raw）——绝对值高低跨品种不可比，分位才可比；
 指数IV=CBOE 板块指数（VXN=纳指100 / VIX），仅作长周期锚，**不与个股IV混算分位**
-（两者口径不同源）；VRP=IV−HV（同源同口径的方差风险溢价）分离"贵"与"波动大"——
+（两者口径不同源）；指数IV或期限比后的 ° 表示盘中延迟报价、尚未结算确权；
+VRP=IV−HV（同源同口径的方差风险溢价）分离"贵"与"波动大"——
 低ATR分位+高VRP=脆弱的安静（市场在买保险），高ATR分位+负VRP=已实现波动已超期权定价；
 期限结构双速：9D/30D 抓急性冲击、30D/3M 抓制度切换，>1 为倒挂（已知失败模式：
 能抓 2008/2020 式冲击、会错过 2022 式慢跌）；⚑财报标记表示该分位含日程驱动成分。
+数据健康警告列出已知受影响读数；采集心跳固定列五路 lane，正常/迟滞/断流/盘外是各管线状态，
+age 是最后落库年龄（OpenD 为网关探活、无落库年龄）；采集器间隔/错误数是整体循环摘要。
 </panel_legend>"""
 
 
@@ -179,15 +190,32 @@ def render_context(p: dict) -> str:
         lines.append(" ".join(parts))
     dv = p.get("dvol")
     if dv:
-        lines.append(
-            f"波动率: DVOL隐含={dv['iv_last']}(一年分位{dv['iv_rank']}) "
-            f"RV30={dv['rv_last']}"
-            + (f" IV−RV={dv['spread']:+.1f}pt" if dv.get("spread") is not None else "")
-            # 3d 对照层（持仓前端）：近端IV−RV3 是"这笔 1-3 天仓的保险贵不贵"
-            + (f" RV3={dv['rv3_last']}" if dv.get("rv3_last") is not None else "")
-            + (f" 3dIV−RV3={dv['spread3']:+.1f}pt(持仓期限口径)"
-               if dv.get("spread3") is not None else "")
-        )
+        dvol_parts = []
+        if dv.get("iv_last") is not None:
+            dvol_txt = f"DVOL隐含={dv['iv_last']}"
+            if dv.get("iv_rank") is not None:
+                dvol_txt += f"(一年分位{dv['iv_rank']:.3f})"
+            dvol_parts.append(dvol_txt)
+        xopt = dv.get("xopt") or {}
+        if xopt.get("iv") is not None:
+            method = "插值" if xopt.get("method") == "interp" else "单点"
+            xmeta = f"~{xopt['tenor_days']:.1f}d·{method}"
+            if xopt.get("n_expiries") is not None:
+                xmeta += f"·{xopt['n_expiries']}到期"
+            if xopt.get("age_min") is not None:
+                xmeta += f"·{xopt['age_min']:.0f}分前"
+            dvol_parts.append(f"近端IV={xopt['iv']:.1f}({xmeta})")
+        if dv.get("rv_last") is not None:
+            dvol_parts.append(f"RV30={dv['rv_last']}")
+        if dv.get("spread") is not None:
+            dvol_parts.append(f"IV−RV={dv['spread']:+.1f}pt")
+        # 3d 对照层（持仓前端）：近端IV−RV3 是"这笔 1-3 天仓的保险贵不贵"
+        if dv.get("rv3_last") is not None:
+            dvol_parts.append(f"RV3={dv['rv3_last']}")
+        if dv.get("spread3") is not None:
+            dvol_parts.append(f"3dIV−RV3={dv['spread3']:+.1f}pt(持仓期限口径)")
+        if dvol_parts:
+            lines.append("波动率: " + " ".join(dvol_parts))
     uv = p.get("usvol")
     if uv:
         # 个股 IV 主线（moomoo 3.1 年史，分位可用）；无回填时才退回 CBOE 短史影子值
@@ -216,8 +244,13 @@ def render_context(p: dict) -> str:
             #（条件样本不足回退原始时也不得谎称"同财报状态内"——codex 审计）
             _rlabel = ("同财报状态内分位(2年窗)" if _iv.get("rank_kind") == "cond"
                        else "自身252日分位")
+            _asof = _iv.get("asof")
+            _asof_txt = (time.strftime("%Y-%m-%d", time.gmtime(_asof / 1000))
+                         if isinstance(_asof, (int, float)) else "日期未知")
+            _stale_txt = (f"·⚠{_iv['age_days']:.0f}天前"
+                          if _iv.get("stale") and _iv.get("age_days") is not None else "")
             iv30_txt = (
-                f"个股IV(昨结算)={_iv['last']}"
+                f"个股IV(最近结算{_asof_txt}{_stale_txt})={_iv['last']}"
                 + (f"({_rlabel}{_iv['rank']}{_dv}{_w30}{_etxt})"
                    if _iv.get("rank") is not None
                    else f"(样本仅{_iv['n']}日,分位不足{_etxt})")
@@ -236,11 +269,13 @@ def render_context(p: dict) -> str:
         _t = uv.get("term") or {}
         if _t.get("fast") and _t.get("slow"):
             _f, _s = _t["fast"], _t["slow"]
+            _fm = "°" if _f.get("settled") is False else ""
+            _sm = "°" if _s.get("settled") is False else ""
             _inv = ("(全曲线倒挂:急性且已传导到制度端)" if _t.get("both_inverted")
                     else "(快端倒挂:急性冲击)" if _f["inverted"]
                     else "(慢端倒挂:制度端承压)" if _s["inverted"] else "")
-            ts_txt = (f" 期限结构 9D/30D={_f['ratio']}(分位{_f['rank']})"
-                      f" 30D/3M={_s['ratio']}(分位{_s['rank']}){_inv}")
+            ts_txt = (f" 期限结构 9D/30D{_fm}={_f['ratio']}(分位{_f['rank']})"
+                      f" 30D/3M{_sm}={_s['ratio']}(分位{_s['rank']}){_inv}")
         elif uv.get("ts_ratio") is not None:
             ts_txt = f" 期限结构9D/3M={uv['ts_ratio']}"
         else:
@@ -255,7 +290,8 @@ def render_context(p: dict) -> str:
         lines.append(
             ("商品波动率" if uv.get("proxy") else "美股波动率") + ": "
             # 商品无指数锚；iv 来自代理标的（GLD/SLV）须标明
-            + (f"{uv['index']}={uv['index_last']}(一年分位{uv['index_rank']}) "
+            + (f"{uv['index']}{'°' if uv.get('index_settled') is False else ''}="
+               f"{uv['index_last']}(一年分位{uv['index_rank']}) "
                if uv.get("index") else "")
             + f"RV30={uv['rv_last']}"
             # 标签须跟着 spread_src 走：值来自个股 IV 却标"指数IV−RV"会误导读者
@@ -276,20 +312,31 @@ def render_context(p: dict) -> str:
             return fmt.format(v) if v is not None else "—"
         chg4 = _f((math.exp(dr["oi_change_4h"]) - 1) * 100 if dr["oi_change_4h"] is not None else None, "{:+.2f}")
         chg24 = _f((math.exp(dr["oi_change_24h"]) - 1) * 100 if dr["oi_change_24h"] is not None else None, "{:+.2f}")
+        oi_days = _f((dr.get("spans") or {}).get("oi"), "{:.1f}")
         lines.append(
-            f"持仓(Binance永续): OI={_f(dr['oi'], '{:.0f}')}张(分位{_f(dr['oi_rank'])}) "
+            f"持仓(Binance永续): OI={_f(dr['oi'], '{:.0f}')}张(近{oi_days}日小时分位{_f(dr['oi_rank'])}) "
             f"Δ4h={chg4}% Δ24h={chg24}% "
             f"Funding预测={_f(dr['funding_pct'], '{:.4f}')}%/{dr.get('funding_interval_h') or 8:g}h"
             f"(年化{_f(dr['funding_annual_pct'], '{:.1f}')}%) "
             f"上期结算={_f(dr.get('funding_settled_pct'), '{:.4f}')}%(分位{_f(dr['funding_rank'])}) "
             f"Premium={_f(dr['premium_pct'], '{:.4f}')}%(分位{_f(dr['premium_rank'])}) "
             f"Taker买卖比={_f(dr['taker_ratio'], '{:.3f}')}(分位{_f(dr['taker_rank'])})"
-            + ("（持仓历史<21天，分位仅供参考）" if dr.get("warmup") else "")
         )
     flips = p.get("flips") or []
     if flips:
         lines.append("近期状态翻转: " + "; ".join(
             f"{x['tf']} {x['from']}→{x['to']}" for x in flips[:6]))
+    heartbeat = p.get("heartbeat") or []
+    if heartbeat:
+        state_labels = {"ok": "正常", "warn": "迟滞", "bad": "断流", "idle": "盘外"}
+        hb_parts = []
+        for lane in heartbeat:
+            age = (f"{lane['age_min']:.1f}分前" if lane.get("age_min") is not None
+                   else "无落库年龄")
+            state = state_labels.get(lane.get("state"), lane.get("state") or "未知")
+            note = f"·{lane['note']}" if lane.get("note") else ""
+            hb_parts.append(f"{lane.get('key')}={state}/{age}{note}")
+        lines.append("采集心跳(五路): " + "; ".join(hb_parts))
     col = p.get("collector") or {}
     lines.append(
         f"采集器: 间隔{col.get('interval')}s 最近错误{len(col.get('errors') or [])}个"
