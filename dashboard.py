@@ -33,6 +33,9 @@ from regime.features.utils import pct_rank, rolling_pct_rank
 from regime.features.volatility import atr, bb_width, realized_vol
 from regime.features.vwap import WIN_HOURS as VWAP_WIN_HOURS
 from regime.features.vwap import rolling_vwap, vwap_payload
+from regime.policy.levels import extract_levels
+from regime.policy.location import APPROACH_BARS, locate
+from regime.policy.volnote import EARNINGS_NEAR_DAYS, vol_notes
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
@@ -40,6 +43,13 @@ CANDLES = 240
 TIMEFRAMES = ("1d", "4h", "1h")
 TF_SEC = {"1h": 3600, "4h": 14_400, "1d": 86_400}
 # WARMUP_BARS 移入 regime/classify.py——a8 起逐行审计与面板角标共用同一定义
+
+OVERVIEW_TTL_SEC = 60               # 起步值，待校准；与主页 60 秒刷新周期对齐
+OVERVIEW_OHLCV_LIMIT = 400          # 起步值，待校准；覆盖 EMA200 与关键位观察窗
+OVERVIEW_VOL1H_HOURS = 260          # 起步值，待校准；覆盖 POC 的 240 小时窗口并留余量
+OVERVIEW_TERM_FRESH_SEC = 2 * 3600  # 起步值，待校准；期限曲线超过两小时不作当前标注
+OVERVIEW_DVOL_RANK_WIN = 365        # 起步值，待校准；加密 IV30 历史分位观察窗
+OVERVIEW_DVOL_RANK_MIN = 120        # 起步值，待校准；不足样本不输出历史分位
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1035,6 +1045,303 @@ def build_dashboard(symbol: str) -> dict:
         conn.close()
 
 
+def _latest_state(conn, symbol: str, tf: str):
+    rows = storage.get_states(conn, symbol, tf, limit=1)
+    return rows[-1]["state"] if rows else None
+
+
+def _signal_ok(at, crsi_zone):
+    """cRSI 极值区是否与当前位置所需方向一致；不可判定时返回 None。"""
+    if crsi_zone is None:
+        return None
+    if at == "at_support":
+        return crsi_zone == "超卖区"
+    if at == "at_resistance":
+        return crsi_zone == "超买区"
+    return None
+
+
+def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None):
+    """把本批明确列出的 regime × location 单元格映射成剧本展示名。"""
+    kinds = set()
+    if isinstance(zone, dict):
+        raw_kinds = zone.get("kinds") or []
+        kinds = {raw_kinds} if isinstance(raw_kinds, str) else set(raw_kinds)
+
+    play = None
+    if regime == "trend_up" and at == "at_support":
+        play = "S5 突破回踩加仓" if role_flipped else "S4 趋势回踩做多"
+    elif regime == "trend_down" and at == "at_resistance":
+        play = "S1 反弹至压力做空"
+    elif (regime == "trend_down" and at == "at_support"
+          and kinds & {"ema100", "ema200"}):
+        play = "S13 深跌逆势做多（需二次确认·半仓）"
+    elif regime == "range" and at == "at_support":
+        play = "S3 区间下沿做多"
+    elif regime == "range" and at == "at_resistance":
+        play = "S3 区间上沿做空"
+
+    if play is not None and signal_ok is False:
+        return f"{play}（位置到了信号没到）"
+    return play if signal_ok is not None else None
+
+
+def _overview_vol_inputs(conn, symbol: str) -> dict:
+    """轻量装配风险标注输入，不走详情页的整段图表计算。"""
+    inst = instruments.get(symbol)
+    kind = inst.get("class")
+    out = {
+        "iv3": None,
+        "iv30": None,
+        "iv30_rank": None,
+        "rv3": None,
+        "earnings_days": None,
+        "term_inverted": None,
+    }
+
+    if kind == "us_stock_perp":
+        term = storage.get_stock_iv_term(conn, symbol, limit=1)
+        if len(term):
+            row = term.iloc[-1]
+            age_sec = time.time() - int(row["ts"]) / 1000
+            if age_sec <= OVERVIEW_TERM_FRESH_SEC:
+                iv3 = row.get("iv3")
+                iv30 = row.get("iv30")
+                out["iv3"] = float(iv3) if iv3 is not None and iv3 == iv3 else None
+                term_iv30 = float(iv30) if iv30 is not None and iv30 == iv30 else None
+                out["term_inverted"] = (
+                    out["iv3"] > term_iv30
+                    if out["iv3"] is not None and term_iv30 is not None else None
+                )
+
+        stock_iv = _stock_iv_block(conn, symbol)
+        if stock_iv and not stock_iv.get("stale"):
+            out["iv30"] = stock_iv.get("last")
+            out["iv30_rank"] = stock_iv.get("rank")
+        earnings = storage.earnings_proximity(
+            conn, symbol, int(time.time() * 1000), horizon=EARNINGS_NEAR_DAYS
+        )
+        out["earnings_days"] = earnings["days"] if earnings else None
+        return out
+
+    # 加密与配置了期权代理的商品共用近端 1-3 天 IV；_xopt_block 自带新鲜度闸。
+    if kind == "crypto" or inst.get("vol_proxy"):
+        near = _xopt_block(conn, symbol)
+        out["iv3"] = near.get("iv") if near else None
+
+    base = symbol.upper().replace("/", "-").split("-")[0]
+    if kind == "crypto" and base in {"BTC", "ETH"}:
+        dvol = storage.get_dvol(conn, base, limit=OVERVIEW_DVOL_RANK_WIN)
+        clean = dvol["dvol"].dropna() if len(dvol) else pd.Series(dtype=float)
+        if len(clean):
+            out["iv30"] = float(clean.iloc[-1])
+        if len(clean) >= OVERVIEW_DVOL_RANK_MIN:
+            out["iv30_rank"] = pct_rank(clean, OVERVIEW_DVOL_RANK_WIN)
+
+    if (out["term_inverted"] is None and out["iv3"] is not None
+            and out["iv30"] is not None):
+        out["term_inverted"] = bool(out["iv3"] > out["iv30"])
+    return out
+
+
+def _overview_zone(zone):
+    if not isinstance(zone, dict):
+        return None
+    kinds = zone.get("kinds") or []
+    if isinstance(kinds, str):
+        kinds = [kinds]
+    return {
+        "lo": zone.get("lo"),
+        "hi": zone.get("hi"),
+        "kinds": list(kinds),
+        "touches": zone.get("touches"),
+        "width_atr": zone.get("width_atr"),
+    }
+
+
+def _scan_overview_symbol(conn, symbol: str) -> dict:
+    df = storage.get_ohlcv(conn, symbol, "4h", limit=OVERVIEW_OHLCV_LIMIT)
+    if not len(df):
+        return {"symbol": symbol, "reason": "4h_ohlcv_missing"}
+
+    regime_4h = _latest_state(conn, symbol, "4h")
+    regime_1d = _latest_state(conn, symbol, "1d")
+    if regime_4h is None:
+        return {"symbol": symbol, "reason": "regime_4h_missing"}
+    # 1d 是**底座（背景）不是前提**：用户裁决「4h 决策 + 1d 底座」——决策周期是 4h，
+    # 1d 只提供大方向背景。X2 扩容的新永续多数 1d 不足 90 根（每轮 39 个 warmup 告警），
+    # 若因此整品种排除，会无谓丢掉半个宇宙（实测 37/74）。缺 1d 时降级标注，不作废 4h 判断。
+
+    price = float(df["close"].iloc[-1])
+    last_ts = int(storage.ts_to_ms(df["ts"].tail(1))[0])
+    since_ms = last_ts - OVERVIEW_VOL1H_HOURS * 3_600_000
+    vol1h = storage.get_vol1h(conn, symbol, since_ms=since_ms)
+    # 4h 价格只取已收线序列，POC 量流也截到同一根 4h 的收线时刻；否则形成中的
+    # 1h 量会混进已经封口的 4h 位置测量，两个输入时点不一致。
+    last_close_ms = last_ts + TF_SEC["4h"] * 1000
+    if len(vol1h):
+        vol1h = vol1h[vol1h["ts"] < last_close_ms].reset_index(drop=True)
+    levels = extract_levels(df, vol1h=vol1h)
+    if levels.get("atr") is None:
+        return {"symbol": symbol, "reason": "no_atr"}
+    if levels.get("zones") is None:
+        reasons = levels.get("degraded") or ["no_levels"]
+        return {"symbol": symbol, "reason": ",".join(reasons)}
+
+    location = locate(
+        price, levels["atr"], levels["zones"], regime_4h,
+        prices=df["close"].tail(APPROACH_BARS).to_numpy(),
+    )
+    if location.get("at") is None:
+        return {"symbol": symbol, "reason": location.get("reason") or "location_unavailable"}
+
+    crsi_last = crsi_features(df).get("last") or {}
+    if any(crsi_last.get(key) is None for key in ("crsi", "pos", "zone")):
+        return {"symbol": symbol, "reason": "crsi_unavailable"}
+    crsi = {key: crsi_last[key] for key in ("crsi", "pos", "zone")}
+    signal_ok = _signal_ok(location["at"], crsi["zone"])
+
+    try:
+        vol_input = _overview_vol_inputs(conn, symbol)
+        notes = vol_notes(symbol, price, **vol_input)
+    except Exception:  # noqa: BLE001  风险补充缺失不拖垮已成立的位置测量
+        notes = []
+
+    zone = _overview_zone(location.get("zone"))
+    item = {
+        "symbol": symbol,
+        "display": instruments.get(symbol).get("display"),
+        "regime_4h": regime_4h,
+        "regime_1d": regime_1d,
+        "price": price,
+        "atr": levels["atr"],
+        "at": location["at"],
+        "role": location.get("role"),
+        "meaning": location.get("meaning"),
+        "tradeable": bool(location.get("tradeable")),
+        "approach": location.get("approach"),
+        "role_flipped": location.get("role_flipped"),
+        "zone": zone,
+        "dist_atr": location.get("dist_atr"),
+        "crsi": crsi,
+        "signal_ok": signal_ok,
+        "play": _policy_play(
+            regime_4h, location["at"], signal_ok,
+            role_flipped=location.get("role_flipped"), zone=zone,
+        ),
+        "vol_note": "；".join(notes) if notes else None,
+        "_vol_notes": notes,
+    }
+    return {"symbol": symbol, "item": item}
+
+
+_OVERVIEW_FULL_KEYS = (
+    "symbol", "display", "regime_4h", "regime_1d", "price", "atr",
+    "at", "role", "meaning", "tradeable", "approach", "role_flipped",
+    "zone", "dist_atr", "crsi", "signal_ok", "play", "vol_note",
+)
+
+
+def _overview_lite(item: dict) -> dict:
+    return {
+        "symbol": item["symbol"],
+        "display": item["display"],
+        "regime_4h": item["regime_4h"],
+        "at": item["at"],
+        "meaning": item["meaning"],
+        "dist_atr": item["dist_atr"],
+        "crsi": {"zone": item["crsi"]["zone"]},
+    }
+
+
+def _partition_overview(scans: list[dict]) -> dict:
+    opportunity, near, risk, middle, unavailable = [], [], [], [], []
+    for scan in scans:
+        item = scan.get("item")
+        if item is None:
+            unavailable.append({
+                "symbol": scan.get("symbol"),
+                "reason": scan.get("reason") or "measurement_unavailable",
+            })
+            continue
+
+        notes = item.get("_vol_notes") or []
+        if notes:
+            risk.append({
+                "symbol": item["symbol"],
+                "display": item["display"],
+                "regime_4h": item["regime_4h"],
+                "notes": list(notes),
+            })
+
+        if item["tradeable"] is True:
+            opportunity.append({key: item.get(key) for key in _OVERVIEW_FULL_KEYS})
+        elif item["at"] in {"at_support", "at_resistance"}:
+            near.append(_overview_lite(item))
+        elif item["at"] == "middle_zone":
+            middle.append(_overview_lite(item))
+        else:
+            unavailable.append({"symbol": item["symbol"], "reason": "location_unavailable"})
+
+    dist_key = lambda row: (float("inf") if row.get("dist_atr") is None
+                            else row["dist_atr"], row["symbol"])
+    opportunity.sort(key=dist_key)
+    near.sort(key=dist_key)
+    risk.sort(key=lambda row: row["symbol"])
+    middle.sort(key=lambda row: row["symbol"])
+    unavailable.sort(key=lambda row: row["symbol"] or "")
+    return {
+        "counts": {
+            "opportunity": len(opportunity),
+            "near": len(near),
+            "risk": len(risk),
+            "middle": len(middle),
+            "unavailable": len(unavailable),
+        },
+        "opportunity": opportunity,
+        "near": near,
+        "risk": risk,
+        "middle": middle,
+        "unavailable": unavailable,
+    }
+
+
+_OVERVIEW_CACHE = {"at": 0.0, "payload": None}
+
+
+def overview_payload() -> dict:
+    """全宇宙横截面扫描：4h 决策、1d 底座，按机会优先分层。"""
+    now = time.time()
+    cached = _OVERVIEW_CACHE["payload"]
+    if cached is not None and now - _OVERVIEW_CACHE["at"] < OVERVIEW_TTL_SEC:
+        return cached
+
+    conn = storage.connect_ro()
+    try:
+        scans = []
+        for symbol in storage.symbols(conn):
+            try:
+                scans.append(_scan_overview_symbol(conn, symbol))
+            except Exception as exc:  # noqa: BLE001  单品种坏数据必须显式进 unavailable
+                scans.append({
+                    "symbol": symbol,
+                    "reason": f"measurement_error:{type(exc).__name__}",
+                })
+        sections = _partition_overview(scans)
+        heartbeat = _heartbeat(conn)
+    finally:
+        conn.close()
+
+    out = _deep_clean({
+        "updated_at": int(now * 1000),
+        "tf": "4h",
+        **sections,
+        "heartbeat": heartbeat,
+    })
+    _OVERVIEW_CACHE.update(at=now, payload=out)
+    return out
+
+
 _COUPLING_CACHE = {"at": 0.0, "payload": None}
 
 
@@ -1107,6 +1414,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/dashboard":
                 symbol = (qs.get("symbol") or ["BTC-USDT"])[0]
                 return self._json(build_dashboard(symbol))
+            if parsed.path == "/api/overview":
+                return self._json(overview_payload())
             if parsed.path == "/api/coupling":
                 return self._json(coupling_payload())
             if parsed.path == "/api/agent/info":
@@ -1128,7 +1437,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"messages": storage.get_chat(conn, limit)})
                 finally:
                     conn.close()
-            if parsed.path in ("/", "/index.html"):
+            if parsed.path in ("/", "/overview.html"):
+                return self._file("overview.html")
+            if parsed.path in ("/symbol", "/index.html"):
                 return self._file("index.html")
             name = os.path.basename(parsed.path)
             if name and os.path.exists(os.path.join(WEB_DIR, name)):

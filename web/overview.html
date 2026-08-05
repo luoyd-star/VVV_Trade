@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VVV · 总览</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .overview-main { width: min(1480px, 100%); margin: 0 auto; padding: 20px 24px 32px; }
+  .overview-headnote { color: var(--muted); font-size: var(--fs-lbl); }
+  .overview-section { margin-bottom: 18px; }
+  .overview-title { display: flex; align-items: baseline; gap: 8px; margin-bottom: 9px;
+                    font-size: var(--fs-title); }
+  .overview-title b { font-size: var(--fs-title); }
+  .overview-title .count { color: var(--accent); font-family: var(--mono); }
+  .opp-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .opp-card { display: block; color: inherit; text-decoration: none; min-height: 188px;
+              border-top: 3px solid var(--accent); transition: border-color .12s ease; }
+  .opp-card:hover { border-color: var(--ink); }
+  .opp-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 13px; }
+  .opp-symbol { font: 700 var(--fs-num) var(--mono); }
+  .opp-display { color: var(--muted); }
+  .opp-regime { margin-left: auto; font-size: var(--fs-lbl); font-weight: 600; }
+  .opp-location { font-size: var(--fs-title); color: var(--sub); margin-bottom: 8px; }
+  .opp-crsi { font-size: 12px; color: var(--sub); padding: 7px 0;
+              border-top: 1px solid var(--grid); border-bottom: 1px solid var(--grid); }
+  .opp-play { margin-top: 10px; font-size: 12.5px; font-weight: 600; color: var(--accent); }
+  .opp-play.waiting { color: var(--warn-fg); }
+  .opp-risk { margin-top: 8px; color: var(--bad-fg); font-size: var(--fs-lbl); line-height: 1.5; }
+  .empty-normal { grid-column: 1 / -1; padding: 20px; border: 1px dashed var(--border); background: var(--card);
+                  color: var(--sub); text-align: center; }
+  .compact-list { background: var(--card); border: 1px solid var(--border); }
+  .compact-row { display: grid; grid-template-columns: minmax(150px, 1.1fr) .8fr 1.6fr .7fr;
+                 align-items: center; gap: 12px; padding: 9px 12px; color: inherit;
+                 text-decoration: none; border-bottom: 1px solid var(--grid); font-size: 12px; }
+  .compact-row:last-child { border-bottom: none; }
+  .compact-row:hover { background: var(--card2); }
+  .compact-symbol { font-family: var(--mono); font-weight: 700; }
+  .compact-display { color: var(--muted); margin-left: 6px; font-family: inherit; font-weight: 400; }
+  .compact-meaning { color: var(--sub); }
+  .compact-tail { color: var(--muted); text-align: right; }
+  .risk-list .compact-row { grid-template-columns: minmax(150px, 1fr) 3fr; }
+  .risk-text { color: var(--bad-fg); line-height: 1.5; }
+  .overview-fold { background: var(--card); border: 1px solid var(--border); margin-bottom: 12px; }
+  .overview-fold > summary { cursor: pointer; padding: 11px 13px; font-size: var(--fs-title);
+                             font-weight: 600; list-style-position: inside; }
+  .overview-fold[open] > summary { border-bottom: 1px solid var(--border); }
+  .overview-fold .compact-list { border: 0; }
+  .unavailable-row { grid-template-columns: minmax(150px, 1fr) 3fr; }
+  .load-error { margin: 0 0 16px; }
+  @media (max-width: 1050px) { .opp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 720px) {
+    header { align-items: flex-start; flex-wrap: wrap; gap: 8px 14px; }
+    .hgap { display: none; } .hstat { width: 100%; flex-wrap: wrap; gap: 8px 12px; }
+    .overview-main { padding: 14px 12px 28px; }
+    .opp-grid { grid-template-columns: 1fr; }
+    .compact-row { grid-template-columns: 1fr; gap: 3px; }
+    .compact-tail { text-align: left; }
+    .risk-list .compact-row, .unavailable-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">VVV<span class="brand-sub">总览</span></div>
+  <span class="overview-headnote">4h 决策 · 1d 底座 · 建议关注，不构成交易指令</span>
+  <div class="hgap"></div>
+  <div class="hstat">
+    <span id="hbStrip" class="hb"></span>
+    <span id="updated" class="badge">加载中…</span>
+    <span id="clock" class="mono muted"></span>
+    <span id="countdown" class="mono muted"></span>
+  </div>
+</header>
+
+<main class="overview-main">
+  <div class="banner load-error" id="loadError" hidden></div>
+
+  <section class="overview-section" aria-labelledby="oppTitle">
+    <div class="overview-title" id="oppTitle"><b>▸ 机会位</b><span class="count" id="oppCount">0</span>
+      <span class="sub">位置候选按距关键位 ATR 升序</span></div>
+    <div class="opp-grid" id="opportunity"></div>
+  </section>
+
+  <section class="overview-section" aria-labelledby="nearTitle">
+    <div class="overview-title" id="nearTitle"><b>▸ 接近关键位</b><span class="count" id="nearCount">0</span>
+      <span class="sub">位置已到，政策门槛尚未齐</span></div>
+    <div class="compact-list" id="near"></div>
+  </section>
+
+  <section class="overview-section" aria-labelledby="riskTitle">
+    <div class="overview-title" id="riskTitle"><b>▸ 风险提示</b><span class="count" id="riskCount">0</span>
+      <span class="sub">只标注，不改变位置与动作</span></div>
+    <div class="compact-list risk-list" id="risk"></div>
+  </section>
+
+  <details class="overview-fold" id="middleFold">
+    <summary>▸ 观望（<span id="middleCount">0</span>）· 大多数时刻 WAIT 是常态</summary>
+    <div class="compact-list" id="middle"></div>
+  </details>
+
+  <details class="overview-fold" id="unavailableFold">
+    <summary>▸ 数据不可用（<span id="unavailableCount">0</span>）</summary>
+    <div class="compact-list" id="unavailable"></div>
+  </details>
+</main>
+
+<footer>关键位置与 cRSI 仅供研究参考 · 系统不下单 · 不构成投资建议</footer>
+<script src="/overview.js"></script>
+</body>
+</html>

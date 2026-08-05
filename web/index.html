@@ -9,6 +9,7 @@
 </head>
 <body>
 <header>
+  <a class="hbtn" href="/">← 总览</a>
   <div class="brand">VVV<span class="brand-sub">市场状态面板</span><span class="mode-tag">工程模式</span></div>
 
   <!-- 品种：下拉 + 搜索（替代原来的一排 pill；品种增长后不再挤爆顶栏） -->
@@ -173,5 +174,12 @@
 
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="/app.js"></script>
+<script>
+// app.js 的启动 fetch 尚在等待时注入深链品种；主页只会生成注册表内的 symbol。
+(() => {
+  const symbol = new URLSearchParams(window.location.search).get('symbol');
+  if (symbol && /^[A-Za-z0-9._:/-]{1,64}$/.test(symbol)) S.symbol = symbol.toUpperCase();
+})();
+</script>
 </body>
 </html>
