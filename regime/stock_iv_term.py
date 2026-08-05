@@ -19,7 +19,14 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 TARGETS = (3, 9, 30)          # 目标期限（日历日）
 MAX_SNAPSHOT = 300            # 单次快照代码数上限（官方 400，留余量）
-PACE = 0.5
+# 首个 RTH 实测（2026-08-05）：PACE=0.5 即 2 次/秒 = 60 次/30 秒，**正好等于 moomoo
+# 限额、零余量** → 61 品种 244 次请求中途撞线，散布式失败（只建成 26 品种、其中 10 个
+# 仅 1 个期限）。单独复跑缺失品种（GOOGL）三条链全部正常，证明不是品种问题。
+# 与 moomoo_iv.PACE=0.6（限额一半速率）对齐并再留余量。
+PACE = 0.7
+# 单轮建链的品种数上限：跨轮分批建，避免一轮打爆限频（RTH 内每小时一轮，
+# 3 轮内可建满 61 品种；缓存按 ET 日持久，当日只建一次）
+BUILD_BATCH = 24
 
 
 def pick_expiries(exp_rows, targets=TARGETS) -> dict:
@@ -48,45 +55,62 @@ def atm_pair(chain_rows, spot: float):
     return call, put, k
 
 
-def build_codes(ctx, symbols) -> dict:
+def build_codes(ctx, symbols, existing=None) -> tuple:
     """按 ET 日构建 {symbol: {target: {codes, tenor, expiry}}}（链静态，日缓存）。
 
-    每品种：1 次到期日 + ≤3 次链 + 现价共享批量快照。61 品种约 4 分钟（限频内）。
+    每品种：1 次到期日 + ≤3 次链 + 现价共享批量快照。
+
+    **增量补全 + 跨轮分批**（2026-08-05 首个 RTH 暴露）：`existing` 传入当日已建成的
+    代码表，本次只补缺失品种、且单轮最多 BUILD_BATCH 个——一轮打满 61 品种会撞
+    moomoo 限频，导致散布式静默失败。返回 (合并后的表, 失败明细)；**失败必须
+    上报给调用方打日志**，绝不静默 continue（与 CBOE iv30 的同型缺陷 GAPS E1 一致）。
     """
     from moomoo import RET_OK
 
     from . import moomoo_iv
 
-    # 现价一次批量取
-    ret, snap = ctx.get_market_snapshot([moomoo_iv.to_moomoo(s) for s in symbols])
+    out = dict(existing or {})
+    fails: list = []
+    # 只补缺失品种；期限不全（<len(TARGETS)）的也算缺失，下一轮继续补
+    todo = [s for s in symbols
+            if len(out.get(s) or {}) < len(TARGETS)][:BUILD_BATCH]
+    if not todo:
+        return out, fails
+
+    # 现价一次批量取（只取本批，省额度）
+    ret, snap = ctx.get_market_snapshot([moomoo_iv.to_moomoo(s) for s in todo])
     time.sleep(PACE)
     if ret != RET_OK:
         raise RuntimeError(f"spot snapshot: {snap}")
     spot = {r["code"]: float(r["last_price"]) for _, r in snap.iterrows()
             if r.get("last_price") == r.get("last_price")}
 
-    out = {}
-    for sym in symbols:
+    for sym in todo:
         code = moomoo_iv.to_moomoo(sym)
         s = spot.get(code)
         if not s:
+            fails.append(f"{sym}:无现价")
             continue
         try:
             ret, exp = ctx.get_option_expiration_date(code)
             time.sleep(PACE)
             if ret != RET_OK or not len(exp):
+                fails.append(f"{sym}:到期日({ret})")
                 continue
             rows = [(str(r["strike_time"]), int(r["option_expiry_date_distance"]))
                     for _, r in exp.iterrows()
                     if int(r["option_expiry_date_distance"]) >= 1]
             picks = pick_expiries(rows)
-            entry = {}
+            entry = dict(out.get(sym) or {})
             seen_exp = {}
             for tgt, (etime, days) in picks.items():
+                if str(tgt) in entry:
+                    continue          # 该期限上一轮已建成，不重复请求
                 if etime not in seen_exp:
                     ret2, ch = ctx.get_option_chain(code, start=etime, end=etime)
                     time.sleep(PACE)
                     if ret2 != RET_OK or not len(ch):
+                        fails.append(f"{sym}/{tgt}d:链({ret2})")
                         continue
                     seen_exp[etime] = [(str(r["code"]), str(r["option_type"]),
                                         float(r["strike_price"]))
@@ -96,11 +120,14 @@ def build_codes(ctx, symbols) -> dict:
                     entry[str(tgt)] = {"call": pair[0], "put": pair[1],
                                        "strike": pair[2], "tenor": days,
                                        "expiry": etime}
+                else:
+                    fails.append(f"{sym}/{tgt}d:无ATM对")
             if entry:
                 out[sym] = entry
-        except Exception:  # noqa: BLE001  单品种失败不拖累整轮
+        except Exception as e:  # noqa: BLE001  单品种失败不拖累整轮，但必须留痕
+            fails.append(f"{sym}:{type(e).__name__}")
             continue
-    return out
+    return out, fails
 
 
 def fetch_term(ctx, codes_map: dict, now_ms: int | None = None) -> list:

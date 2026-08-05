@@ -208,11 +208,21 @@ def sync_stock_iv_term(conn, symbols) -> tuple:
     except Exception as e:  # noqa: BLE001
         return None, [f"iv_term 连接: {e}"]
     try:
-        codes = stock_iv_term.load_codes_cache(conn)
-        if codes is None:
-            codes = stock_iv_term.build_codes(ctx, us)
+        # 增量补全：缓存不足（首轮为 None，或上轮撞限频只建了一部分）时补建，
+        # 单轮上限 BUILD_BATCH。RTH 每小时一轮，几轮内补满 61 品种。
+        cached = stock_iv_term.load_codes_cache(conn) or {}
+        want_full = len(stock_iv_term.TARGETS)
+        missing = [s for s in us if len(cached.get(s) or {}) < want_full]
+        if missing:
+            codes, fails = stock_iv_term.build_codes(ctx, us, existing=cached)
             if codes:
                 stock_iv_term.save_codes_cache(conn, codes)
+            done = sum(1 for s in us if len(codes.get(s) or {}) >= want_full)
+            log.info("IV期限链构建 %d/%d 品种完整（本轮补 %d，待补 %d）%s",
+                     done, len(us), len(codes) - len(cached), len(us) - done,
+                     f"；失败 {len(fails)} 例: " + "; ".join(fails[:6]) if fails else "")
+        else:
+            codes = cached
         if not codes:
             return None, ["iv_term: 代码表构建为空"]
         rows = stock_iv_term.fetch_term(ctx, codes, now_ms=now)

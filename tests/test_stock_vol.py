@@ -665,7 +665,12 @@ def test_collector_warns_when_iv_term_uses_one_leg(monkeypatch, caplog):
     monkeypatch.setattr(moomoo_iv, "opend_alive", lambda: True)
     monkeypatch.setattr(moomoo_iv, "open_ctx", lambda: Ctx())
     monkeypatch.setattr(collector, "_should", lambda *args: True)
-    monkeypatch.setattr(stock_iv_term, "load_codes_cache", lambda conn: {"cached": {}})
+    # 缓存须是"三期限齐全"的完整条目，否则增量补全逻辑会去真建链（本测试只测单腿告警）
+    monkeypatch.setattr(stock_iv_term, "load_codes_cache", lambda conn: {
+        "NVDA-USDT": {str(t): {"call": "c", "put": "p", "strike": 100.0,
+                               "tenor": t, "expiry": "2026-08-08"}
+                      for t in stock_iv_term.TARGETS},
+    })
     monkeypatch.setattr(stock_iv_term, "fetch_term", lambda *args, **kwargs: [{
         "symbol": "NVDA-USDT", "ts": 1_785_000_000_000,
         "iv3": 30.0, "t3": 3, "iv9": 31.0, "t9": 9,
@@ -784,3 +789,65 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_iv_term_build_codes_incremental_and_reports_fails():
+    """build_codes 增量补全 + 失败留痕（2026-08-05 首个 RTH 限频事故的回归）。
+
+    事故：PACE=0.5 恰等于 moomoo 限额 → 61 品种散布式失败，只建成 26 个；
+    且 `except: continue` 零日志，与 CBOE iv30 同型静默失败。
+    修法三条：降速、跨轮分批增量补、失败上报调用方。
+    """
+    from regime import stock_iv_term
+
+    assert stock_iv_term.PACE >= 0.6, "PACE 必须留出限频余量（moomoo 60次/30秒）"
+    assert stock_iv_term.BUILD_BATCH < 61, "单轮建链必须分批，不得一轮打满全宇宙"
+
+    class _Ctx:
+        """只对 want 里的品种给链；其余模拟限频失败（ret!=0）。"""
+
+        def __init__(self, ok_syms):
+            self.ok = ok_syms
+            self.chain_calls = 0
+
+        def get_market_snapshot(self, codes):
+            import pandas as pd
+            return 0, pd.DataFrame([{"code": c, "last_price": 100.0} for c in codes])
+
+        def get_option_expiration_date(self, code):
+            import pandas as pd
+            if code.split(".")[-1] not in self.ok:
+                return -1, "RATE_LIMIT"
+            return 0, pd.DataFrame([
+                {"strike_time": "2026-08-08", "option_expiry_date_distance": 3},
+                {"strike_time": "2026-08-14", "option_expiry_date_distance": 9},
+                {"strike_time": "2026-09-04", "option_expiry_date_distance": 30},
+            ])
+
+        def get_option_chain(self, code, start=None, end=None):
+            import pandas as pd
+            self.chain_calls += 1
+            return 0, pd.DataFrame([
+                {"code": f"{code}{start}C100", "option_type": "CALL", "strike_price": 100.0},
+                {"code": f"{code}{start}P100", "option_type": "PUT", "strike_price": 100.0},
+            ])
+
+    syms = ["NVDA-USDT", "AMD-USDT", "MU-USDT"]
+    # 第一轮：只有 NVDA 能建（模拟其余撞限频）
+    ctx = _Ctx({"NVDA"})
+    out1, fails1 = stock_iv_term.build_codes(ctx, syms)
+    assert set(out1) == {"NVDA-USDT"} and len(out1["NVDA-USDT"]) == 3
+    assert len(fails1) == 2, f"失败必须上报而非静默吞掉，实得 {fails1}"
+    assert all("到期日" in f for f in fails1)
+
+    # 第二轮：限频恢复，增量只补缺失的两个——已建成的 NVDA 不得重复请求链
+    ctx2 = _Ctx({"NVDA", "AMD", "MU"})
+    out2, fails2 = stock_iv_term.build_codes(ctx2, syms, existing=out1)
+    assert set(out2) == set(syms) and not fails2
+    assert ctx2.chain_calls == 6, f"只应为 AMD/MU 各请求 3 条链，实得 {ctx2.chain_calls}"
+    assert out2["NVDA-USDT"] == out1["NVDA-USDT"], "已建成条目必须原样保留"
+
+    # 第三轮：全部完整 → 零请求
+    ctx3 = _Ctx({"NVDA", "AMD", "MU"})
+    out3, fails3 = stock_iv_term.build_codes(ctx3, syms, existing=out2)
+    assert out3 == out2 and not fails3 and ctx3.chain_calls == 0
