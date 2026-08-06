@@ -1,0 +1,2933 @@
+{
+  "summary": "为系统说明书做精确清单盘点（7 路并行）",
+  "agentCount": 7,
+  "logs": [
+    "清点完成 7/7 层，共 295 项"
+  ],
+  "result": {
+    "layers": [
+      {
+        "layer": "采集层（collector.py + regime/data.py + regime/deriv.py + regime/usvol.py + regime/moomoo_iv.py + regime/binance_opt_iv.py + regime/stock_iv_term.py + regime/breadth.py + instruments.json）",
+        "summary": "采集层是一个单进程的「一轮到底」采集器：`collector.py` 的 `cycle()` 按固定顺序跑完全部管线，launchd（`launchd/com.vvv.collector.plist`，`StartInterval=300`）每 5 分钟以 `--once` 拉起一次；常驻模式下 `--interval` 默认也是 300 秒。所有低频动作不靠进程内计时，而是用 `_should(conn, key, interval_s)` 把上次时间戳写进 `meta` 表做跨进程节流闸。采集成员来自 `collector.py:52` 的 `DEFAULT_SYMBOLS` 常量（74 个，启动时解析，改了要重启 collector），`instruments.json` 只提供每个品种的属性（class/pool/theme/sources/hl_coin/vol_proxy/vol_index）并且是**热读**的。数据全部落 `data/market.db`（WAL），collector 是唯一写者（`storage.connect()` 带建表+迁移），面板一律 `connect_ro()`。失败纪律统一为「局部失败不拖累整轮」：每条管线、每个品种、每个 timeframe 各自 try，错误串进 `errors` 列表，轮末写进 `meta.status` 的 `errors`（只留最后 10 条）并打 WARNING 日志，进程不退出。moomoo 系管线（个股 IV / IV 期限 / 实时 IV / 宽度）在本机 OpenD 不在时**静默跳过**，不算错误。",
+        "items": [
+          {
+            "name": "cycle()",
+            "what": "一轮采集的总编排：固定顺序执行全部管线，收集错误列表返回给 main()。顺序＝宇宙快照 → BBO → 参考日线 → 逐品种逐 tf 的 OHLCV+判态 → vol1h → 衍生品 → 美股波动率(CBOE) → moomoo 个股IV → 币安期权近端IV → 个股IV期限 → 实时IV → 宽度 → DVOL",
+            "location": "collector.py:571-800",
+            "detail": "每段独立 try/except，异常追加进 errors 后继续；轮末 main() 把 {interval, cycle_sec, errors[-10:]} 写进 meta.status，并把当前毫秒写进 meta.last_run"
+          },
+          {
+            "name": "DEFAULT_SYMBOLS",
+            "what": "采集成员的唯一真源（命令行 --symbols 可覆盖）。X1 扩容 37 → X2 扩容后 74 个",
+            "location": "collector.py:52-64",
+            "detail": "当前 74 个，与 instruments.json 的 74 个登记品种完全一致（无差集）。注释里写的「37 品种／核心池 29 + 观察池 8」是 X1 时期的旧值，已被 X2 追加行覆盖"
+          },
+          {
+            "name": "DEFAULT_TFS / DVOL_CURRENCIES",
+            "what": "默认时间框架与 DVOL 币种",
+            "location": "collector.py:65-66",
+            "detail": "DEFAULT_TFS = \"1d,4h,1h\"；DVOL_CURRENCIES = (\"BTC\", \"ETH\")"
+          },
+          {
+            "name": "_should(conn, key, interval_s)",
+            "what": "低频动作的跨进程节流闸，时间戳持久在 meta 表；到期即**先写时间戳再放行**",
+            "location": "collector.py:82-89",
+            "detail": "先记后做：本轮工作失败也算「刚跑过」，要等满整个 interval_s 才重试。衍生品的 funding_interval/funding_hist 刻意不用它，改成「成功后才记时间戳」"
+          },
+          {
+            "name": "snapshot_universe(conn, symbols)",
+            "what": "point-in-time 成员快照 → universe_snapshot 表（append-only，绝不 UPDATE 旧行）。配置内容哈希变了才写新版",
+            "location": "collector.py:453-484",
+            "detail": "每轮调用；哈希覆盖 pool/theme/class/valid_from + sources/vol_index/vol_proxy/hl_coin，取 sha256 前 16 位存 meta.universe_hash。当前 hash=9b7a2a58538d0307"
+          },
+          {
+            "name": "sync_bbo(conn, symbols)",
+            "what": "一次 Binance fapi bookTicker 全量请求 → 过滤出注册品种的最优买卖价量 → bbo 表。报价质量门槛的原料",
+            "location": "collector.py:487-506",
+            "detail": "每轮跑，无节流；GET https://fapi.binance.com/fapi/v1/ticker/bookTicker，timeout=15；INSERT OR IGNORE，每轮 74 行"
+          },
+          {
+            "name": "sync_reference(conn)",
+            "what": "耦合历史层的底层参考日线日更 → ref_daily 表。BTC 走币安现货，其余 8 条走 Yahoo",
+            "location": "collector.py:544-568；REF_YAHOO 在 collector.py:540-541",
+            "detail": "闸门＝meta.ref_last_sync 等于 UTC 今日字符串则跳过（即每 UTC 日一次）；每次只拉近 10 天补尾（p1 = now - 10×86400000）。REF_YAHOO = {NDX:^NDX, QQQ:QQQ, MSTR:MSTR, COIN:COIN, GLD:GLD, GC:GC=F, CL:CL=F, VIX:^VIX}，逐个 sleep 0.3s。全量回填走 scripts/backfill_reference.py。FRED 宏观层当前因网络超时未接入"
+          },
+          {
+            "name": "OHLCV 主循环（cycle 内嵌）",
+            "what": "逐品种逐 tf：fetch_ohlcv → closed_ohlcv 剥离未收线末根 → series_floor 裁剪 → upsert_ohlcv → live_bars → walk-forward 判态 → 确认折叠，全部在同一事务提交",
+            "location": "collector.py:586-674",
+            "detail": "每轮全量跑（无节流）。fetch_ohlcv 默认 limit=300，故每轮自愈窗口：1d≈300 天 / 4h≈50 天 / 1h≈12.5 天。判态重算窗 = 10000 + FEATURE_WINDOW-1 = 10399 根（FEATURE_WINDOW=400，regime/classify.py:21）。RULES_VERSION=v3.1（classify.py:45）、AUDIT_VERSION=a8（classify.py:58）"
+          },
+          {
+            "name": "series_floor_{symbol}（meta）",
+            "what": "序列下限：公司行动/合约重定价断点治理，floor 之前的行一律不入库。手工设置",
+            "location": "collector.py:599-604",
+            "detail": "库内当前只有一条：series_floor_CRWD-USDT = 1783083600000（CRWD 4:1 重定价）"
+          },
+          {
+            "name": "sync_vol1h(conn, symbol)",
+            "what": "币安 fapi 1h 量流（VWAP 专用量源，全品种统一取币安）→ vol1h 表。冷启动向后分页回填，日常按水位增量",
+            "location": "collector.py:514-537；常量 VOL1H_TARGET 在 collector.py:511",
+            "detail": "VOL1H_TARGET = 7000（=1d 窗 480h + 250×24h 分位参照期取整）；冷启动每页 ≤1000、页间 sleep 0.25s、单页 <50 行即认为到上市日；增量按 watermark 补 gap_h+3 根"
+          },
+          {
+            "name": "衍生品循环（cycle 内嵌，调用 regime/deriv.py）",
+            "what": "逐品种：首轮一次性回填 → 结算周期（日更）→ 结算 funding 历史（日更）→ 每轮快照，全部落 deriv 表（稀疏宽表，同 ts 按列 COALESCE 合并）",
+            "location": "collector.py:690-733",
+            "detail": "回填闸门 meta.deriv_backfilled_v2_{sym}（一次性）；funding_interval_at_{sym} 与 funding_hist_at_{sym} 各自 86400 秒且**成功才写时间戳**；快照每轮跑。deriv 列：oi/oi_notional/funding/premium/taker_ratio/iv30/kind"
+          },
+          {
+            "name": "regime/deriv.py fetch_snapshot(symbol)",
+            "what": "当前快照：premiumIndex（markPrice/indexPrice/lastFundingRate）+ openInterest + 最近一根 5m 主动买卖比",
+            "location": "regime/deriv.py:32-57；FAPI 常量 regime/deriv.py:15",
+            "detail": "写入行 kind='pred'；premium=(mark-index)/index；taker 接口单独 try，失败只让 taker_ratio=None，不影响其余字段。timeout=10"
+          },
+          {
+            "name": "regime/deriv.py backfill(symbol)",
+            "what": "一次性历史回填：fundingRate(limit=1000) + openInterestHist(1h,500) + takerlongshortRatio(1h,500) + premiumIndexKlines(1h,500)",
+            "location": "regime/deriv.py:60-105",
+            "detail": "premiumIndexKlines 用 [:-1] 丢未收线末根（另两个接口本就已定稿，不裁）。docstring 实测：funding 约 168 天，OI/taker/premium 约 20.8 天（Binance 约 30 天保留期）"
+          },
+          {
+            "name": "regime/deriv.py funding_interval_h(symbol)",
+            "what": "从 /fapi/v1/fundingInfo 读结算周期小时数；**失败返回 None**，绝不伪装成 8.0",
+            "location": "regime/deriv.py:121-136",
+            "detail": "写进 meta.funding_interval_{sym}。当前库内：8.0 有 68 个品种、4.0 有 6 个品种"
+          },
+          {
+            "name": "sync_vol_index(conn, name)",
+            "what": "一个 CBOE 波动率指数的同步 → usvol 表。权威分层：CSV 官方收盘价 > 延迟报价；报价只写 CSV 尚未覆盖的交易日",
+            "location": "collector.py:389-450；VOL_INDEXES 在 regime/usvol.py:22",
+            "detail": "外层闸 _should('usvol_last_fetch', 1800)（collector.py:736）。内部三个 meta 键：usvol_csv_at_{name}（上次尝试，1h 重试下限）/ usvol_csv_ok_{name}（上次成功，24h 刷新周期）/ usvol_csv_max_{name}（确权水位，单调不回退）。VOL_INDEXES = (VIX, VXN, RVX, VIX9D, VIX3M)"
+          },
+          {
+            "name": "regime/usvol.py backfill_index_history / fetch_index_quote",
+            "what": "CBOE CDN 历史日线 CSV（权威）与延迟报价 JSON（补当日）",
+            "location": "regime/usvol.py:31-50、78-91；CDN 常量 regime/usvol.py:20",
+            "detail": "CSV: {CDN}/api/global/us_indices/daily_prices/{name}_History.csv，timeout=20，约 600KB；报价: {CDN}/api/global/delayed_quotes/quotes/_{name}.json，timeout=10，约 500B。两者时间格统一为交易日 00:00 UTC；报价所属交易日优先取 last_trade_time，非交易日向前回退（_quote_trading_day）"
+          },
+          {
+            "name": "regime/usvol.py fetch_stock_iv30(ticker)",
+            "what": "个股/ETF 的 CBOE iv30 影子字段 → 写进 deriv 表的 iv30 列（不是 stock_vol）",
+            "location": "regime/usvol.py:94-103；调用点 collector.py:744-758",
+            "detail": "与 sync_vol_index 共用 usvol_last_fetch 1800 秒闸；只对 class=='us_stock_perp' 的品种跑；无期权或字段为 0/缺失返回 None。日志前缀「个股 iv30(CBOE影子)」"
+          },
+          {
+            "name": "sync_moomoo_iv(conn, symbols)",
+            "what": "个股 IV 日频增量（moomoo 口径）→ stock_vol；期权流 → stock_option_stat；财报日历 → earnings（含未来窗改期清理）",
+            "location": "collector.py:301-386",
+            "detail": "闸 _should('moomoo_iv_last_fetch', 3600)（collector.py:761）；OpenD 不在（TCP 预检 127.0.0.1:11111）静默跳过。增量策略：自库内最后一日**往前重叠一天**起拉；首次从 DATA_FLOOR='2023-06-26' 起。财报只补未来 90 天，并用 prune_stale_future_earnings 删掉改期后残留的旧未来行。「今天」用 ET 日历日（不是宿主机 date.today()）"
+          },
+          {
+            "name": "regime/moomoo_iv.py settled_only(rows)",
+            "what": "滤掉尚未结算的当日行——与「未收盘 K 线双轨制」同一纪律",
+            "location": "regime/moomoo_iv.py:176-206",
+            "detail": "判据：D < ET 今天 → 收；D == ET 今天且 now.time() >= session_close_et(D) → 收（半日市 13:00，不硬编码 16:00）；非交易日行防御性丢弃。传入的 now 强制 astimezone(ET)"
+          },
+          {
+            "name": "regime/moomoo_iv.py 常量与接口",
+            "what": "OpenD 连接与限速纪律",
+            "location": "regime/moomoo_iv.py:17-22",
+            "detail": "SOURCE='moomoo'；HOST,PORT = '127.0.0.1', 11111；PACE = 0.6 秒/次（官方 60 次/30 秒，取一半速率）；MAX_SPAN_DAYS = 360（接口上限 364）；DATA_FLOOR = '2023-06-26'（服务端统一保留边界）。协议：3303 get_option_underlying_overview（批量 ≤500 标的）、3304 get_option_underlying_his_volatility（日频历史，返回倒序、需分页）、get_option_underlying_his_statistic（期权流）、get_earnings_calendar（**单次窗口上限 7 天**，按 7 天分段）"
+          },
+          {
+            "name": "sync_moomoo_iv_live(conn, symbols)",
+            "what": "盘中实时 IV 快照 → stock_vol_live（与结算序列严格分表，分位永远只在 stock_vol 上算）",
+            "location": "collector.py:260-298",
+            "detail": "**每轮都跑、不节流**，但只在 RTH 内（calendar_nyse.is_rth）；OpenD 不在静默跳过。一次批量 3303 调用取回全部美股品种，成本≈1 次请求/轮。带回厂商自算的 vendor_iv_rank/vendor_iv_pct（52 周口径，只作参考展示）与实时 call/put 成交量"
+          },
+          {
+            "name": "sync_stock_iv_term(conn, symbols)",
+            "what": "美股个股 IV 期限曲线（3d/9d/30d ATM）→ stock_iv_term。链按 ET 日缓存 + 跨轮分批建链 + 盘中批量快照",
+            "location": "collector.py:185-257",
+            "detail": "三重门：is_rth → opend_alive → _should('stock_iv_term_last', 3600)。链缓存存 meta.iv_term_codes（{date, codes}，跨 ET 日即失效）。建链起点用 meta.stock_iv_term_build_offset 跨轮轮换（先写 next 再建，防尾部品种饿死）。会对 ATM 单腿退化（仅一侧有效 IV）打 WARNING"
+          },
+          {
+            "name": "regime/stock_iv_term.py 常量",
+            "what": "期限目标与限频参数",
+            "location": "regime/stock_iv_term.py:20-31",
+            "detail": "TARGETS = (3, 9, 30) 日历日；MAX_SNAPSHOT = 300（官方 400 留余量）；PACE = 0.7 秒/次（实测 0.5 即 60 次/30 秒正好撞满 moomoo 账号级限额）；BUILD_BATCH = 12（单轮建链品种上限——限频额度是 moomoo **账号级共享**，三条 moomoo 管线加总才是真实速率）"
+          },
+          {
+            "name": "sync_binance_opt_iv(conn)",
+            "what": "币安期权近端 IV（~3 天常数期限）→ opt_iv_near 表。24/7，给贵金属夜间/周末隐波与加密的持仓前端定价",
+            "location": "collector.py:157-182",
+            "detail": "闸 _should('binance_opt_iv_last', 1800)。整轮网络失败直接返回错误；单个标的失败在 snapshot_all 内被吞掉不拖累其余"
+          },
+          {
+            "name": "regime/binance_opt_iv.py snapshot_all / synth_near_iv",
+            "what": "期权链 → 近端 ATM IV 的合成：剔占位簇 → ATM 邻域取中位数 → 总方差插值到 3 天",
+            "location": "regime/binance_opt_iv.py:55-149；常量 :25-38",
+            "detail": "EAPI = https://eapi.binance.com/eapi/v1（/exchangeInfo、/mark、/index，无需鉴权，timeout=20）；exchangeInfo 与 mark 是全市场响应只拉一次共用，只有 index 逐标的取。UNDERLYINGS 8 个：XAU/XAG/BTC/ETH/SOL/BNB/XRP/DOGE。TARGET_DAYS=3.0；MIN_TENOR_DAYS=0.2；K_NEAR_STRIKES=5；DUP_PLACEHOLDER=3。夹得住 → method='interp' 且 tenor_days=3.0；夹不住 → method='nearest' 且 tenor_days 记实际期限。iv 单位为百分数（markIV×100，round 2 位）"
+          },
+          {
+            "name": "sync_breadth(conn) / breadth_slot(now)",
+            "what": "市场宽度快照 → breadth 表（**影子字段，只采不消费**，须自攒约 2 年才够评审转正）",
+            "location": "collector.py:92-154",
+            "detail": "两个采样槽位分列存放：'0945' 窗口 = ET 09:40-10:10；'1559' 窗口 = [真实收盘-15分, 真实收盘+5分)（半日市自动跟随 13:00，不硬编码 15:45-16:05）。每槽每交易日只采一次：主键幂等 + meta 键 breadth_{slot}_{ts} 双保险。OpenD 不在静默跳过"
+          },
+          {
+            "name": "regime/breadth.py fetch_breadth(ctx)",
+            "what": "一次宽度采样：1d/20d/60d/250d/ytd 五个周期的上涨家数 + 分母 + 涨跌分布 9 桶的上下尾与零变动家数",
+            "location": "regime/breadth.py:43-76；常量 :23-24",
+            "detail": "SOURCE='moomoo'；MCAP_FLOOR = 1e9（市值下限）。约 11 次请求，每次之间 sleep 0.4s（限频 60/30s 富余）。captured_at 记本地采样墙钟，供事后核对 cron 漂移。壳股（当日零变动）落 flat 列，算尾部占比时分母须用 total-flat"
+          },
+          {
+            "name": "DVOL 采集（cycle 内嵌）",
+            "what": "Deribit BTC/ETH 波动率指数日线 → dvol 表",
+            "location": "collector.py:791-799；fetch_dvol 在 regime/data.py:160-182",
+            "detail": "每轮跑，无节流；只对 symbols 里出现的 BTC/ETH 基币采。GET /api/v2/public/get_volatility_index_data，resolution=1D，days=365，timeout=10；**用 .iloc[:-1] 丢掉形成中的当日行**（实测 20 轮内跳 4 次）"
+          },
+          {
+            "name": "regime/data.py fetch_ohlcv(symbol, tf, ...)",
+            "what": "OHLCV 路由入口：按 sources 顺序逐个尝试，返回 (df, 源名)。sources=None 时按 instruments 注册表逐品种路由",
+            "location": "regime/data.py:390-428",
+            "detail": "两道拒绝门（拒绝即换下一个源）：① 已收线根数 < 90；② assert_no_gaps 发现中间有缺口。全部源都失败才抛 RuntimeError（错误串用「；」拼接）。collector 传 drop_unclosed=False 以便提取 live bar"
+          },
+          {
+            "name": "regime/data.py SOURCES / DEFAULT_SOURCES",
+            "what": "五个可用数据源函数表与加密兜底链",
+            "location": "regime/data.py:365-372",
+            "detail": "SOURCES = {deribit, okx, binance, binance_futures, hyperliquid}；DEFAULT_SOURCES = (deribit, okx, binance)。各源 base：DERIBIT_BASE=https://www.deribit.com、OKX_BASE=https://www.okx.com、HYPERLIQUID_INFO=https://api.hyperliquid.xyz/info、BINANCE_BASES=[data-api.binance.vision, api.binance.com]（现货）、fapi.binance.com（合约区）。默认 timeout：deribit/okx/binance/binance_futures=10s，hyperliquid=15s"
+          },
+          {
+            "name": "regime/data.py _resample_4h / assert_no_gaps / closed_ohlcv",
+            "what": "三个口径保护：Deribit 无 4h 档由 1h 重采样、残桶剔除；已收线序列不得有缺口；末根按理论收线时刻剥离",
+            "location": "regime/data.py:89-117、68-86、375-387",
+            "detail": "_resample_4h 按 UTC 整点 14400 秒分桶，非末桶必须 n==4 才保留（首桶与中段残桶都剔），末桶无论残否都保留供 live_bars 用。closed_ohlcv 用严格 `>`：last_ts + tf > now 才剥离末根（休市期源只返回已收线历史时末根不会被误删）"
+          },
+          {
+            "name": "regime/data.py fetch_binance_vol1h(symbol, end_ms, limit)",
+            "what": "VWAP 专用 1h 量流拉取：[(ts, volume, quoteVolume)]，只要已收线",
+            "location": "regime/data.py:294-315",
+            "detail": "GET https://fapi.binance.com/fapi/v1/klines，interval=1h，limit ≤1000，timeout=15；ts + 3600000 > now 的当前小时直接跳过"
+          },
+          {
+            "name": "regime/data.py fetch_yahoo_daily / fetch_binance_spot_daily",
+            "what": "参考日线的两个源函数",
+            "location": "regime/data.py:251-291；常量 :247-248",
+            "detail": "Yahoo 必须用 period1/period2 显式区间（range=max 会被降采样成月线，2026-08-04 实测）；REF_UA={'User-Agent':'Mozilla/5.0'}，REF_P1_2020_MS=1577836800000（2020-01-01 UTC），timeout=30。币安现货分页每页 1000、页间 sleep 0.25s，只收 open_ts+86400000 <= now 的已收线日"
+          },
+          {
+            "name": "regime/instruments.py load() / get()",
+            "what": "instruments.json 热读（每次调用都读），损坏时回退 last-known-good 快照，绝不回退空表",
+            "location": "regime/instruments.py:33-52；CRYPTO_DEFAULT 在 :22-27",
+            "detail": "未登记 symbol 回退 CRYPTO_DEFAULT = {class:'crypto', sources:['deribit','okx','binance'], hl_coin:None, display:None}。审计教训：半写 JSON 曾让 61 个美股静默降级成 crypto 默认（错源、错时钟、丢 IV/休市语义）"
+          },
+          {
+            "name": "regime/calendar_nyse.py",
+            "what": "显式硬编码的 NYSE 日历，是 RTH 门控（实时 IV / IV 期限 / 宽度）与 settled_only 的共同基座",
+            "location": "regime/calendar_nyse.py:17-68",
+            "detail": "_YEARS = {2025, 2026, 2027}；**表外年份 is_trading_day 一律 False**（宁缺毋滥），每年 12 月须人工补下一年。EARLY_CLOSE 提前收盘至 13:00 ET。is_probable_trading_day 是给历史行用的宽松退化（表外年份只排周末），不能用于判断此刻是否开盘"
+          },
+          {
+            "name": "instruments.json 品种宇宙",
+            "what": "74 个登记品种的属性表：class / pool / theme / valid_from / sources / hl_coin / vol_proxy / vol_index / display",
+            "location": "/Users/luoyingdong/Documents/VVV_Trade/instruments.json",
+            "detail": "class 分布：us_stock_perp 61、crypto 7、commodity 5、intl_stock_perp 1。pool 分布：core 50、observation 24。sources 分布：仅 binance_futures 66 个、binance_futures+hyperliquid 5 个（HYPE/NVDA/MU/AAPL/TSLA，hl_coin 分别为 HYPE、xyz:NVDA、xyz:MU、xyz:AAPL、xyz:TSLA）、不写 sources 走加密默认 3 个（BTC/ETH/SOL → deribit→okx→binance）。vol_proxy 仅两条：XAU-USDT→GLD、XAG-USDT→SLV。vol_index：VXN 43、VIX 17、RVX 1、无映射 13。valid_from：2026-08-04 有 38 个、2026-08-05 有 36 个"
+          },
+          {
+            "name": "instruments.json 分组明细",
+            "what": "按 class × pool 的确切名单",
+            "location": "/Users/luoyingdong/Documents/VVV_Trade/instruments.json",
+            "detail": "us_stock_perp/core 40：AAPL AMD AMZN ARM ASML AVGO CAT COIN COST CRCL EWJ EWY GEV GOOGL GS INTC IWM JPM LLY META MRVL MSFT MSTR MU NBIS NFLX NVDA ORCL PLTR QQQ SMH SNDK SOXL SPY TSLA TSM V WMT XBI XLE；us_stock_perp/observation 21：ADBE AMAT APP ASTS BABA CRM CRWD CRWV CSCO DIS EWZ HOOD IBM NOW NVO PANW RKLB SNOW UBER UVXY VRT；crypto/core 6：BTC ETH SOL HYPE BNB XRP；crypto/observation 1：DOGE；commodity/core 3：XAU XAG CL；commodity/observation 2：XPT XPD；intl_stock_perp/core 1：SKHY（KRX 时钟，无 ET 去季节化/无 iv30/无 VXN 映射）"
+          },
+          {
+            "name": "落库表清单（regime/storage.py _SCHEMA）",
+            "what": "采集层写入的 18 张表",
+            "location": "regime/storage.py:18-114",
+            "detail": "ohlcv(symbol,tf,ts) / live_bars(symbol,tf) / regime_history(symbol,tf,ts) / vol1h(symbol,ts) / deriv(symbol,ts) / bbo(symbol,ts) / usvol(idx,ts) / dvol(currency,ts) / ref_daily(series,ts) / stock_vol(symbol,ts,source) / stock_option_stat(symbol,ts,source) / stock_vol_live(symbol,ts,source) / stock_iv_term(symbol,ts) / opt_iv_near(symbol,ts) / earnings(symbol,ts,source) / breadth(ts,slot,source) / universe_snapshot(snapped_at,symbol) / meta(key)。DB 路径 data/market.db（storage.py:15-16）"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "查询时刻",
+            "value": "2026-08-06 09:34 JST（= 2026-08-05 20:34 ET，美股已收盘）",
+            "how": "date + sqlite3 只读连接 file:data/market.db?mode=ro"
+          },
+          {
+            "name": "采集成员数",
+            "value": "74（DEFAULT_SYMBOLS 与 instruments.json 完全一致，无差集、无重复）",
+            "how": "解析 collector.py:52 的常量 + json.load(instruments.json) 取差集"
+          },
+          {
+            "name": "上一轮耗时 / 错误数",
+            "value": "cycle_sec=59.3 秒，errors 10 条（全部是 1d/4h「已收盘 K 线不足 90」的新上市品种：RKLB SMH UBER UVXY V VRT WMT XBI XLE）",
+            "how": "select value from meta where key='status'"
+          },
+          {
+            "name": "ohlcv 总行数与覆盖",
+            "value": "254666 行；1h=74 品种/188510 行、4h=72 品种/52478 行、1d=35 品种/13678 行",
+            "how": "select tf,count(distinct symbol),count(*) from ohlcv group by tf"
+          },
+          {
+            "name": "ohlcv 源分布",
+            "value": "binance_futures 71 品种/228911 行；deribit 3 品种（BTC/ETH/SOL）/25755 行",
+            "how": "select source,count(distinct symbol),count(*) from ohlcv group by source"
+          },
+          {
+            "name": "缺 1d 的品种数",
+            "value": "39 个（ADBE AMAT APP ARM ASML ASTS CAT COST CRM CRWD CRWV CSCO DIS EWZ GEV GS IBM IWM JPM LLY MRVL NBIS NFLX NOW NVO ORCL PANW RKLB SKHY SMH SNOW SOXL UBER UVXY V VRT WMT XBI XLE）；缺 4h 的 2 个（GS SMH）",
+            "how": "1h 品种集 except 1d 品种集"
+          },
+          {
+            "name": "regime_history",
+            "value": "238557 行，版本 100% 为 v3.1 / a8（无混版）",
+            "how": "select version,audit_version,count(*) from regime_history group by 1,2"
+          },
+          {
+            "name": "vol1h",
+            "value": "74 品种 / 203198 行；覆盖 2025-10-15 16:00 UTC ~ 2026-08-05 23:00 UTC；单品种深度 183 ~ 7064 根（目标 7000）",
+            "how": "select count(distinct symbol),count(*),min/max(ts) from vol1h"
+          },
+          {
+            "name": "deriv",
+            "value": "74 品种 / 108978 行；kind 分布：NULL 44494（旧行）、pred 41938、settled 22546；iv30 非空 3361 行 / 29 个品种",
+            "how": "select kind,count(*) from deriv group by kind 等"
+          },
+          {
+            "name": "bbo",
+            "value": "74 品种 / 38205 行；2026-08-03 15:09 ~ 2026-08-06 00:33 UTC",
+            "how": "select count(distinct symbol),count(*),min/max(ts) from bbo"
+          },
+          {
+            "name": "usvol（CBOE 五指数）",
+            "value": "25901 行：VIX 9244（1990-01-02~2026-08-05）、VXN 4251（2009-09-14~）、VIX3M 4245（2009-09-18~）、RVX 4242（2009-09-16~）、VIX9D 3919（2011-01-04~）",
+            "how": "select idx,count(*),date(min/max(ts)) from usvol group by idx"
+          },
+          {
+            "name": "usvol 确权水位",
+            "value": "VXN/RVX/VIX9D/VIX3M 已确权至 2026-08-05；VIX 仅至 2026-08-04（当日行还是报价值）",
+            "how": "select key,date(value/1000) from meta where key like 'usvol_csv_max_%'"
+          },
+          {
+            "name": "dvol",
+            "value": "BTC 371 行、ETH 371 行；均为 2025-07-31 ~ 2026-08-05",
+            "how": "select currency,count(*),date(min/max(ts)) from dvol group by currency"
+          },
+          {
+            "name": "ref_daily",
+            "value": "15340 行 / 9 条序列：BTC(binance_spot) 2409、CL 1658、GC 1658、VIX 1657、GLD 1656、MSTR 1656、NDX 1656、QQQ 1656、COIN 1334（COIN 起点 2021-04-14，其余 2020-01-02）；全部更新至 2026-08-05",
+            "how": "select series,source,count(*),date(min/max(ts)) from ref_daily group by series,source"
+          },
+          {
+            "name": "stock_vol（moomoo 个股 IV 日频）",
+            "value": "63 品种 / 47248 行 / 2023-06-26 ~ 2026-08-05；单品种 289 ~ 781 行",
+            "how": "select source,count(distinct symbol),count(*),date(min/max(ts)) from stock_vol group by source"
+          },
+          {
+            "name": "stock_option_stat（期权流）",
+            "value": "63 品种 / 46495 行 / 2023-06-26 ~ 2026-08-05",
+            "how": "select ... from stock_option_stat group by source"
+          },
+          {
+            "name": "stock_vol_live（盘中实时 IV）",
+            "value": "63 品种 / 6743 行 / 2026-08-04 15:58 ~ 2026-08-05 19:59 UTC（仅两个交易日的自攒）",
+            "how": "select ... from stock_vol_live group by source"
+          },
+          {
+            "name": "stock_iv_term（IV 期限曲线）",
+            "value": "56 品种 / 345 行 / 8 个时间点 / 2026-08-05 13:33 ~ 19:49 UTC（零厂商历史，自 2026-08-05 起攒）",
+            "how": "select count(distinct symbol),count(*),count(distinct ts),min/max(ts) from stock_iv_term"
+          },
+          {
+            "name": "opt_iv_near（币安近端 IV）",
+            "value": "8 个标的各 39 行，全部 2026-08-05 03:01 ~ 2026-08-06 00:09 UTC（2026-08-05 稳健化后历史清零重攒）",
+            "how": "select symbol,count(*),min/max(ts) from opt_iv_near group by symbol"
+          },
+          {
+            "name": "earnings（财报日历）",
+            "value": "50 品种 / 602 行 / 2023-07-14 ~ 2026-09-24",
+            "how": "select source,count(distinct symbol),count(*),date(min/max(ts)) from earnings group by source"
+          },
+          {
+            "name": "breadth（宽度影子字段）",
+            "value": "仅 4 行：2026-08-04 与 08-05 的 0945/1559 各一。denom 2660~2664，total 17967~17985，flat 开盘槽 7919/8081 vs 收盘槽 4900/5162",
+            "how": "select date(ts/1000),slot,source,denom,total,flat from breadth"
+          },
+          {
+            "name": "universe_snapshot",
+            "value": "224 行 / 5 个版本：2026-08-03 15:09(37)、08-04 10:12(38)、08-04 15:07(74)、08-04 18:20(1)、08-04 18:24(74)",
+            "how": "select datetime(snapped_at/1000),count(*) from universe_snapshot group by snapped_at"
+          },
+          {
+            "name": "funding 结算周期实测分布",
+            "value": "8.0 小时 68 个品种、4.0 小时 6 个品种",
+            "how": "select value,count(*) from meta where key like 'funding_interval_%' and key not like '%_at_%' group by value"
+          },
+          {
+            "name": "meta 键结构",
+            "value": "326 条；四组 74 键（deriv_backfilled_v2_*、funding_interval_*、funding_interval_at_*、funding_hist_at_*）+ 三组 5 键（usvol_csv_at/ok/max_*）+ breadth_* 3 键 + series_floor_* 1 键 + 单例键若干",
+            "how": "select 前缀归并 count(*) from meta group by"
+          },
+          {
+            "name": "launchd 调度",
+            "value": "com.vvv.collector，StartInterval=300 秒，ProgramArguments 为 .venv/bin/python collector.py --once，RunAtLoad=true",
+            "how": "cat launchd/com.vvv.collector.plist"
+          }
+        ],
+        "gotchas": [
+          "**采集成员在 collector.py，不在 instruments.json**：`DEFAULT_SYMBOLS`（collector.py:52）才是「采哪些品种」的唯一真源，只在进程启动时解析一次；instruments.json 是热读的但只提供属性。加/删品种必须改 DEFAULT_SYMBOLS **并重启 collector**，只改 json 不会新增采集对象。",
+          "**观察池（pool=observation）在采集层不做任何区别对待**：24 个观察池品种同样全量采集、同样判态，「不进核心相关矩阵」是消费层按 instruments.pool 过滤实现的。看到观察池品种有完整数据不是 bug。",
+          "**`_should()` 是「先写时间戳后干活」**（collector.py:82-89）：一次网络失败会被当成「刚跑过」，要等满整个间隔才重试。只有 funding_interval / funding_hist 两处刻意改成「成功后才记时间戳」（collector.py:703-722），别把它们「统一」回 `_should`。",
+          "**OpenD 不在 = 静默跳过，不是错误**：四条 moomoo 管线（sync_moomoo_iv / sync_moomoo_iv_live / sync_stock_iv_term / sync_breadth）都先做 `opend_alive()` TCP 预检，不在就 return (None, [])。日志里没有 moomoo 行不代表管线坏了。",
+          "**moomoo 的限频额度是账号级共享的**：三条 moomoo 管线各自按 PACE 计速（moomoo_iv.PACE=0.6、stock_iv_term.PACE=0.7），但加总才是真实速率。这就是 `BUILD_BATCH=12`（单轮建链上限）存在的原因——2026-08-05 实测单轮建 24 品种就与同轮的实时 IV 批量挤爆限频、33 例链请求 ret=-1。调大 BUILD_BATCH 会重现散布式静默失败。",
+          "**IV 有四张互不相通的表，绝不可混算分位**：stock_vol（moomoo 日频结算值，唯一可算分位的口径，source 进主键）/ stock_vol_live（盘中实时预览，只做展示）/ stock_iv_term（3d/9d/30d ATM，2026-08-05 起自攒，暂不算分位）/ opt_iv_near（币安 ~3d 常数期限，期限逐日漂移故 tenor_days 随值落库）。另外 CBOE 的 iv30 影子值落在 **deriv 表的 iv30 列**，不在 stock_vol。",
+          "**usvol 的权威方向是「CSV 覆盖报价」，永不反向**：延迟报价只写 `usvol_csv_max_{name}` 之后的交易日。确权水位刻意做成单调不回退——CSV 尾部偶发缺失若让水位下降，同轮报价就会把官方收盘价盖回成盘中值。查库看到 VIX 当日行与其他四个指数确权日不同步是正常状态。",
+          "**breadth 的两个 slot 不是同一个统计量**：09:45 采的是隔夜跳空后开盘初（实测零变动股 ~44%），15:59 采的是近收盘（~25%），混进同一序列会让分位失去意义，所以 slot 进主键分列存。且 1559 窗口是相对**真实收盘**取的（半日市自动变 13:00），不是硬编码 15:45-16:05。",
+          "**1d 覆盖只有 35/74 个品种，这是设计而非故障**：`fetch_ohlcv` 有「已收线 K 线 < 90 根拒绝该源」的硬门槛（regime/data.py:419），新上市的美股永续 1d 根数不够就整条被拒，每轮都会在 meta.status 里刷同样的错误行。要么等它攒够，要么改门槛——不是数据管线坏了。",
+          "**Deribit 与 Binance 的 1d 日界不同**：Deribit 1d 在 08:00 UTC 收线，Binance/OKX 在 00:00 UTC（库内 BTC-USDT 1d 末根实测 08:00，NVDA-USDT 1d 末根 00:00）。`storage._assert_grid` 会拒绝把另一套时间网格写进同一个 (symbol, tf)，所以给已有历史的品种换源不是改一行配置那么简单。",
+          "**Deribit 没有 4h 档，4h 是由 1h 重采样出来的**（`_resample_4h`）：非末桶必须凑满 4 根 1h 才保留，末桶无论残否都保留（要给 live_bars 用）。这条规则同时防首桶残值与中段缺口残桶——历史上 4h 残桶被 upsert 定格入库是真实事故。",
+          "**vol1h 与 OHLCV 主源是解耦的**：加密价格主源是 Deribit，但 VWAP 的量流**全品种统一取币安 fapi**（量最大）。别以为 vol1h 的量能和 ohlcv 的 volume 对上。",
+          "**deriv 是稀疏宽表，四种时间网格混在一张表里**：funding 8h 结算格 / OI·premium·taker 1h 回填格 / 快照 5m 墙钟格 / iv30 30 分钟格。按行整表取窗会让高频快照把低频 funding 历史挤出窗口，必须用 `get_deriv_col(col=..., hourly_grid=...)` 按列取窗；funding 还要靠 `kind='settled'` 显式标记区分结算行与预测快照（靠时间戳猜会误收 18/523 个墙钟快照）。",
+          "**Binance 的 OI 与 taker 只保留约 30 天**：首轮回填拿到的就是全部可得历史（实测 OI/taker/premium ≈20.8 天，funding ≈168 天），错过的永久拿不回来。同理 breadth 与 stock_iv_term 都是零厂商历史、只能自攒——这两条管线每天不采都是永久损失。",
+          "**财报未来窗以最新日历为权威、旧日期会被删**：`prune_stale_future_earnings` 只清理 [今天, 今天+90 天] 窗口内的过期行，历史行一律不动。另外 earnings.known_at 只对新写入行有效，既有回填行为 NULL（语义＝事后回填、非 point-in-time），v3.1 事件门槛仍在消费这些 NULL 历史行，是**明确接受的先验**。",
+          "**「今天」在 moomoo 管线里必须是 ET 日历日**：宿主机在 UTC+8/9 时 `date.today()` 比 ET 提前一天，会让财报权威窗与 prune 起点跳到 ET 的明天、漏掉 ET 当日的新增/改期。同理 `settled_only` 里传入的 now 会被强制 `astimezone(ET)`。",
+          "**calendar_nyse 是硬编码三年表，表外年份一律当休市**：`_YEARS = {2025, 2026, 2027}`。2027 年 12 月前必须人工补 2028 年，否则 is_rth 全年返回 False，实时 IV / IV 期限 / 宽度三条管线会静默停摆（不报错）。",
+          "**instruments.json 损坏时回退 last-known-good，不回退空表**：曾发生半写 JSON 让 61 个美股静默降级成 crypto 默认（错源、错时钟、丢 IV 与休市语义）且无任何告警。不要把 `load()` 的兜底改成返回 {}。",
+          "**判态重算窗是 10399 根（10000 + FEATURE_WINDOW-1），多读的 399 根只作 pre-roll 上下文**：没有 pre-roll 时窗口最老的那批 bar 会在上下文不足的情况下算出不同 features（实测 820 vs 420 根：331 个共同 ts 里 features 差 189 条）。重算窗外若还残留旧版本行，collector 会主动报「混版风险」错误——那不是噪声，是需要处理的信号。"
+        ]
+      },
+      {
+        "layer": "存储层（regime/storage.py + data/market.db）",
+        "summary": "存储层是单文件 SQLite（/Users/luoyingdong/Documents/VVV_Trade/data/market.db，WAL 模式，实测 241 MB），全部 schema 与读写出口集中在 /Users/luoyingdong/Documents/VVV_Trade/regime/storage.py（1092 行）。库内有 19 张业务表（sqlite_master 去掉 sqlite_sequence 后），时间戳一律 UTC 毫秒整数，K 线/日线的 ts 取开盘（或交易日 00:00 UTC）时刻。写者只有 collector.py 与 scripts/ 下的回填/修复脚本（唯一持有建表+迁移扳机的是 storage.connect()）；dashboard.py / vvvhermes.py / regime.agent 用 connect_ro() 只读，唯一例外是 chat 表走 connect_rw_nomigrate()（可写但不迁移、mode=rw 不新建库）；backtest.py、experiments.py、coupling.py 只读 market.db。所有写入都是幂等 upsert（ON CONFLICT DO UPDATE 或 INSERT OR REPLACE/IGNORE），稀疏宽表用 COALESCE(excluded.c, c) 做列合并，多口径表把 source 放进主键。纪律实现全部在写入路径上：跨源日界锚点断言、源粘性拒绝、K 线修订即失效状态、版本谓词（RULES_VERSION/AUDIT_VERSION 不匹配即视为缺失）。",
+        "items": [
+          {
+            "name": "ohlcv",
+            "what": "K 线主表（1h/4h/1d 三个时间框），全系统的判定底座；ts=开盘时刻。写：collector.py:605 upsert_ohlcv、scripts/backfill_history.py:146、scripts/repair_time_alignment.py:92。读：dashboard.py(124/312/344/704/1203/1374/1629/1646)、regime/backtest.py:300、regime/experiments.py:39、regime/coupling.py:141、storage.symbols()",
+            "location": "regime/storage.py:19-23（表）/ 290（upsert_ohlcv）/ 329（get_ohlcv）",
+            "detail": "PRIMARY KEY(symbol,tf,ts)；列 open/high/low/close/volume/source。今日行数 254666，74 个 symbol。1h：binance_futures 71 品种 173315 行（2026-01-06 23:00 → 2026-08-05 23:00 UTC）+ deribit 3 品种 15195 行；4h：binance_futures 69 品种 46427 行（2025-09-03 20:00 起）+ deribit 3 品种 6051 行；1d：binance_futures 32 品种 9169 行（2022-06-26 起）+ deribit 3 品种 4509 行（锚点 08:00 UTC，2022-06-24 08:00 起）"
+          },
+          {
+            "name": "regime_history",
+            "what": "逐根状态审计快照：state（迟滞确认后）/ raw_state（原始判定）/ confidence / features JSON / rules JSON / version / audit_version。写：collector.py:629 upsert_states + collector.py:661 set_confirmed（同一事务，commit=False）；被 _invalidate_if_revised 删行。读：dashboard.py(155/933/1092)、regime/backtest.py:308、regime/experiments.py:278、scripts/vvvquery.py:81",
+            "location": "regime/storage.py:28-32（表）/ 395（upsert_states）/ 417（set_confirmed）/ 427（get_states）/ 493（get_states_audit）",
+            "detail": "PRIMARY KEY(symbol,tf,ts)；features/rules/version/raw_state/audit_version 五列由 _migrate 用 ALTER 补（regime/storage.py:165-168）。今日行数 238557，全部为 version=v3.1 / audit_version=a8：1h 74 品种 181924 行（2026-01-10 16:00 → 2026-08-05 23:00）、4h 72 品种 46070 行（2025-09-18 16:00 起）、1d 35 品种 10563 行（2022-09-21 08:00 起）"
+          },
+          {
+            "name": "deriv",
+            "what": "衍生品稀疏宽表（Binance 永续）：oi/oi_notional/funding/premium/taker_ratio/iv30 + kind。同 ts 多来源按列 COALESCE 合并。写：collector.py:695/719/724/751 upsert_deriv、scripts/repair_time_alignment.py:102。读：dashboard.py:714 get_deriv、dashboard.py:826-828 与 regime/backtest.py:338 get_deriv_col",
+            "location": "regime/storage.py:33-37（表）/ 118（_DERIV_COLS）/ 560（upsert_deriv）/ 586（get_deriv_col）",
+            "detail": "PRIMARY KEY(symbol,ts)；_DERIV_COLS=(\"oi\",\"oi_notional\",\"funding\",\"premium\",\"taker_ratio\",\"iv30\",\"kind\")（regime/storage.py:118）。今日 108915 行、74 品种，2026-02-15 00:00 → 2026-08-06 00:34 UTC；非空计数 oi 80849 / oi_notional 80849 / funding 67638 / premium 81391 / taker_ratio 81451 / iv30 3361；kind: settled 22546、pred 41875、NULL 44494"
+          },
+          {
+            "name": "stock_vol",
+            "what": "个股波动率日频结算序列（iv/hv/underlying_price），IV 分位的分母。source 进主键，禁止跨口径拼接。写：collector.py:349 upsert_stock_vol（moomoo 增量）、scripts/backfill_moomoo_iv.py。读：dashboard.py:392 get_stock_vol、regime/agent.py:708 stock_vol_latest_ranks、scripts/backfill_moomoo_iv.py:85 stock_vol_coverage",
+            "location": "regime/storage.py:72-76（表）/ 638（upsert_stock_vol）/ 672（get_stock_vol）/ 963（stock_vol_latest_ranks）/ 1013（stock_vol_coverage）",
+            "detail": "PRIMARY KEY(symbol,ts,source)；三列全部 COALESCE 合并。今日 47248 行，唯一 source='moomoo'，63 个 symbol，2023-06-26 → 2026-08-05（日频 00:00 UTC）；iv/hv/underlying_price 三列均 47248 非空。get_stock_vol 的 source 无默认值（强制调用方表态）"
+          },
+          {
+            "name": "stock_vol_live",
+            "what": "盘中实时 IV 快照（iv/pre_iv/hv_30d/vendor_iv_rank/vendor_iv_pct/call_volume/put_volume/pc_volume_ratio）；与 stock_vol 分表，只做预览、永不进分位分母。写：collector.py:287。读：dashboard.py:461",
+            "location": "regime/storage.py:93-99（表）/ 795（_LIVE_COLS）/ 799（upsert_stock_vol_live）/ 819（get_stock_vol_live）",
+            "detail": "PRIMARY KEY(symbol,ts,source)；今日 6743 行、63 品种、source='moomoo'，2026-08-04 15:58:54 → 2026-08-05 19:59:15 UTC。get_stock_vol_live 默认 limit=200（一个交易日约 78 点）"
+          },
+          {
+            "name": "stock_option_stat",
+            "what": "个股期权流日频（option_volume/call_volume/put_volume/pc_volume_ratio/option_oi/call_oi/put_oi/pc_oi_ratio）。纯采集，不参与任何判定。写：collector.py:356。读：collector.py:354 增量判断、scripts/backfill_moomoo_iv.py:49、tests",
+            "location": "regime/storage.py:77-82（表）/ 683（_OPTSTAT_COLS）/ 687（upsert_stock_option_stat）/ 706（get_stock_option_stat）",
+            "detail": "PRIMARY KEY(symbol,ts,source)；八列全 COALESCE（当日 OI 为 T-1 延迟，先写成交后补持仓）。今日 46495 行、63 品种、source='moomoo'，2023-06-26 → 2026-08-05。生产读侧目前只有采集增量与回填脚本，无面板消费"
+          },
+          {
+            "name": "stock_iv_term",
+            "what": "个股 IV 期限曲线快照（iv3/t3、iv9/t9、iv30/t30，实际期限随值落库）。写：collector.py:247。读：dashboard.py:735/757/1541",
+            "location": "regime/storage.py:83-87（表）/ 747（_TERM_COLS）/ 750（upsert_stock_iv_term）/ 764（get_stock_iv_term）",
+            "detail": "PRIMARY KEY(symbol,ts)；六列 COALESCE。今日 345 行、56 品种，2026-08-05 13:33:45 → 2026-08-05 19:49:19 UTC（这张表很新，只有一天多的历史）"
+          },
+          {
+            "name": "opt_iv_near",
+            "what": "币安期权近端 IV 快照（iv/tenor_days/method/n_expiries/index_price）；tenor_days 必须随值落库。写：collector.py:178。读：dashboard.py:293/356/762",
+            "location": "regime/storage.py:88-92（表）/ 773（upsert_opt_iv_near）/ 786（get_opt_iv_near）",
+            "detail": "PRIMARY KEY(symbol,ts)；此表 upsert 用直接覆盖（不是 COALESCE）。今日 312 行 = 8 个品种 × 39 点（BTC/ETH/SOL/BNB/XRP/DOGE/XAU/XAG-USDT），2026-08-05 03:01:02 → 2026-08-06 00:09:31 UTC"
+          },
+          {
+            "name": "earnings",
+            "what": "财报日历（pub_type/period/known_at）；用途不是预测财报，而是给 IV 分位标注事件邻近度、并作为 v3 确认门槛的事件窗输入。写：collector.py:366 upsert_earnings + collector.py:369 prune_stale_future_earnings、scripts/backfill_earnings.py:53。读：dashboard.py:164/423、collector.py:647、scripts/exp_event_gate.py:39、storage.stock_vol_latest_ranks",
+            "location": "regime/storage.py:100-104（表）/ 829（upsert_earnings）/ 853（earnings_event_windows）/ 892（prune_stale_future_earnings）/ 929（earnings_proximity）",
+            "detail": "PRIMARY KEY(symbol,ts,source)；known_at 由 _migrate 补列（regime/storage.py:179-181），写入用 known_at=COALESCE(known_at,excluded.known_at) 保首见时刻。今日 602 行、50 品种、source='moomoo'，ts 跨 2023-07-14 → 2026-09-24（含未来行）；known_at 非空仅 23 行，其余 579 行为事后回填（非 point-in-time）"
+          },
+          {
+            "name": "usvol",
+            "what": "CBOE 波动率指数日线（VIX/VIX9D/VIX3M/VXN/RVX）。写：collector.py:429（CSV 官方收盘）与 collector.py:449（延迟报价，仅补 CSV 未确权的交易日）。读：dashboard.py:585/685",
+            "location": "regime/storage.py:38-41（表）/ 619（upsert_usvol）/ 629（get_usvol）",
+            "detail": "PRIMARY KEY(idx,ts)；ts 必须是交易日 00:00 UTC（ts % 86400000 == 0），_migrate 有一次性清盘中点位（regime/storage.py:191-195）。今日 25901 行：VIX 9244（1990-01-02 起）、VXN 4251（2009-09-14 起）、VIX3M 4245、RVX 4242、VIX9D 3919（2011-01-04 起），均更新至 2026-08-05"
+          },
+          {
+            "name": "dvol",
+            "what": "Deribit BTC/ETH 隐含波动率指数日线。写：collector.py:795。读：dashboard.py:333/1597",
+            "location": "regime/storage.py:24-27（表）/ 349（upsert_dvol）/ 361（get_dvol）",
+            "detail": "PRIMARY KEY(currency,ts)；今日 742 行 = BTC 371 + ETH 371，2025-07-31 → 2026-08-05（00:00 UTC 日格）"
+          },
+          {
+            "name": "vol1h",
+            "what": "币安 1h 量流（volume/quote_vol），VWAP 专用量源，与 OHLCV 主源解耦；quote_vol/volume 即该小时精确 VWAP。写：collector.py sync_vol1h（storage.upsert_vol1h）。读：dashboard.py:187/1393/1661 get_vol1h、regime/agent.py:618 计数",
+            "location": "regime/storage.py:52-56（表）/ 439（upsert_vol1h）/ 455（get_vol1h）/ 463（vol1h_watermark）",
+            "detail": "PRIMARY KEY(symbol,ts)；写入用 INSERT OR REPLACE（唯一走 REPLACE 语义的高频表之一）。今日 203198 行、74 品种，2025-10-15 16:00 → 2026-08-05 23:00 UTC。冷启动目标深度 VOL1H_TARGET=7000（collector.py:511）"
+          },
+          {
+            "name": "ref_daily",
+            "what": "底层参考日线（耦合研究历史层，2020-2026 回填 + 日更），ts=交易日 00:00 UTC 日期键；时点语义因源而异，对齐留给研究层按 C8 协议做。写：collector.py:556/562 sync_reference、scripts/backfill_reference.py:63/68/77。读：get_ref_daily 是声明的读取出口，当前无生产调用方",
+            "location": "regime/storage.py:62-66（表）/ 468（upsert_ref_daily）/ 485（get_ref_daily）",
+            "detail": "PRIMARY KEY(series,ts)；今日 15340 行、9 个 series：BTC 2409（binance_spot，2020-01-01 起）、CL/GC 各 1658（yahoo）、VIX 1657、GLD/MSTR/NDX/QQQ 各 1656、COIN 1334（2021-04-14 起），全部到 2026-08-05。scripts/backfill_reference.py:77 另有 fred 源分支，库内当前无 fred 行"
+          },
+          {
+            "name": "breadth",
+            "what": "市场宽度快照（denom/up_1d/up_20d/up_60d/up_250d/up_ytd/tail_up/tail_dn/flat/total/captured_at）。明确标注为影子字段：只采不消费，攒够约 500 个日频点再评审转正。写：collector.py:143 sync_breadth。读：get_breadth 是声明的读取出口，当前无生产调用方",
+            "location": "regime/storage.py:105-112（表）/ 717（_BREADTH_COLS）/ 721（upsert_breadth）/ 738（get_breadth）",
+            "detail": "PRIMARY KEY(ts,slot,source)；slot 进主键（'0945' 盘初 vs '1559' 近收盘口径不同，混序列会毁掉分位）。今日仅 4 行：ts=1785801600000 与 1785888000000 两个交易日 × 两个 slot，source='moomoo'"
+          },
+          {
+            "name": "live_bars",
+            "what": "形成中的最后一根 K 线（滚动预览），每 (symbol,tf) 只留最新一份。写：collector.py:610 set_live_bar。读：dashboard.py:222 get_live_bar",
+            "location": "regime/storage.py:46-51（表）/ 531（set_live_bar）/ 548（get_live_bar）",
+            "detail": "PRIMARY KEY(symbol,tf)（不含 ts —— 这是全库唯一以 (symbol,tf) 为键的覆盖式表）；带 fetched_at。今日 181 行 = 1h 74 + 4h 72 + 1d 35，fetched_at 全在 2026-08-06 00:33-00:34 UTC"
+          },
+          {
+            "name": "bbo",
+            "what": "最优买卖价量快照（bid/bid_qty/ask/ask_qty），报价质量门槛（价差/深度）的原料，每轮一行/品种。写：collector.py:505 sync_bbo（直接 SQL，storage.py 里无对应函数）。读：当前无任何读取出口",
+            "location": "regime/storage.py:67-71（表，仅 schema）；写入在 collector.py:487-506",
+            "detail": "PRIMARY KEY(symbol,ts)；写入用 INSERT OR IGNORE。今日 38205 行、74 品种，2026-08-03 15:09:48 → 2026-08-06 00:33:39 UTC（约 3 天，5 分钟粒度）"
+          },
+          {
+            "name": "universe_snapshot",
+            "what": "point-in-time 成员快照（append-only）：instruments 配置的口径哈希变化时记一版，pool/theme/class/valid_from。写：collector.py:481（直接 SQL，storage.py 里无对应函数）。读：当前无任何读取出口",
+            "location": "regime/storage.py:57-61（表，仅 schema）；写入在 collector.py:459-484",
+            "detail": "PRIMARY KEY(snapped_at,symbol)，INSERT OR IGNORE。今日 224 行 / 5 个版本：2026-08-03 15:09:48（37 品种）、08-04 10:12:10（38）、08-04 15:07:49（74）、08-04 18:20:10（1）、08-04 18:24:05（74）。触发闸是 meta.universe_hash（sha256 前 16 位，覆盖 pool/theme/class/valid_from/sources/vol_index/vol_proxy/hl_coin）"
+          },
+          {
+            "name": "chat",
+            "what": "VVVhermes 共享对话流（单一全局会话），面板与终端读写同一张表。写：vvvhermes.py:55-56 add_chat、dashboard.py:2017 _add_chat_message（带 scope）；清空：vvvhermes.py:110 / dashboard.py:2142 clear_chat。读：vvvhermes.py:47/72 get_chat、dashboard.py:2002-2009",
+            "location": "regime/storage.py:42-45（表）/ 1023（add_chat）/ 1034（get_chat）/ 1045（clear_chat）",
+            "detail": "唯一 AUTOINCREMENT 主键表（id），因此库里另有 SQLite 内部表 sqlite_sequence。今日 90 行，2026-07-31 09:02:16 → 2026-08-06 00:24:40 UTC。库内实际列为 id/ts/role/content/scope —— scope TEXT NOT NULL DEFAULT 'symbol' 不在 storage.py 的 _SCHEMA 里，由 dashboard.py:1993 按需 ALTER 添加（取值 'symbol' / 'overview'）"
+          },
+          {
+            "name": "meta",
+            "what": "键值配置/水位/节流表：采集节流时间戳、回填完成标记、确权水位、迁移完成闸、运行状态。写读遍布 collector.py 与 regime/stock_iv_term.py:205/190",
+            "location": "regime/storage.py:113（表）/ 1050（set_meta）/ 1059（get_meta）",
+            "detail": "PRIMARY KEY(key)。今日 326 行，分七个键族群：① 品种级回填/节流 296 行 —— deriv_backfilled_v2_{SYM} 74、funding_hist_at_{SYM} 74、funding_interval_{SYM} 74、funding_interval_at_{SYM} 74；② usvol 确权三件套 15 行 —— usvol_csv_at_{IDX}（上次尝试）/ usvol_csv_ok_{IDX}（上次成功）/ usvol_csv_max_{IDX}（官方确权水位）各 5；③ 宽度去重 breadth_{SLOT}_{TS} 3 行；④ 全局节流时间戳 4 行 —— usvol_last_fetch、moomoo_iv_last_fetch、stock_iv_term_last、binance_opt_iv_last；⑤ 迁移完成闸 2 行 —— usvol_ts_aligned_v1=1、usvol_csv_gate_v2=1；⑥ 运行/治理状态 4 行 —— last_run=1785976478557、status（JSON：interval/cycle_sec/errors）、universe_hash=9b7a2a58538d0307、ref_last_sync=2026-08-06；⑦ 缓存与序列治理 2 行 —— iv_term_codes（IV 期限链代码表 JSON，带 date）、series_floor_{SYM}（当前仅 series_floor_CRWD-USDT=1783083600000）。代码里还声明了 stock_iv_term_build_offset（collector.py:221）与已废弃的 usvol_backfilled_* / usvol_csv_*（被迁移清理），今日库内均不存在"
+          },
+          {
+            "name": "connect / connect_ro / connect_rw_nomigrate",
+            "what": "三种连接分工：只有 connect() 建表+迁移（collector 独占扳机）；connect_ro() 数据库层面禁写（面板、Hermes、回测、实验、耦合全走这条）；connect_rw_nomigrate() 用 mode=rw 打开已存在的库、可写但无迁移扳机，专供面板 chat 读写",
+            "location": "regime/storage.py:121 / 136 / 146",
+            "detail": "三者 timeout=15；connect 与 connect_rw_nomigrate 执行 PRAGMA journal_mode=WAL（库当前实测 journal_mode=wal）。connect_ro 在库不存在时直接抛错（部署顺序：先起 collector）"
+          },
+          {
+            "name": "_migrate",
+            "what": "就地迁移：给 regime_history 补 features/rules/version/raw_state/audit_version 五列，给 deriv 补 iv30/kind，给 earnings 补 known_at；外加两处一次性定点清理",
+            "location": "regime/storage.py:158-204",
+            "detail": "清理一：usvol_ts_aligned_v1 闸下 DELETE FROM usvol WHERE ts % 86400000 <> 0（清早期盘中点位）+ 删 usvol_backfilled_% 键。清理二：usvol_csv_gate_v2 闸下删 usvol_csv_% 中不是 at_/max_ 的键。历史上的 regime_audit_vN 代际全表 DELETE 已拆除，由版本谓词取代（注释在 regime/storage.py:183-188）"
+          },
+          {
+            "name": "_assert_grid（跨源日界锚点断言）",
+            "what": "拒绝把另一套时间网格写进同一个 (symbol,tf)：新批次锚点不唯一、或与存量锚点不符即抛 RuntimeError",
+            "location": "regime/storage.py:214-234，被 upsert_ohlcv 在 regime/storage.py:311 调用",
+            "detail": "_TF_MS = {\"1h\": 3_600_000, \"4h\": 14_400_000, \"1d\": 86_400_000}（regime/storage.py:211）。锚点 = ts % _TF_MS[tf]。实证背景已在库中可见：deribit 1d 锚在 08:00 UTC（4509 行），binance_futures 1d 锚在 00:00 UTC（9169 行），主键 (symbol,tf,ts) 永不碰撞，混入即双网格且不可逆"
+          },
+          {
+            "name": "upsert_ohlcv 的源粘性",
+            "what": "序列已有既定 source 时拒绝异源写入（宁缺毋滥），换源必须走显式迁移；同函数还前置 NaN/±Inf 拒收",
+            "location": "regime/storage.py:290-326（NaN/Inf 检查 293-297，源粘性 302-310）",
+            "detail": "取最近一条非空 source 比对，不同即 raise ValueError（'拒绝混源写入：序列既定源=…'）。NaN/Inf 拒收的理由是非有限值落库后修订对账的 abs(a-b) 恒为 nan，旧状态永不失效"
+          },
+          {
+            "name": "_invalidate_if_revised（修订自动失效）",
+            "what": "写 K 线前对账：同 ts 的 OHLCV 任一值有变、或往历史中间补进此前缺失的 K 线，则 DELETE FROM regime_history WHERE ts >= 首个变更 ts，同轮由缺失重算补回",
+            "location": "regime/storage.py:237-287，被 upsert_ohlcv 在 regime/storage.py:318 调用",
+            "detail": "容差为相对 1e-9：abs(a-b) > 1e-9 * max(1.0, abs(a), abs(b))（regime/storage.py:274）。任一侧非有限值一律判为已修订。纯尾部追加（ts >= 现有 MAX(ts)）跳过失效。删行会打 WARNING 日志"
+          },
+          {
+            "name": "state_ts_set（版本谓词）",
+            "what": "'已算过的 ts 集合'——只有 version 与 audit_version 都匹配当前代码的行才算存在，旧版本行视为缺失并在下一轮 upsert 原地重算。这是升版即全量重算的机关，且不含任何删除动作",
+            "location": "regime/storage.py:372-392，调用方 collector.py:623",
+            "detail": "当前值：RULES_VERSION = \"v3.1\"（regime/classify.py:45）、AUDIT_VERSION = \"a8\"（regime/classify.py:58）、FEATURE_WINDOW = 400（regime/classify.py:21）。今日库中 regime_history 全部 238557 行均为 (v3.1, a8)，无残留旧版本行。version=None 时退化为不过滤"
+          },
+          {
+            "name": "get_deriv_col（逐指标窗 + 结算格过滤）",
+            "what": "单指标取窗：只取该列非空的行，各指标窗口互不挤占；hourly_grid=True 时在 SQL 层再过滤出结算行",
+            "location": "regime/storage.py:586-616",
+            "detail": "结算格谓词：kind='settled' 显式命中，或 kind IS NULL 的旧行退回 8h 结算格判定 MIN(ts % 28800000, 28800000 - ts % 28800000) < 60000（±60s 容差）。col 不在 _DERIV_COLS 时抛 ValueError。调用点 limit：dashboard.py:826 用 20000、dashboard.py:827 funding 用 50、dashboard.py:828 结算 funding 用 1100、regime/backtest.py:338 用 6000"
+          },
+          {
+            "name": "COALESCE 列合并的五处常量",
+            "what": "稀疏宽表的同 ts 多来源按列合并，写入语句统一 SET c=COALESCE(excluded.c, c)，保证后到的 NULL 不会擦掉先到的值",
+            "location": "regime/storage.py:118 _DERIV_COLS / 683 _OPTSTAT_COLS / 717 _BREADTH_COLS / 747 _TERM_COLS / 795 _LIVE_COLS",
+            "detail": "stock_vol 的三列（iv/hv/underlying_price）在 regime/storage.py:648-649 逐列写死 COALESCE；earnings 的 pub_type/period 同样 COALESCE，known_at 用 COALESCE(known_at, excluded.known_at) 保首见时刻（regime/storage.py:846）。不做 COALESCE 的是 ohlcv、dvol、usvol、live_bars、opt_iv_near、regime_history —— 这几张一律直接覆盖 excluded 值"
+          },
+          {
+            "name": "_f（数值清洗）",
+            "what": "None/NaN/±inf 一律转 None 再入库——inf 进分位分母会吞掉整个分布",
+            "location": "regime/storage.py:659-669",
+            "detail": "被 upsert_stock_vol、upsert_stock_option_stat、upsert_stock_iv_term、upsert_opt_iv_near、upsert_stock_vol_live 使用；upsert_breadth 与 upsert_earnings 不过 _f（前者存整数计数，后者存文本/时间戳）"
+          },
+          {
+            "name": "prune_stale_future_earnings（未来窗改期清理）",
+            "what": "未来窗口内以最新日历为权威：删掉本批品种在 [start_ts, end_ts] 内、但不在最新日历里的行；历史行永不触碰",
+            "location": "regime/storage.py:892-926，调用点 collector.py:369（窗口=今天 → 今天+90 天）",
+            "detail": "两道 fail-safe：fresh_rows 为空整体跳过；只对 fresh 里出现过的品种做清理（品种级 fail-open）。对未改动的行不做删+插，保住 known_at 的 point-in-time 语义"
+          },
+          {
+            "name": "earnings 的 ET 日历日比较",
+            "what": "earnings_event_windows 与 earnings_proximity 都必须按 America/New_York 日历日做差，不能按 UTC 毫秒",
+            "location": "regime/storage.py:853-889（event_windows，日差语义 0 ≤ 财报日−bar 的 ET 日 ≤ horizon）/ 929-960（proximity）",
+            "detail": "默认 horizon_days=10、source='moomoo'；proximity 返回 {\"days\": ±N, \"ts\": ...}，超窗返回 None，选最近事件用 min(key=(abs(days), days))"
+          },
+          {
+            "name": "stock_vol_latest_ranks（横截面 IV 分位）",
+            "what": "全品种最新 IV 与分位 {symbol: (iv, rank|None, n, kind)}，两次查询算完；与面板同口径——有财报记录且同 in30 状态样本够时用条件分位，否则退回普通窗分位",
+            "location": "regime/storage.py:963-1010，调用点 regime/agent.py:708（source='moomoo'）",
+            "detail": "默认参数 win=252、min_n=120、cond_win=504、earn_window_d=30、cond_min=60；kind 取值 'raw' / 'cond'"
+          },
+          {
+            "name": "table_names / table_columns / counts（动态表目录）",
+            "what": "动态列出业务表与字段并逐表计数，新管线建表后无需维护手写清单；table_columns 先校验名字在目录内再拼接标识符",
+            "location": "regime/storage.py:1069 / 1078 / 1086",
+            "detail": "table_names 显式排除 sqlite_sequence。counts 被 collector.py:849 每轮日志与 dashboard.py:964 /api 使用；table_names/table_columns 被 regime/agent.py:663 与 scripts/vvvquery.py:102-103 使用（后者附 TABLE_NOTES 用途说明，见 scripts/vvvquery.py:30-40）"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "查询时刻",
+            "value": "2026-08-06 09:34 JST（= 2026-08-06 00:34 UTC）",
+            "how": "date + 全部 sqlite3 只读查询在该分钟内完成；collector 仍在运行，行数会继续增长"
+          },
+          {
+            "name": "业务表张数",
+            "value": "19",
+            "how": "SELECT name FROM sqlite_master WHERE type='table' AND name<>'sqlite_sequence'"
+          },
+          {
+            "name": "market.db 文件大小",
+            "value": "241168384 字节（约 230 MiB），另有 market.db-wal 3057072 字节",
+            "how": "ls -la /Users/luoyingdong/Documents/VVV_Trade/data/"
+          },
+          {
+            "name": "journal_mode",
+            "value": "wal",
+            "how": "PRAGMA journal_mode"
+          },
+          {
+            "name": "ohlcv",
+            "value": "254666 行 / 74 symbol",
+            "how": "COUNT(*) 与 COUNT(DISTINCT symbol)"
+          },
+          {
+            "name": "regime_history",
+            "value": "238557 行，100% 为 version=v3.1 & audit_version=a8",
+            "how": "GROUP BY tf,version,audit_version"
+          },
+          {
+            "name": "vol1h",
+            "value": "203198 行 / 74 品种",
+            "how": "COUNT(*)"
+          },
+          {
+            "name": "deriv",
+            "value": "108904→108915 行 / 74 品种（两次查询间隔内仍在增长）",
+            "how": "两次 COUNT(*)，说明这是活表"
+          },
+          {
+            "name": "stock_vol",
+            "value": "47248 行 / 63 品种 / 唯一 source=moomoo",
+            "how": "GROUP BY source"
+          },
+          {
+            "name": "stock_option_stat",
+            "value": "46495 行 / 63 品种",
+            "how": "GROUP BY source"
+          },
+          {
+            "name": "bbo",
+            "value": "38205 行 / 74 品种，仅 2026-08-03 起约 3 天",
+            "how": "COUNT(*) + MIN/MAX(ts)"
+          },
+          {
+            "name": "usvol",
+            "value": "25901 行 / 5 个指数，最长 VIX 自 1990-01-02",
+            "how": "GROUP BY idx"
+          },
+          {
+            "name": "ref_daily",
+            "value": "15340 行 / 9 个 series（binance_spot 1 + yahoo 8）",
+            "how": "GROUP BY series,source"
+          },
+          {
+            "name": "stock_vol_live",
+            "value": "6743 行 / 63 品种（仅 2026-08-04~08-05）",
+            "how": "GROUP BY source"
+          },
+          {
+            "name": "earnings",
+            "value": "602 行 / 50 品种；known_at 非空仅 23 行",
+            "how": "COUNT(*) 与 COUNT(known_at)"
+          },
+          {
+            "name": "dvol",
+            "value": "742 行 = BTC 371 + ETH 371",
+            "how": "GROUP BY currency"
+          },
+          {
+            "name": "stock_iv_term",
+            "value": "345 行 / 56 品种（仅 2026-08-05 一天）",
+            "how": "COUNT(*) + MIN/MAX(ts)"
+          },
+          {
+            "name": "opt_iv_near",
+            "value": "312 行 = 8 品种 × 39 点",
+            "how": "GROUP BY symbol"
+          },
+          {
+            "name": "meta",
+            "value": "326 行；品种级 296 + usvol 15 + breadth 3 + 单例 12",
+            "how": "按前缀 GROUP BY 分族群"
+          },
+          {
+            "name": "universe_snapshot",
+            "value": "224 行 / 5 个快照版本",
+            "how": "GROUP BY snapped_at"
+          },
+          {
+            "name": "live_bars",
+            "value": "181 行 = 1h 74 + 4h 72 + 1d 35",
+            "how": "GROUP BY tf"
+          },
+          {
+            "name": "chat",
+            "value": "90 行",
+            "how": "COUNT(*)"
+          },
+          {
+            "name": "breadth",
+            "value": "4 行（2 交易日 × 2 slot）",
+            "how": "SELECT * FROM breadth"
+          },
+          {
+            "name": "deriv 各列非空",
+            "value": "oi 80849 / oi_notional 80849 / funding 67638 / premium 81391 / taker_ratio 81451 / iv30 3361",
+            "how": "COUNT(col)"
+          },
+          {
+            "name": "deriv kind 分布",
+            "value": "settled 22546 / pred 41875 / NULL 44494",
+            "how": "SUM(kind='settled') 等"
+          },
+          {
+            "name": "1d 双锚点实证",
+            "value": "binance_futures 1d 锚 00:00 UTC（9169 行 / 32 品种），deribit 1d 锚 08:00 UTC（4509 行 / 3 品种）",
+            "how": "GROUP BY tf,source 后看 MIN/MAX(ts) 的时刻"
+          }
+        ],
+        "gotchas": [
+          "chat 表在库里比 storage.py 的 _SCHEMA 多一列 scope（TEXT NOT NULL DEFAULT 'symbol'，取值 symbol/overview）。这列由 dashboard.py:1993 在运行时 ALTER 添加，storage.py 完全不知情（dashboard.py:1982 注释写明 'storage.py 冻结不改'）。只看 storage.py 会以为 chat 只有 4 列，实测 5 列。storage.add_chat() 写入的终端消息靠 DEFAULT 落成 symbol scope。",
+          "bbo 与 universe_snapshot 只有 schema 在 storage.py 里，写入是 collector.py 直接 SQL（collector.py:505 / 481，INSERT OR IGNORE），storage.py 里没有对应的 upsert_/get_ 函数。全库搜索这两张表当前没有任何读取方——它们是纯留痕表。ref_daily 与 breadth 有声明的读取出口（get_ref_daily / get_breadth）但同样无生产调用方，vvvquery.py:35-40 明确标注前者是研究层、后者是待转正的影子字段。",
+          "主键设计不统一，说明书必须逐表写清：多口径表把 source 放进主键（stock_vol / stock_option_stat / stock_vol_live / earnings 是 (symbol,ts,source)，breadth 是 (ts,slot,source)）；ohlcv 的 source 只是普通列、不进主键——所以 ohlcv 靠源粘性断言（regime/storage.py:302-310）在写入侧挡混源，而不是靠主键；live_bars 的主键是 (symbol,tf)，根本不含 ts。",
+          "'升版即重算' 没有任何删除动作。旧版本的 regime_history 行仍物理留在库里，只是被 state_ts_set 的版本谓词判为缺失、下一轮 upsert 原地覆盖。因此不能把 '库里有这个 ts 的状态' 等同于 '这个 ts 的状态是当前版本算的'——查询状态必须带 version/audit_version 过滤，回测按 (version, audit_version) 分桶是硬纪律（regime/storage.py:493-501）。今天恰好全库同版本（v3.1/a8），这掩盖了问题。",
+          "deriv 是稀疏宽表，四种时间格（funding 8h 结算格、OI/premium/taker 1h 回填格、快照 5m 墙钟格、iv30 30 分钟格）混在一张表里。用 get_deriv（按行整表取窗）会让高频快照把低频 funding 历史挤出窗口——正确做法是 get_deriv_col 逐指标取窗；要结算 funding 必须再加 hourly_grid=True。另外 kind 列有 44494 行为 NULL（旧行），此时结算判定退回 8h 格 ±60s 容差，是过渡通道而非常态。",
+          "earnings.known_at 只有 23/602 行非空，其余是事后回填。earnings_event_windows 明确不按 known_at 过滤（regime/storage.py:857-862），即当前 v3.1 事件门槛消费的历史行不是严格 point-in-time——这是记录在案的先验而非疏漏，收紧点只在这一个函数里。",
+          "只有 storage.connect() 会建表和跑迁移，迁移里含 ALTER 和 DELETE。面板/Hermes/回测一律 connect_ro()，面板写 chat 用 connect_rw_nomigrate()（mode=rw，库不存在时直接报错而非静默建空库）。误用 connect() 等于把迁移扳机交给第二个进程。",
+          "usvol 的确权靠三个 meta 键分工，不能合并：usvol_csv_at_{IDX}=上次尝试（防刷）、usvol_csv_ok_{IDX}=上次成功（24h 刷新周期）、usvol_csv_max_{IDX}=官方确权水位（单调不回退，延迟报价只能写水位之后的交易日）。合成一个的话一次网络失败会被当成刚刷过。注意 _migrate 的 usvol_csv_gate_v2 清理会删掉 usvol_csv_ 前缀里非 at_/max_ 的键——ok_ 键是在该迁移之后才引入的，若手工重置这个闸会误删 5 个 ok_ 键。",
+          "另有一个独立数据库 /Users/luoyingdong/Documents/VVV_Trade/data/backtest_ledger.sqlite3（299008 字节），不属于 market.db，storage.py 不管它。data/vvv.db 是 0 字节空文件。",
+          "live_bars 存的是未收盘 K 线，绝不能与 ohlcv 混用于分位/状态计算；同理 stock_vol_live 与 stock_vol 分表是刻意的——盘中值当天还会变，进分位分母会导致同一天算两次得数不同（regime/storage.py:802-805）。",
+          "ohlcv 的 ts 是开盘时刻，usvol/ref_daily/stock_vol/earnings 的 ts 是交易日 00:00 UTC 的日期键（earnings 的 ts 就是财报日期的 00:00 UTC，不是发布时刻）。ref_daily 各源的时点语义还不一样（美股类 close 是当日 16:00 ET，BTC 是 UTC 日线收盘），存储层只存原生语义，对齐留给研究层按 C8 协议做。"
+        ]
+      },
+      {
+        "layer": "判定层（regime/classify.py + regime/features/）",
+        "summary": "判定层把三支柱特征（结构 structure / 波动率 volatility / 成交量 volume）合成为五个互斥状态之一，规则完全显式、无黑盒。核心是一棵**分层短路树**：先判 trend（ER 分位与方向分两个 AND 条件同时满足），否则 squeeze（波动率模块的布尔位），否则 high_vol_chop，兜底 range；置信度每个状态各有一条独立公式。逐根 walk-forward 计算（窗口 FEATURE_WINDOW=400、min_bars=90），产出的原始态 raw_state 再经**非对称迟滞** confirm_states 折叠成确认态写回 state 列。规则与特征集分别由 RULES_VERSION=\"v3.1\" / AUDIT_VERSION=\"a8\" 标识，任一升版旧行被 state_ts_set 谓词判为缺失、下轮自动原地重算。features/ 下还有一批只入审计快照或只做展示的**影子字段**（pathgeom、margin、atr_rank_ds、vwap、crsi），一律不参与判定。",
+        "items": [
+          {
+            "name": "RULES_VERSION",
+            "what": "规则版本号。THRESHOLDS 或 classify 规则结构改动必须递增；与 AUDIT_VERSION 一起进 state_ts_set 跳过谓词，升版即重算",
+            "detail": "当前值 \"v3.1\"（v3=A1 事件感知确认门槛；v3.1=事件窗改按 ET 日历日比较）",
+            "location": "regime/classify.py:45"
+          },
+          {
+            "name": "AUDIT_VERSION",
+            "what": "审计特征集版本。features JSON 的键集或任一字段口径变化必须递增（规则可不变）",
+            "detail": "当前值 \"a8\"（a8 = 健康位 win/warmup 入库）。代际史：v2 补四列 / v3 pathgeom+margin / v4 atr_ds / v5 时间对齐 / a6 加 src 键 / a7 direction 重归一 + src→src_round / a8 健康位",
+            "location": "regime/classify.py:58"
+          },
+          {
+            "name": "THRESHOLDS",
+            "what": "判定阈值三件套，规则树唯一的可调阈值集合；注释明示仍是先验起点、待回测校准",
+            "detail": "er_rank_trend=0.60；direction_trend=0.30；tilt_confirm=0.10",
+            "location": "regime/classify.py:64-68"
+          },
+          {
+            "name": "SQUEEZE_BBW / SQUEEZE_ATR / HIGHVOL_ATR",
+            "what": "squeeze 与 high_vol 的边界字面量，镜像自 features/volatility.py 的硬编码；仅供 margin 计算引用，两处必须同步改",
+            "detail": "SQUEEZE_BBW=0.15；SQUEEZE_ATR=0.30；HIGHVOL_ATR=0.85",
+            "location": "regime/classify.py:86-88"
+          },
+          {
+            "name": "FEATURE_WINDOW",
+            "what": "特征计算窗口（根）。walk-forward 入库与面板实时展示必须用同一值，否则同一根 bar 会给出两个 atr_rank",
+            "detail": "400。collector 取窗 10000+FEATURE_WINDOW-1 根（含 399 根 pre-roll）",
+            "location": "regime/classify.py:21；collector.py:622"
+          },
+          {
+            "name": "WARMUP_BARS",
+            "what": "暖机根数门槛。可用历史少于此，250 根分位的参照期缩水、分位读数系统性偏移；面板角标与逐行审计 warmup 位共用",
+            "detail": "280（= 分位窗 250 + 指标暖机 ~30）",
+            "location": "regime/classify.py:62；dashboard.py:252"
+          },
+          {
+            "name": "BARS_PER_YEAR",
+            "what": "年化因子，供 realized_vol 用",
+            "detail": "{\"1h\": 24*365=8760, \"4h\": 6*365=2190, \"1d\": 365}",
+            "location": "regime/classify.py:17"
+          },
+          {
+            "name": "LAG_BARS / _OPERATOR_LAG",
+            "what": "各算子群延迟（≈窗口一半，单位=根），显式声明给下游；slowest 随每行入审计快照的 lag 键",
+            "detail": "er30=15, atr14=7, bb20=10, ema50_slope=25, downside48=24, vol_accel72=36, donchian100=50, ema200=100, pct_rank250=125, pathgeom120=60；slowest=125；confirm_bars_needed=3",
+            "location": "regime/classify.py:26-36"
+          },
+          {
+            "name": "STATES",
+            "what": "五个状态的键→中文标签单一来源（键是历史契约，入库/前端/Hermes 都认它）",
+            "detail": "trend_up=趋势上行；trend_down=趋势下行；range=震荡；squeeze=低波动挤压（蓄势）；high_vol_chop=高波动非趋势（趋势条件未齐）",
+            "location": "regime/classify.py:76-82"
+          },
+          {
+            "name": "classify() 规则树",
+            "what": "五态判定的全部逻辑，分层短路：trend > squeeze > high_vol > range",
+            "detail": "trending = (er_rank >= 0.60) AND (abs(direction) >= 0.30)；若 trending：direction>0 → trend_up 否则 trend_down；elif vol[\"squeeze\"] → squeeze；elif vol[\"high_vol\"] → high_vol_chop；else → range",
+            "location": "regime/classify.py:141-183"
+          },
+          {
+            "name": "置信度公式 · trend_up / trend_down",
+            "what": "方向分、ER 分位、量能站队三项加权",
+            "detail": "tilt = updown_tilt_20 * sign(direction)；vol_confirm = 1.0 if tilt>0.10 else (0.5 if tilt>-0.10 else 0.0)；conf = clip01(0.45*abs(direction) + 0.35*er_rank + 0.20*vol_confirm)",
+            "location": "regime/classify.py:163-167"
+          },
+          {
+            "name": "置信度公式 · squeeze",
+            "what": "带宽分位越低越确信",
+            "detail": "conf = clip01(1.0 - bbw_rank)",
+            "location": "regime/classify.py:168-170"
+          },
+          {
+            "name": "置信度公式 · high_vol_chop",
+            "what": "ATR 分位本身即置信度",
+            "detail": "conf = clip01(atr_rank)",
+            "location": "regime/classify.py:171-173"
+          },
+          {
+            "name": "置信度公式 · range",
+            "what": "ER 与方向都越低越确信",
+            "detail": "conf = clip01(0.5*(1.0 - er_rank) + 0.5*(1.0 - abs(direction)))",
+            "location": "regime/classify.py:174-176"
+          },
+          {
+            "name": "rules（triggered / unmet 清单）",
+            "what": "逐条规则求值结果随快照入库，是回测与审计的原料；五条 check 的字面量由 THRESHOLDS 内插生成",
+            "detail": "\"er_rank>=0.6\" / \"abs(dir)>=0.3\" / \"squeeze(bbw<0.15&atr<0.30)\" / \"high_vol(atr>0.85)\" / \"tilt_confirm(|tilt|>0.1)\"",
+            "location": "regime/classify.py:149-160"
+          },
+          {
+            "name": "_confirm_need()",
+            "what": "确认层非对称迟滞的根数函数",
+            "detail": "high_vol_chop → 1 根（冲击态立即，不受任何门槛）；range → 3 根；其余（trend_up/trend_down/squeeze）→ 2 根；v3.1 事件门槛：event_win 且 from_state==\"squeeze\" 且目标为 trend_up/trend_down 时 need += 1（即 3 根）",
+            "location": "regime/classify.py:186-204"
+          },
+          {
+            "name": "confirm_states()",
+            "what": "把逐根 raw 序列折叠成确认态序列，并返回末端候选",
+            "detail": "返回 (confirmed_list, candidate)；candidate = {state, count, need, event_win, gated}，gated 表示门槛真的因事件 +1（只在 squeeze→趋势成立），避免对 range→trend 等谎报",
+            "location": "regime/classify.py:207-244"
+          },
+          {
+            "name": "事件门槛的证据与强度（A1）",
+            "what": "v3 事件感知门槛的立论依据，注释里写死；属版本化先验，已预登记复评条件",
+            "detail": "外部实证：压缩态+财报窗未来 10 日扩张概率 60.6% vs 21.4%（2.83×，15/17 品种同向）；本地诊断 2026-08-05：窗内 squeeze→趋势确认的 10 根失败率 83.8% vs 77.2%（1h）、80% vs 72%（4h），z≈0.9 未显著（仅 2 个财报周期）→ 取最小强度 +1 根；复评条件：窗内转换样本 ≥100",
+            "location": "regime/classify.py:190-196；docs/A1_EVENT_GATE_20260805.md"
+          },
+          {
+            "name": "earnings_event_windows()",
+            "what": "确认层事件窗的唯一来源：逐 bar 判定该时刻起 horizon_days 个日历日内是否有财报",
+            "detail": "horizon_days=10，source=\"moomoo\"；按 **ET 日历日序数差** 判定：0 <= (财报日 − bar 的 ET 日) <= 10，含第 0 天；不按 known_at 过滤（记录在案的先验，非疏漏）",
+            "location": "regime/storage.py:853-889"
+          },
+          {
+            "name": "事件窗接线（collector）",
+            "what": "只有 class==\"us_stock_perp\" 的品种传 event_win；若整条窗全 False（如 ETF）则退回 None，行为与 v2 完全一致",
+            "detail": "instruments.get(sym)[\"class\"] == \"us_stock_perp\" 才取窗；实测 instruments.json 共 74 个品种：us_stock_perp 61 / crypto 7 / commodity 5 / intl_stock_perp 1",
+            "location": "collector.py:643-654"
+          },
+          {
+            "name": "structure_features()",
+            "what": "结构支柱。产出 6 个字段，其中 direction 是判定输入",
+            "detail": "产出 pivot_dir / ema_slope / donchian_pos / direction / swing_high / swing_low。direction 权重：pivot_dir 0.45、slope_score 0.25、dc_score 0.20、above_ema200 0.10（仅 len(df)>=200 时加入），**缺席时权重重归一**（除以 wsum）而非按 0 计入。swing_pivots k=4；structure_direction n_pairs=3；EMA50 近 10 根坡度经 ATR 归一后 tanh(2.0*slope)；Donchian 窗 min(100, len-1)",
+            "location": "regime/features/structure.py:51-94"
+          },
+          {
+            "name": "efficiency_ratio_series() + pct_rank",
+            "what": "Kaufman 效率比（替代 ADX），其 250 窗分位 er_rank 是判定输入",
+            "detail": "n=30；er_rank = pct_rank(er_s, 250)；pct_rank 定义 = (s < s.iloc[-1]).mean()，有效值不足 2 个时返回 0.5",
+            "location": "regime/features/structure.py:44-48；regime/classify.py:337-338；regime/features/utils.py:8-13"
+          },
+          {
+            "name": "volatility_features()",
+            "what": "波动率支柱。产出 11 个字段，其中 squeeze / high_vol / bbw_rank / atr_rank 进判定或置信度",
+            "detail": "产出 atr_rank_ds / vol_accel / vol_accel_rank / downside_share / atr / atr_pct_of_price / atr_rank / bbw_rank / rv30_annual_pct / squeeze / high_vol。参数：atr n=14（**SMA-ATR 不是 Wilder RMA**）、bb_width n=20 k=2.0、realized_vol n=30、rank_window=250、vol_accel = ret.rolling(12).std()/ret.rolling(72).std()、downside_share 窗 48。判定布尔硬编码在此：squeeze = (bbw_rank<0.15 and atr_rank<0.30)、high_vol = (atr_rank>0.85)",
+            "location": "regime/features/volatility.py:91-131（squeeze/high_vol 在 129-130）"
+          },
+          {
+            "name": "_deseasonalized_atr_rank()（影子）",
+            "what": "hour-of-day × 周末 去季节化 ATR 分位，仅 session_aware（美股/国际股永续的 1h/4h）计算；不参与判定",
+            "detail": "session_bucket = ET 小时 + 24*(ET 是否周末)，共 48 桶；因子 = 同桶 rolling(30, min_periods=8).shift(1) 均值，还原量纲用 rolling(240, min_periods=48).shift(1)；样本不足返回 None（不塌成未去季节化值）",
+            "location": "regime/features/volatility.py:49-88；开关在 regime/classify.py:328-334"
+          },
+          {
+            "name": "volume_features()",
+            "what": "成交量支柱。产出 4 个字段，其中 updown_tilt_20 进置信度与 tilt_confirm 规则",
+            "detail": "产出 vol_z20 / vol_rank / updown_tilt_20 / breakout。参数：mean/std 窗 20、rank_window=250、tilt 窗 n=20（(上涨K量−下跌K量)/总量）、breakout 查最近 5 根是否突破 60 根 Donchian（shift(1)）",
+            "location": "regime/features/volume.py:12-44"
+          },
+          {
+            "name": "path_features()（影子）",
+            "what": "路径几何：频率轴 + Kendall τ 交叉轴。只入审计快照与面板展示，明确不参与 classify",
+            "detail": "WINDOW=120（<100 直接 raise）；chop_freq = 线性去趋势（np.polyfit 一次 OLS）残差对残差均值的穿越数×100/n；dom_period = 2n/穿越数；kendall_tau 为手写 τ-a（不修平局）；lag = window//2 = 60。历史不足或含 NaN 时四项全 None",
+            "location": "regime/features/pathgeom.py:26-76"
+          },
+          {
+            "name": "_boundary_margin()（影子）",
+            "what": "到最近**能实际翻转输出**的决策边界的归一化距离；仅展示与审计，不参与判定",
+            "detail": "按当前态只枚举可达翻转：trend→{exit_trend}；squeeze→{to_trend, exit_squeeze}；high_vol_chop→{to_trend, to_range}；range→{to_trend, to_squeeze, to_chop}。to_trend = max(max(0, 0.60−er_rank), max(0, 0.30−|dir|))。取 min 后 round(,3)，异常时整个 margin 置 None",
+            "location": "regime/classify.py:91-122（异常兜底 179-182）"
+          },
+          {
+            "name": "vwap.py（影子，不入快照）",
+            "what": "滚动 VWAP 偏离。显示/上下文层——不进规则树、**也不进审计快照**；量源统一取币安 1h 流",
+            "detail": "WIN_HOURS={\"1h\":24,\"4h\":168,\"1d\":480}；COVER_MIN=0.8；RANK_WIN=250；RANK_MIN=60（不足返回 None）",
+            "location": "regime/features/vwap.py:22-26"
+          },
+          {
+            "name": "crsi.py（影子，不入快照）",
+            "what": "cRSI（von Thienen 循环平滑 RSI）+ 自适应带 + 枢轴确认背离；展示层，不进判定",
+            "detail": "默认 dom_cycle=20 / vibration=10 / leveling=10.0 / piv_len=5；参数越界 raise；输入含 NaN raise。时间语义：divergences 的 i 是枢轴根，confirmed_i = i + piv_len 才是可知根（回测/告警必须用后者）",
+            "location": "regime/features/crsi.py:46-67"
+          },
+          {
+            "name": "审计快照 features JSON（a8，25 键）",
+            "what": "每行入库的特征快照，回测无需重算特征",
+            "detail": "进判定/置信度的 7 项：dir, er_rank, atr_rank, bbw_rank, tilt, sq, hv（另 er 为中间量）。纯记录项：pivot, slope, dc, er, rv, accel, dshare, volz, atr_ds。影子项：freq, domp, tau, margin, m_near, lag。溯源/健康位：src_round, win, warmup。**未入库**的模块产出：vol_accel_rank, atr, atr_pct_of_price, vol_rank, breakout, swing_high, swing_low, pathgeom.lag",
+            "location": "regime/classify.py:276-312"
+          },
+          {
+            "name": "rolling_states_missing()",
+            "what": "逐根 walk-forward 分类入口，只算 existing_ts_ms 里没有的时间戳；无未来函数",
+            "detail": "min_bars=90（低于此不产状态行）、window=FEATURE_WINDOW=400、sub = df.iloc[max(0, i-window): i]；返回 (ts_ms, state, confidence, features_json, rules_json, RULES_VERSION, AUDIT_VERSION)",
+            "location": "regime/classify.py:247-324"
+          },
+          {
+            "name": "analyze_timeframe()",
+            "what": "单点分析入口（面板/CLI/walk-forward 共用），组装三支柱 + er + 影子字段",
+            "detail": "session_aware=True 且 tf in (\"1h\",\"4h\") 才算 atr_rank_ds；额外挂 features[\"er\"]、features[\"er_rank\"]、features[\"pathgeom\"]（异常置 None）、features[\"lag_bars\"]",
+            "location": "regime/classify.py:327-349"
+          },
+          {
+            "name": "regime_history 落库与确认回写",
+            "what": "raw_state 列存原始判定，state 列被确认层折叠覆盖；两步合成单事务提交",
+            "detail": "upsert_states 写入时 state 与 raw_state 同值；set_confirmed 只 UPDATE state 列；collector 用 commit=False 合并两次写入，消灭“raw 已可见、确认未落”的中间窗口",
+            "location": "regime/storage.py:395-424；collector.py:625-665"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "查询时刻",
+            "value": "2026-08-06 09:34 JST（库：/Users/luoyingdong/Documents/VVV_Trade/data/market.db，只读）",
+            "how": "date + sqlite3 mode=ro"
+          },
+          {
+            "name": "regime_history 总行数",
+            "value": "238,557 行 / 74 个 symbol / 3 个 tf（1h 181,924；4h 46,070；1d 10,563）",
+            "how": "SELECT count(*), count(DISTINCT symbol), count(DISTINCT tf) FROM regime_history"
+          },
+          {
+            "name": "版本一致性",
+            "value": "100% 为 (v3.1, a8) 单一组合，无混版行",
+            "how": "SELECT version, audit_version, count(*) FROM regime_history GROUP BY 1,2"
+          },
+          {
+            "name": "覆盖区间",
+            "value": "1h 2026-01-10 16:00 → 2026-08-05 23:00 UTC；4h 2025-09-18 → 2026-08-05 20:00；1d 2022-09-21 → 2026-08-05",
+            "how": "SELECT tf, datetime(max(ts)/1000,'unixepoch'), datetime(min(ts)/1000,'unixepoch') GROUP BY tf"
+          },
+          {
+            "name": "确认态分布（state 列）",
+            "value": "range 113,085（47.40%）｜high_vol_chop 32,782（13.74%）｜trend_down 31,390（13.16%）｜squeeze 31,022（13.00%）｜trend_up 30,278（12.69%）",
+            "how": "GROUP BY state"
+          },
+          {
+            "name": "原始态分布（raw_state 列）",
+            "value": "range 124,712（52.28%）｜trend_down 30,649（12.85%）｜trend_up 29,389（12.32%）｜squeeze 28,469（11.93%）｜high_vol_chop 25,338（10.62%）",
+            "how": "GROUP BY raw_state"
+          },
+          {
+            "name": "迟滞改写率（state<>raw_state）",
+            "value": "全库 30,061 / 238,557 = 12.60%；1h 12.29%、4h 13.72%、1d 13.09%",
+            "how": "SELECT sum(state<>raw_state), count(*) …（分 tf 再 GROUP BY tf）"
+          },
+          {
+            "name": "迟滞的净效果",
+            "value": "range 被压缩 4.88 个百分点（52.28%→47.40%），其余四态全部被放大，high_vol_chop 增幅最大 +3.12pp（10.62%→13.74%）",
+            "how": "raw_state 与 state 两份分布相减"
+          },
+          {
+            "name": "窗深满窗率（win = 400）",
+            "value": "1h 87.64%（159,440/181,924）｜1d 63.00%｜4h 57.43%",
+            "how": "sum(json_extract(features,'$.win')>=400)/count(*) GROUP BY tf"
+          },
+          {
+            "name": "窗深达 264 根率（250 分位窗 + ATR14）",
+            "value": "1h 93.01%｜4h 74.76%｜1d 72.02%",
+            "how": "sum(json_extract(features,'$.win')>=264)/count(*) GROUP BY tf"
+          },
+          {
+            "name": "win<200 占比（direction 缺 EMA200 腿的行）",
+            "value": "全库 7.61%；1d 23.26%、4h 16.46%、1h 4.46%",
+            "how": "sum(json_extract(features,'$.win')<200)/count(*)"
+          },
+          {
+            "name": "warmup=true 占比（可用历史 < 280 根）",
+            "value": "全库 29,571 行 = 12.40%；1d 29.04%、4h 27.43%、1h 7.62%",
+            "how": "sum(json_extract(features,'$.warmup')=1)/count(*)"
+          },
+          {
+            "name": "影子字段非空率",
+            "value": "margin 100.00%｜pathgeom 的 freq/tau 各 97.76%｜atr_ds 40.02%（只有 session_aware 的 1h/4h 才算）",
+            "how": "sum(json_extract(features,'$.<key>') IS NOT NULL)/count(*)"
+          },
+          {
+            "name": "各状态置信度（min/avg/max，按 state 列）",
+            "value": "squeeze 0.31/0.886/1.00｜high_vol_chop 0.32/0.871/1.00｜range 0.25/0.688/1.00｜trend_up 0.29/0.675/1.00｜trend_down 0.26/0.670/1.00",
+            "how": "GROUP BY state, min/avg/max(confidence)"
+          },
+          {
+            "name": "margin<0.15（按 raw_state，正确口径）",
+            "value": "high_vol_chop 100.00%（上限 0.146）｜squeeze 92.78%（上限 0.150）｜trend_down 59.10%｜trend_up 56.48%｜range 54.90%（上限 0.600）",
+            "how": "GROUP BY raw_state, sum(margin<0.15)/count(*), max(margin)"
+          },
+          {
+            "name": "m_near 分布（按 raw_state）",
+            "value": "trend_up/trend_down 100% exit_trend；squeeze 89.4% exit_squeeze、10.6% to_trend；high_vol_chop 84.5% to_range、15.5% to_trend；range to_trend 36.9%、to_squeeze 33.2%、to_chop 29.9%",
+            "how": "GROUP BY raw_state, json_extract(features,'$.m_near')"
+          },
+          {
+            "name": "事件门槛可作用面",
+            "value": "instruments.json 共 74 品种：us_stock_perp 61、crypto 7、commodity 5、intl_stock_perp 1；只有 61 个 us_stock_perp 会取事件窗。earnings 表 602 行 / 50 个 symbol，最远财报日 2026-09-24",
+            "how": "instruments.json 按 class 计数；SELECT count(*), count(DISTINCT symbol), max(ts) FROM earnings"
+          }
+        ],
+        "gotchas": [
+          "**state 列不是判定结果，raw_state 才是**。classify() 输出的原始态写在 raw_state；state 列被 confirm_states 的迟滞折叠覆盖。全库 12.60% 的行两者不同。任何“按状态统计”都必须先声明用的是哪一列。",
+          "**features 里的 margin / m_near 是对 raw_state 算的，不是对 state 算的**。按 state 列分组会得到自相矛盾的结果——实测 high_vol_chop（state）里有 1,729 行 m_near=exit_trend，只有按 raw_state 分组才严格自洽。dashboard.py:266 已用 margin_basis=\"raw\" 标注，agent.py:155 也会明说“margin 相对原始态而非当前确认态”。",
+          "**margin 的量纲上限按状态不同，跨状态不可比**。high_vol_chop 的 to_range = atr_rank − 0.85，天然 ≤0.15（实测上限 0.146，100% 的行 <0.15）；squeeze 的 exit_squeeze = min(0.15−bbw, 0.30−atr) 同样 ≤0.15（实测上限 0.150）。所以“margin<0.15 = 边界过渡中”这条读法对这两个态几乎恒真、没有区分度，只在 range 与 trend 上才有信息量。",
+          "**high_vol_chop 的标签只说“趋势条件未齐”，不代表无序、也不代表方向未证**。代码注释明写：截至 2026-08-05 该态 chop_freq 均值比 range 还低 3.28%、中位数低 9.16%；且 35.45% 的该态行 |dir|>=0.30 已通过，只是 ER 腿没过。别把它当“混乱态”解读。",
+          "**squeeze / high_vol 的判定字面量在两处**：真判定在 regime/features/volatility.py:129-130（硬编码 0.15/0.30/0.85），regime/classify.py:86-88 的 SQUEEZE_BBW/SQUEEZE_ATR/HIGHVOL_ATR 只是给 margin 用的镜像。改阈值必须两处同步，否则 margin 与判定会对不上。",
+          "**atr() 是 SMA-ATR(14)，不是 Wilder RMA**。实测 BTC 1h 末根差 9.9%、中位 9.3%、P90 24.0%，经分位吸收后仍会翻转部分 squeeze/high_vol 布尔。把阈值迁到 TradingView 等 Wilder 实现时必须换算。",
+          "**direction 在 len(df)<200 时权重重归一，不是按 0 计入**（v2 起）。这是为了不让短历史品种被系统性压低趋势判定概率。今天实测受影响的行占 7.61%（1d 23.26% / 4h 16.46% / 1h 4.46%）。",
+          "**事件门槛只对 us_stock_perp 生效，且只对 squeeze→趋势 这一条路径 +1 根**。intl_stock_perp（SKHY）不取事件窗；ETF 等无财报记录的美股会因 `not any(ewin)` 退回 event_win=None。high_vol_chop 永远 1 根，不受门槛。candidate 里的 event_win 只表示“在窗内”，gated 才表示“门槛真的被 +1 了”——只看 event_win 会对 range→trend 谎报。",
+          "**事件门槛是版本化先验，不是已验证结论**。本地诊断 z≈0.9 未达显著（样本仅 2 个财报周期），所以只取最小强度 +1 根，并预登记了“窗内转换样本 ≥100 时复评”。写说明书时不能表述成已证实的效应。",
+          "**earnings_event_windows 不做严格 as-of 过滤**。历史回填行的 known_at 为 NULL，函数不按 known_at 过滤——这是“财报日期提前数周公布”的记录在案先验（docs/AUDIT_CODEX_20260805.md），不是 bug。若日后要严格 point-in-time，收紧点只在 regime/storage.py:853 这一处。",
+          "**事件窗按 ET 日历日序数比较，含第 0 天**（v3.1 修复）。旧的 UTC 毫秒严格比较会把财报当天整天排除在窗外——恰是最需要门槛的一天；且固定 240h 窗跨 DST 会漂移 1 小时。",
+          "**FEATURE_WINDOW=400 必须入库与面板同值**。历史攒过 400 根后，两边用不同窗长会让同一根 bar 给出两个 atr_rank（分位与去季节化因子都对窗长敏感）。collector 另外多读 399 根 pre-roll 只作上下文，min_bars=90 保证不为它们产出状态行。",
+          "**升版即重算，靠的是谓词不是删表**。state_ts_set 只把 (version, audit_version) 都匹配的行算“已存在”，旧行被判缺失后 upsert 原地覆盖。但重算窗是 10000+399 根——窗外的旧版本行永远重算不到，collector.py:630-640 会把这种行数报进 errors（“混版风险”）。今天实测无混版行。",
+          "**features JSON 只是模块产出的子集**。vol_accel_rank、atr、atr_pct_of_price、vol_rank、breakout、swing_high、swing_low、pathgeom 自带的 lag 都不入库，只存在于面板/Hermes 的实时对象里；快照里的 lag 键是 LAG_BARS[\"slowest\"]=125，不是 pathgeom 的 60。想追加任何一项都必须升 AUDIT_VERSION。",
+          "**src_round 不是逐根 provenance**。它是写这一行时 collector 本轮的 fetch 来源，不是该状态 400 根计算窗内每根 K 线的来源；历史重算时窗里可能混着旧源的行。",
+          "**vwap.py 与 crsi.py 是纯展示层，连审计快照都不进**。vwap 的证据等级是从业者经验（预研未覆盖），按影子纪律只做展示与 Hermes 上下文；要入库须升 AUDIT_VERSION。crsi 的背离必须用 confirmed_i = i + piv_len，用枢轴根 i 会有 5 根前视。",
+          "**pathgeom 的去趋势用一次线性 OLS，不是 regime-spectrum 正文的 Theil-Sen**（venv 无 scipy）。引用其 t_freq≈8.2 标定值时要知悉这个残差形状偏差。窗口 120 也低于其推荐窗。",
+          "**pct_rank 在有效值不足 2 个时返回 0.5**（regime/features/utils.py:12-13）——这是全系统里唯一一处“未知塌成中性”的口径，与别处“宁缺毋滥返回 None”的纪律相反，读分位时要留意。",
+          "**阈值三件套（0.60/0.30/0.10）与规则树结构至今未经回测校准**，代码注释里明写是“先验起点”。说明书不应把它们描述成已优化的参数。"
+        ]
+      },
+      {
+        "layer": "波动率栈（3d 持仓前端 / 9d 中段 / 30d 制度层 / 事件轴 + VRP、期限结构双速、RV3/RV30）",
+        "summary": "波动率栈按**期限**分四层，四层各有独立数据源、独立表、独立分位规则，代码里从不混拼。3d 持仓前端有两条腿：加密/商品走币安期权链自合成（regime/binance_opt_iv.py → opt_iv_near，24/7，30 分钟一轮），美股走 moomoo 期权链 ATM（regime/stock_iv_term.py → stock_iv_term.iv3，RTH 每小时）；两条腿今天都只有 1 天历史，**不算分位**（代码里根本没有 rank 字段）。9d 只存在于 stock_iv_term.iv9，无分位、无独立判定消费者——它唯一的实际用途是给 iv3 插值到 3.0 天当远腿。30d 制度层是唯一分位可用的一层：加密 DVOL（Deribit，371 日）、美股个股 IV（moomoo 3304，2023-06-26 起、最长 781 交易日）、CBOE 指数 VIX/VXN/RVX/VIX9D/VIX3M（VIX 自 1990）；CBOE 个股 iv30 只是影子字段（deriv.iv30，5.3 天史，分位恒空）。事件轴是 earnings 表（moomoo 财报日历），它有两个身份：给 30d 分位做**财报条件分位**（同 in30 状态内比），以及给 RULES_VERSION v3.1 确认层做事件门槛（事件窗内 squeeze→趋势 +1 根）。VRP 只在 moomoo 口径下存在（同一行 iv−hv）；期限结构\"双速\"指 VIX9D/VIX 与 VIX/VIX3M 两条指数比值，与个股 iv3−iv30 的\"倒挂\"是两回事。",
+        "items": [
+          {
+            "name": "opt_iv_near（表）",
+            "what": "3d 持仓前端层 · 加密+贵金属：币安期权链自合成的近端 ATM IV，24/7。主键 (symbol, ts)；列 iv/tenor_days/method/n_expiries/index_price。tenor_days 必须随值落库——期限逐日漂移，不记期限的序列没有分位意义",
+            "location": "regime/storage.py:88（建表）；regime/storage.py:773 upsert / :786 get",
+            "detail": "当前 312 行 / 8 品种 / 39 轮，2026-08-05 03:01:02Z → 2026-08-06 00:09:31Z（UTC）"
+          },
+          {
+            "name": "binance_opt_iv.TARGET_DAYS",
+            "what": "近端 IV 的目标常数期限。两个到期夹住目标 → 总方差线性插值（σ²T 线性，method='interp'）；夹不住 → 取距目标最近的到期，method='nearest'、tenor_days 记实际期限",
+            "location": "regime/binance_opt_iv.py:35",
+            "detail": "当前值 3.0（天）"
+          },
+          {
+            "name": "binance_opt_iv.K_NEAR_STRIKES",
+            "what": "ATM 邻域宽度：取距指数价最近的 K 个不同距离档，其上全部有效 call/put 报价进中位数（对称行权价共享距离档一并纳入）",
+            "location": "regime/binance_opt_iv.py:37",
+            "detail": "当前值 5"
+          },
+          {
+            "name": "binance_opt_iv.DUP_PLACEHOLDER",
+            "what": "占位值簇剔除阈值：同一到期内完全相同的 markIV 出现 ≥N 次即判为平台钉住的占位报价，整簇剔除；**在选邻域之前**执行",
+            "location": "regime/binance_opt_iv.py:38",
+            "detail": "当前值 3"
+          },
+          {
+            "name": "binance_opt_iv.MIN_TENOR_DAYS",
+            "what": "距到期太近的合约临近结算 IV 不稳，整条剔除",
+            "location": "regime/binance_opt_iv.py:36",
+            "detail": "当前值 0.2（天 = 4.8 小时）"
+          },
+          {
+            "name": "binance_opt_iv.UNDERLYINGS",
+            "what": "近端 IV 覆盖的 8 个标的：贵金属 XAU/XAG + 加密 BTC/ETH/SOL/BNB/XRP/DOGE",
+            "location": "regime/binance_opt_iv.py:29-34",
+            "detail": "XAU-USDT、XAG-USDT、BTC-USDT、ETH-USDT、SOL-USDT、BNB-USDT、XRP-USDT、DOGE-USDT"
+          },
+          {
+            "name": "synth_near_iv()",
+            "what": "纯函数：期权链 → 近端 ATM IV。每到期三步（占位簇剔除 → ATM 邻域取全部报价 → 取中位数），再按 TARGET_DAYS 插值或取最近到期",
+            "location": "regime/binance_opt_iv.py:85",
+            "detail": "返回 {iv(百分比), tenor_days, method, n_expiries}"
+          },
+          {
+            "name": "stock_iv_term（表）",
+            "what": "3d/9d/30d 三层美股个股 IV 期限曲线（moomoo 期权链 ATM）。主键 (symbol, ts)；列 iv3/t3/iv9/t9/iv30/t30——每个期限的**实际**天数与 IV 成对存储",
+            "location": "regime/storage.py:83（建表）；regime/storage.py:750 upsert / :764 get；_TERM_COLS 在 regime/storage.py:747",
+            "detail": "当前 345 行 / 56 品种 / 8 轮，2026-08-05 13:33:45Z → 19:49:19Z；iv3 非空 331 行、iv9 非空 305 行、iv30 非空 280 行"
+          },
+          {
+            "name": "stock_iv_term.TARGETS",
+            "what": "三个目标期限（日历日）。每个目标取距离最近的到期（pick_expiries），实际期限如实记入 t3/t9/t30",
+            "location": "regime/stock_iv_term.py:20",
+            "detail": "当前值 (3, 9, 30)；今日实测 t3=2、t9=9、t30=30（3d 层实际是 2 天）"
+          },
+          {
+            "name": "stock_iv_term.BUILD_BATCH / PACE / MAX_SNAPSHOT",
+            "what": "期权链按 ET 日缓存（链盘中不变、到期 distance 每日变），跨轮分批建链 + 限频节流；盘中每轮只做批量快照",
+            "location": "regime/stock_iv_term.py:31 / :26 / :21",
+            "detail": "BUILD_BATCH=12（单轮建链品种上限）、PACE=0.7 秒/次、MAX_SNAPSHOT=300 代码/次（官方 400）"
+          },
+          {
+            "name": "atm_pair() + fetch_term()",
+            "what": "ATM 取同行权价 call/put 的 option_implied_volatility 均值；单腿缺失时如实退化为有效单腿，并在内存 legs 标记 {\"3\":1|2,...} 交 collector 告警",
+            "location": "regime/stock_iv_term.py:49 / :135",
+            "detail": "legs 只在内存传递，不改表结构；collector.py:239-245 打 warning"
+          },
+          {
+            "name": "dvol（表）",
+            "what": "30d 制度层 · 加密：Deribit DVOL 隐含波动率指数日线收盘，仅 BTC/ETH。主键 (currency, ts)",
+            "location": "regime/storage.py:24（建表）；regime/data.py:160 fetch_dvol；regime/storage.py:349 upsert / :361 get",
+            "detail": "BTC 371 行、ETH 371 行，2025-07-31 → 2026-08-05；最新 BTC 34.66 / ETH 48.04。fetch_dvol 用 df.iloc[:-1] 丢掉未收线当日（同 fetch_ohlcv 纪律）"
+          },
+          {
+            "name": "stock_vol（表）",
+            "what": "30d 制度层 · 美股主线：moomoo 协议 3304 日频历史 IV/HV/underlying_price。**source 进主键**——不同厂商口径绝不混算分位",
+            "location": "regime/storage.py:72（建表）；regime/storage.py:638 upsert / :672 get",
+            "detail": "当前 47,248 行 / 63 品种 / source 只有 'moomoo'，2023-06-26 → 2026-08-05；每品种 289~781 交易日（57 个品种 781 日），63 个品种全部 ≥252"
+          },
+          {
+            "name": "moomoo_iv.settled_only()",
+            "what": "滤掉尚未结算的当日行——与\"未收盘 K 线双轨制\"同一条纪律。用 NYSE 日历真实收盘时刻（含半日市 13:00），不硬编码 16:00；周末/休市日的行防御性丢弃",
+            "location": "regime/moomoo_iv.py:176",
+            "detail": "传入的 now 强制转 ET 再比较；实测 3304 会返回随盘滚动的当日行（47.238 vs 3303 实时 47.152）"
+          },
+          {
+            "name": "moomoo_iv.DATA_FLOOR / MAX_SPAN_DAYS / PACE / SOURCE",
+            "what": "moomoo 服务端统一保留边界、单次请求跨度上限、限频节流、口径标识",
+            "location": "regime/moomoo_iv.py:22 / :20 / :19 / :17",
+            "detail": "DATA_FLOOR='2023-06-26'、MAX_SPAN_DAYS=360（接口上限 364）、PACE=0.6 秒/次（官方 60 次/30 秒的一半）、SOURCE='moomoo'"
+          },
+          {
+            "name": "stock_vol_live（表）",
+            "what": "盘中实时 IV 快照（协议 3303），**与结算序列严格分表**（同 live_bars 与 ohlcv 的关系）。自带 pre_iv=昨日结算值，以及 call/put 成交量与 pc_volume_ratio、厂商自算的 vendor_iv_rank/vendor_iv_pct（仅参考展示，绝不混用）",
+            "location": "regime/storage.py:93（建表）；regime/moomoo_iv.py:97 fetch_live；regime/storage.py:799 upsert / :819 get",
+            "detail": "当前 6,743 行 / 63 品种，2026-08-04 15:58:54Z → 2026-08-05 19:59:15Z"
+          },
+          {
+            "name": "usvol（表）",
+            "what": "30d 制度层 · CBOE 指数长历史锚：历史日线 CSV（权威）+ 延迟报价 JSON（约 15 分钟延迟，补当日临时值）。时间格统一为交易日 00:00 UTC",
+            "location": "regime/storage.py:38（建表）；regime/usvol.py:22 VOL_INDEXES、:31 backfill_index_history、:78 fetch_index_quote",
+            "detail": "VIX 9,244 行（1990-01-02 起）/ VXN 4,251（2009-09-14）/ RVX 4,242（2009-09-16）/ VIX3M 4,245（2009-09-18）/ VIX9D 3,919（2011-01-04），全部至 2026-08-05"
+          },
+          {
+            "name": "deriv.iv30（CBOE 个股影子字段）",
+            "what": "CBOE delayed_quotes 的现成 iv30 字段，写进 deriv 宽表。**只是口径对比的影子值**，仅在 moomoo 序列缺失时才顶上（_iv30_fields）",
+            "location": "regime/usvol.py:94 fetch_stock_iv30；collector.py:749-756 写入；dashboard.py:629 _iv30_fields",
+            "detail": "当前 3,361 行 / 29 品种，2026-07-31 16:28:47Z → 2026-08-06 00:29:49Z（跨度约 5.3 天）"
+          },
+          {
+            "name": "earnings（表）",
+            "what": "事件轴：moomoo 财报日历。主键 (symbol, ts, source)；列 pub_type（BEFORE/AFTER/REGULAR）、period、known_at。known_at 取**首见时刻**、重写不刷新（point-in-time 语义）",
+            "location": "regime/storage.py:100（建表）；regime/moomoo_iv.py:254 fetch_earnings（接口单次窗口上限 7 天）；regime/storage.py:829 upsert",
+            "detail": "当前 602 行 / 50 品种，2023-07-14 → 2026-09-24；pub_type 分布 AFTER 420 / BEFORE 143 / REGULAR 39；known_at 非空仅 23 行（579 行为历史回填 NULL）；未来行（≥2026-08-06）14 行 / 14 品种"
+          },
+          {
+            "name": "prune_stale_future_earnings()",
+            "what": "未来窗内以最新日历为权威：删掉本批品种在窗内、但不在最新日历里的行（财报改期）。历史行永不触碰。双重 fail-safe：fresh 为空整体跳过；只清 fresh 里出现过的品种",
+            "location": "regime/storage.py:892；collector.py:367-373 调用（窗口 = 今天 ~ 今天+90 天）",
+            "detail": "宁可残留不可误删——删除不可恢复"
+          },
+          {
+            "name": "earnings_proximity()",
+            "what": "距最近财报的**日历天数** {days: ±N, ts}，超出 horizon 返回 None。正数=还有 N 天，负数=已过 N 天。必须比 **ET 日历日**而非时间戳（否则整条标注系统性偏移一日）",
+            "location": "regime/storage.py:929",
+            "detail": "horizon 默认 10；dashboard._stock_iv_block（dashboard.py:423）用默认值调用"
+          },
+          {
+            "name": "earnings_event_windows()",
+            "what": "逐 bar 判定：该 bar 的 ET 日起 horizon_days 个日历日内是否有财报 → list[bool]。给确认层事件门槛用。日差语义 0 ≤ (财报日 − bar ET 日) ≤ horizon，**含第 0 天**",
+            "location": "regime/storage.py:853；调用点 collector.py:647、dashboard.py:164",
+            "detail": "horizon_days 默认 10，两个调用点都用默认值；不按 known_at 过滤（记录在案的先验，非疏漏）"
+          },
+          {
+            "name": "_confirm_need() 事件门槛",
+            "what": "RULES_VERSION v3 的 A1 事件感知确认门槛：事件窗内（未来 10 日历日有财报）**从 squeeze 进趋势态 +1 根**。冲击态 high_vol_chop 不受门槛",
+            "location": "regime/classify.py:186；RULES_VERSION 在 regime/classify.py:45",
+            "detail": "基础需求 range=3 根、其余=2 根、high_vol_chop=1 根；RULES_VERSION='v3.1'、AUDIT_VERSION='a8'（classify.py:58）"
+          },
+          {
+            "name": "IV_RANK_WIN / IV_RANK_MIN",
+            "what": "30d 个股 IV 的**原始分位**窗与样本下限。满窗按 252 交易日算；样本不足一律不给分位（新股宁可空着也不给假统计量）",
+            "location": "dashboard.py:379 / dashboard.py:380",
+            "detail": "IV_RANK_WIN=252（交易日≈1 年）、IV_RANK_MIN=120；rank_raw = (win < last).mean()"
+          },
+          {
+            "name": "EARN_WINDOW_D / EARN_COND_MIN / EARN_COND_WIN",
+            "what": "**财报条件分位**三常量：只与同一财报状态（未来 N 天内有无财报）的历史日比。窗内样本不足则回退 rank_raw，并由 rank_kind 标注口径",
+            "location": "dashboard.py:527 / :528 / :533；算法在 dashboard.py:536 _earn_conditioned_rank",
+            "detail": "EARN_WINDOW_D=30（IV30 的计价窗口）、EARN_COND_MIN=60（同状态样本下限）、EARN_COND_WIN=504（约 2 年 = 8 个财报周期，版本化先验）"
+          },
+          {
+            "name": "rank_kind 字段",
+            "what": "让消费方知道 rank 到底是什么：'cond'=同财报状态内（2 年窗）、'raw'=普通 252 日回退、'hourly'=CBOE 影子的小时重采样短窗分位。回退时若仍标\"同财报状态内\"就是谎称口径",
+            "location": "dashboard.py:405-407（stock）、dashboard.py:654（CBOE）；Hermes 侧标签在 regime/agent.py:346",
+            "detail": "cond / raw / hourly 三值"
+          },
+          {
+            "name": "_stock_iv_block()",
+            "what": "30d 个股 IV 卡装配：last/rank/rank_raw/rank_kind/earn_in30/earnings_days/vrp/vrp_rank/n/win/days/asof/age_days/stale/live/series/hv_last。**仅显示层**——个股 IV 进规则层需并入 RULES_VERSION v2 并过回测",
+            "location": "dashboard.py:383",
+            "detail": "stale 判据 age_days > 4.0（结算日频 + 周末，>4 天即断供）"
+          },
+          {
+            "name": "_live_iv_block()（预览分位）",
+            "what": "盘中实时 IV 与结算值分列。给三样：当前实时值、相对昨收变动、**预览分位**（打 preview:True 标记）。预览分位的财报状态按**今天的 ET 日历日**算，不沿用最后结算日的状态",
+            "location": "dashboard.py:453",
+            "detail": "新鲜度闸 30 分钟（30*60_000 ms）；无财报记录的 ETF/商品代理退回结算全集 tail(IV_RANK_WIN) 比较，需 len ≥ IV_RANK_MIN"
+          },
+          {
+            "name": "VRP（方差风险溢价）",
+            "what": "VRP = IV − HV，取 stock_vol **同一行**的 iv 与 hv 相减（同源同口径，这是它比\"IV 减自算 RV30\"可靠的地方）。用途：低 ATR 分位+高 VRP=脆弱的安静；高 ATR 分位+负 VRP=已实现波动已超期权定价",
+            "location": "dashboard.py:409-420；Hermes 输出在 regime/agent.py:364-367",
+            "detail": "vrp_last = spread.iloc[-1]（对 iv/hv 双非空行 dropna 后取末行）；vrp_rank = (spread.tail(252) < last).mean()，门槛 len(spread) >= IV_RANK_MIN(120)。**只在 moomoo 口径（美股 + GLD/SLV 代理商品）存在**，加密无 VRP"
+          },
+          {
+            "name": "_term_structure()（期限结构双速）",
+            "what": "指数 IV 期限结构：fast=VIX9D/VIX（9 日 vs 30 日，最急的一端）、slow=VIX/VIX3M（30 日 vs 3 月，制度端），另有 legacy=VIX9D/VIX3M 保旧字段 ts_ratio 兼容。两条**不合成单一读数**——文献已知失败模式（倒挂抓 2008/2020 式冲击、错过 2022 式慢跌）本身就是可用信息",
+            "location": "dashboard.py:573",
+            "detail": "ratio 用最新值（可含未确权延迟报价，settled=False 标注）；rank 的参照集**只用已确权行**（ts ≤ usvol_csv_max_*），且要求 ≥252 样本否则给 None；inverted = ratio > 1.0；both_inverted = fast.inverted and slow.inverted。**仅 us_stock_perp 出，商品不给**"
+          },
+          {
+            "name": "个股期限倒挂（term_stock.slope / inverted）",
+            "what": "个股期限曲线卡：slope = iv3 − iv30（原始差，未做期限归一），inverted = iv3 > iv30。与上面的 VIX 指数\"期限结构双速\"是两个不同的量，名字容易混",
+            "location": "dashboard.py:743-752",
+            "detail": "新鲜度闸 2 小时（2*3600_000 ms）；无历史 → 无分位"
+          },
+          {
+            "name": "RV30（已实现波动率，卡片口径）",
+            "what": "1d 收盘 close-to-close 对数收益的 30 根滚动标准差 × sqrt(365)，再 ×100。加密卡与美股卡同一口径，与 IV 同图对照出剪刀差 spread",
+            "location": "dashboard.py:347（加密）/ dashboard.py:706（美股）；实现在 regime/features/volatility.py:37 realized_vol",
+            "detail": "取 ohlcv 1d limit=1200，要求 ≥40 根；bars_per_year=365"
+          },
+          {
+            "name": "RV3（持仓前端 RV 对照）",
+            "what": "1h 收盘的 **72 根**滚动标准差 × sqrt(24×365)，再 ×100。72 根 1h 窗与 3d IV 期限对齐——RV30 对 1-3 天持仓\"太慢\"",
+            "location": "dashboard.py:308 _rv3_pairs",
+            "detail": "取 ohlcv 1h limit=2472，要求 ≥80 根；已知口径缺陷：美股永续周末价格近似冻结，含周末的窗被稀释（与 RV30 同一已知问题）"
+          },
+          {
+            "name": "spread / spread3（剪刀差）",
+            "what": "spread = 30d IV − RV30（美股优先用个股 IV，退化到指数时 spread_src 标 'index'；加密用 DVOL）；spread3 = 3d 近端 IV − RV3（美股用期限曲线 iv3，加密/商品用币安近端 IV）——同期限对照，回答\"这笔 1-3 天仓的保险贵不贵\"",
+            "location": "dashboard.py:367-375（加密）/ dashboard.py:766-791（美股/商品）",
+            "detail": "spread_src 字段必须随值输出，否则\"个股 IV−RV\"会被标成\"指数 IV−RV\""
+          },
+          {
+            "name": "policy/volnote.py 常量组",
+            "what": "policy 层波动率与事件风险标注（展示文案层，不读库、不改 policy 动作、不拿缺失值造占位）",
+            "location": "regime/policy/volnote.py:12-19",
+            "detail": "VOLNOTE_VERSION='vol1'、HOLDING_DAYS=3、DAYS_PER_YEAR=365、TARGET_TENOR_DAYS=3.0、IV30_HIGH_RANK=0.85（policy §6.5 极端环境门槛）、EARNINGS_WINDOW_DAYS=3（财报落入计划持仓窗）、EARNINGS_NEAR_DAYS=10（财报临近最远边界）。全部标注为\"起步值，待校准\""
+          },
+          {
+            "name": "interpolate_iv_to_tenor()",
+            "what": "policy 侧把 iv3(t3) 与 iv9(t9) 按总方差线性插值到 TARGET_TENOR_DAYS；**期限不能夹住目标时不外推**，返回 None 后退回 near 腿并标 method='nearest'",
+            "location": "regime/policy/volnote.py:30；调用点 dashboard.py:1555",
+            "detail": "目标 3.0 天；插值成功记 method='interp', n_expiries=2，失败退化记 method='nearest', n_expiries=1、tenor_days=实际 t3"
+          },
+          {
+            "name": "check_stop_vs_iv()（止损宽度校验）",
+            "what": "比较结构止损距离与近端 IV 对应**实际期限**的预期波动：expected_move_pct = iv3 × sqrt(holding_days/365)，ratio = stop_dist_pct / expected_move_pct",
+            "location": "regime/policy/stopcheck.py:89",
+            "detail": "STOPCHECK_VERSION='stop1'；ratio<1.0 → 'too_tight'、<1.5 → 'tight'、否则 'ok'。常量：TOO_TIGHT_RATIO=1.0(:18)、TIGHT_RATIO=1.5(:19)、HOLDING_DAYS_DEFAULT=3.0(:16)、DAYS_PER_YEAR=365.0(:17)、ZONE_BUFFER_ATR=0.25(:14)、MAX_STOP_DIST_ATR=3.0(:15)"
+          },
+          {
+            "name": "_overview_vol_inputs()",
+            "what": "总览页轻量装配 policy 波动率输入：美股走 stock_iv_term（2 小时新鲜度闸 + 插值到 3.0d）+ _stock_iv_block 取 iv30/iv30_rank + _policy_earnings_proximity；加密/商品走 _xopt_block；BTC/ETH 另取 DVOL 分位",
+            "location": "dashboard.py:1523",
+            "detail": "OVERVIEW_TERM_FRESH_SEC=2*3600(dashboard.py:58)、OVERVIEW_DVOL_RANK_WIN=365(:59)、OVERVIEW_DVOL_RANK_MIN=120(:60)"
+          },
+          {
+            "name": "_policy_earnings_proximity()",
+            "what": "policy 层消费 pub_type 修正财报当日的\"已发生\"边界：BEFORE 过 ET 09:30 记作 days=-1，AFTER 过 ET 16:00 记作 -1，pub_type 缺失则标 uncertain=True",
+            "location": "dashboard.py:1484",
+            "detail": "EARNINGS_BEFORE_CUTOFF_MIN_ET=570（=09:30，dashboard.py:68）、EARNINGS_AFTER_CUTOFF_MIN_ET=960（=16:00，dashboard.py:69）；horizon 默认 EARNINGS_NEAR_DAYS=10"
+          },
+          {
+            "name": "stock_vol_latest_ranks()",
+            "what": "Hermes 横截面用的全品种最新 IV 与分位，返回 {symbol: (iv, rank|None, n, kind)}。**与面板同口径**——有财报记录且同状态样本足够走条件分位，否则退回 win 日分位",
+            "location": "regime/storage.py:963；调用点 regime/agent.py:708",
+            "detail": "默认参数 win=252、min_n=120、cond_win=504、earn_window_d=30、cond_min=60（与 dashboard 的 IV_RANK_WIN/MIN、EARN_COND_WIN/EARN_WINDOW_D/EARN_COND_MIN 数值一一对应，但是**各自独立写死**的字面量，不是 import 共享）"
+          },
+          {
+            "name": "pct_rank()",
+            "what": "全栈分位的统一定义：当前值在最近 window 个**有效值**（dropna 后）中的严格小于比例；有效值 <2 时返回 0.5",
+            "location": "regime/features/utils.py:8",
+            "detail": "(s < s.iloc[-1]).mean()；DVOL 分位用 pct_rank(dv['dvol'], 365)（dashboard.py:343），其余 IV 分位用手写的同式表达式"
+          },
+          {
+            "name": "采集节奏（_should 节流键）",
+            "what": "四条波动率管线的节流与门禁",
+            "location": "collector.py:82 _should；:168 / :201 / :736 / :761",
+            "detail": "binance_opt_iv_last=1800 秒（30 分钟，24/7）；stock_iv_term_last=3600 秒 + 仅 RTH + OpenD 存活；usvol_last_fetch=1800 秒（CBOE delayed_quotes 属 ToS 灰区，整模块限频）；moomoo_iv_last_fetch=3600 秒（日频 IV + 期权流 + 财报日历）；sync_moomoo_iv_live **每轮都跑不节流**，但仅 RTH 内"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "查询时刻",
+            "value": "2026-08-06 09:34 JST（= 2026-08-06 00:34 UTC）",
+            "how": "date +'%Y-%m-%d %H:%M:%S %Z'，其后所有 DB 数字均为该时刻只读快照"
+          },
+          {
+            "name": "opt_iv_near 总量",
+            "value": "312 行 / 8 品种 / 39 轮",
+            "how": "SELECT COUNT(*), COUNT(DISTINCT ts) FROM opt_iv_near"
+          },
+          {
+            "name": "opt_iv_near 覆盖窗",
+            "value": "2026-08-05 03:01:02Z → 2026-08-06 00:09:31Z（约 21 小时）",
+            "how": "MIN(ts)/MAX(ts) 转 datetime"
+          },
+          {
+            "name": "opt_iv_near 合成方法分布",
+            "value": "BTC/ETH/SOL/BNB/XRP 全部 39/39 interp（tenor 恒 3.0d）；XAU/XAG 全部 nearest（均值 2.31d）；DOGE 全部 nearest（均值 1.77d）",
+            "how": "GROUP BY symbol, SUM(method='interp'/'nearest'), AVG(tenor_days)"
+          },
+          {
+            "name": "最新一轮近端 IV（2026-08-06 00:09:31Z）",
+            "value": "BTC 29.44(3.0d/interp/11到期)、ETH 43.15(3.0d/interp/11)、SOL 45.84(3.0d/interp/3)、BNB 31.65(3.0d/interp/5)、XRP 39.57(3.0d/interp/2)、DOGE 46.75(1.33d/nearest/1)、XAU 27.67(1.87d/nearest/2)、XAG 46.13(1.87d/nearest/2)",
+            "how": "SELECT ... FROM opt_iv_near WHERE ts=(SELECT MAX(ts) FROM opt_iv_near)"
+          },
+          {
+            "name": "stock_iv_term 总量",
+            "value": "345 行 / 56 品种 / 8 轮，2026-08-05 13:33:45Z → 19:49:19Z",
+            "how": "SELECT COUNT(*), COUNT(DISTINCT symbol), COUNT(DISTINCT ts), MIN/MAX(ts)"
+          },
+          {
+            "name": "stock_iv_term 三层非空率",
+            "value": "iv3 331 行 / iv9 305 行 / iv30 280 行（分母 345）；按品种：iv3 覆盖 56 个、iv30 覆盖 53 个",
+            "how": "SUM(ivN IS NOT NULL)；GROUP BY symbol 计数"
+          },
+          {
+            "name": "stock_iv_term 实际期限",
+            "value": "t3=2、t9=9、t30=30（今日样本 MIN=MAX，无漂移）",
+            "how": "SELECT MIN(t3),MAX(t3),MIN(t9),MAX(t9),MIN(t30),MAX(t30) GROUP BY symbol"
+          },
+          {
+            "name": "美股品种覆盖率（3d 层）",
+            "value": "56 / 61 个 us_stock_perp 已建成 iv3",
+            "how": "instruments.json 类别计数（61 个 us_stock_perp）对比 stock_iv_term 品种数"
+          },
+          {
+            "name": "stock_vol（30d 美股主线）",
+            "value": "47,248 行 / 63 品种 / source 仅 'moomoo'，2023-06-26 → 2026-08-05",
+            "how": "GROUP BY source 聚合"
+          },
+          {
+            "name": "stock_vol 每品种历史深度",
+            "value": "最短 289 交易日、最长 781 交易日；781 日的有 57 个品种；63/63 品种 ≥252 且 ≥120",
+            "how": "子查询 GROUP BY symbol 后统计分布"
+          },
+          {
+            "name": "dvol（30d 加密）",
+            "value": "BTC 371 行、ETH 371 行，2025-07-31 → 2026-08-05；最新 BTC 34.66 / ETH 48.04",
+            "how": "GROUP BY currency；WHERE ts=MAX(ts)"
+          },
+          {
+            "name": "usvol（CBOE 指数）",
+            "value": "VIX 9,244（1990-01-02 起）/ VXN 4,251（2009-09-14）/ RVX 4,242（2009-09-16）/ VIX3M 4,245（2009-09-18）/ VIX9D 3,919（2011-01-04），全部至 2026-08-05",
+            "how": "GROUP BY idx"
+          },
+          {
+            "name": "earnings（事件轴）",
+            "value": "602 行 / 50 品种，2023-07-14 → 2026-09-24",
+            "how": "GROUP BY source"
+          },
+          {
+            "name": "earnings pub_type 分布",
+            "value": "AFTER 420 / BEFORE 143 / REGULAR 39",
+            "how": "GROUP BY pub_type"
+          },
+          {
+            "name": "earnings known_at 覆盖",
+            "value": "非空仅 23 行，NULL 579 行（96.2% 为历史回填、无 point-in-time 证据）",
+            "how": "SUM(known_at IS NOT NULL) / SUM(known_at IS NULL)"
+          },
+          {
+            "name": "未来财报存量",
+            "value": "14 行 / 14 品种，2026-08-10 → 2026-09-24",
+            "how": "WHERE ts >= strftime('%s','2026-08-06')*1000"
+          },
+          {
+            "name": "deriv.iv30（CBOE 个股影子）",
+            "value": "3,361 行 / 29 品种，2026-07-31 16:28:47Z → 2026-08-06 00:29:49Z（跨度约 5.3 天）",
+            "how": "WHERE iv30 IS NOT NULL 聚合"
+          },
+          {
+            "name": "stock_vol_live",
+            "value": "6,743 行 / 63 品种，2026-08-04 15:58:54Z → 2026-08-05 19:59:15Z",
+            "how": "COUNT/MIN/MAX 聚合"
+          },
+          {
+            "name": "stock_option_stat（期权流，纯采集不进判定）",
+            "value": "46,495 行 / 63 品种，2023-06-26 → 2026-08-05",
+            "how": "COUNT/MIN/MAX 聚合"
+          },
+          {
+            "name": "品种注册表构成",
+            "value": "74 个品种：us_stock_perp 61、crypto 7、commodity 5、intl_stock_perp 1；vol_proxy 仅 2 个（XAU→GLD、XAG→SLV）；vol_index 分布 VXN 43 / VIX 17 / RVX 1 / 无 13",
+            "how": "python3 读 instruments.json，Counter 统计"
+          }
+        ],
+        "gotchas": [
+          "**四层分位可用性完全不同，说明书必须逐层写死**：3d 层（opt_iv_near 约 21 小时史、stock_iv_term 8 轮）和 9d 层**没有分位、代码里也没有 rank 字段**，只能看绝对值与倒挂；30d 层里只有 moomoo stock_vol（≥120 日）、DVOL（≥120 点）、CBOE 指数（≥60 点）能算分位；CBOE 个股 iv30 影子值分位**恒空**（_rank_or_none 要求 ≥20 小时点且 span ≥7 天，当前只有约 5.3 天）。",
+          "**stock_iv_term 的 iv3 实际期限不是 3 天**：pick_expiries 取距目标最近的到期，今天实测全部品种 t3=2。所以\"3d\"是**目标**不是**实际**；policy 层靠 interpolate_iv_to_tenor 用 iv3(2d) 与 iv9(9d) 插值到 3.0d 才得到真正 3 天口径，插值失败时 method='nearest' 且 tenor_days=2，vol_notes 会改口说\"按实际期限 ~2.0d 计\"。展示卡的 slope=iv3−iv30 用的是**未归一的原始差**（t3=2 对 t30=30），不是同期限比较。",
+          "**两个不同的 RV30，名字一样**：卡片 RV30 = 1d 收盘 30 根 × sqrt(365)（dashboard.py:347/706）；而特征层的 rv30_annual_pct（regime/features/volatility.py:128）是**当前 timeframe 的 30 根**——1h 上就是 30 小时 RV、4h 上是 5 天 RV，bars_per_year 随 tf 变（regime/classify.py:17 BARS_PER_YEAR）。两者在 1h/4h 上根本不是同一个量，不可互相引用。",
+          "**VRP 只存在于 moomoo 口径**（美股 + GLD/SLV 代理商品），因为它要求同一行的 iv 与 hv 同源。加密没有 VRP——加密的 spread=DVOL−RV30、spread3=近端IV−RV3 是\"IV 减自算 RV\"，跨源、口径不同，绝不可当 VRP 用（Hermes 与面板的字段名也确实不同：vrp vs spread）。",
+          "**VRP 的两个细节容易读错**：① vrp_last 取的是 iv/hv **双非空**行 dropna 后的末行，hv 缺失时会回退到更早的交易日（tests/test_stock_vol.py:197 明确锁定这个行为），所以 vrp 的日期可能早于 iv 的日期；② 分位门槛判的是 `len(spread) >= IV_RANK_MIN`（全序列长度），而分位窗取的是 `spread.tail(252)`——门槛和窗口用的是两个不同的长度。",
+          "**\"期限结构\"在系统里有两个所指**：一是 _term_structure() 的 VIX 指数**双速斜率**（fast=VIX9D/VIX、slow=VIX/VIX3M，只对美股出，商品无），二是个股期限曲线的 iv3 vs iv30 倒挂（term_stock.inverted）。前者是市场环境的量、有分位（≥252 确权样本），后者是单只股票的量、无分位。文档里不加限定词写\"期限结构倒挂\"必然被误读。",
+          "**期限结构的 ratio 与 rank 用的不是同一个样本集**：ratio 用最新值（可能是尚未被 CSV 确权的盘中延迟报价，此时 settled=False、Hermes 打 ° 标），rank 的参照集只用 ts ≤ usvol_csv_max_* 的已确权行。同理 usvol 指数的 idx_last 与 idx_rank 也是这个双轨制。看到 settled=False 就要知道\"当前读数是临时值\"。",
+          "**分位口径必须跟着 rank_kind 读**：'cond' = 财报条件分位（504 交易日窗、同 in30 状态内比）、'raw' = 普通 252 日分位（条件样本 <60 时的回退）、'hourly' = CBOE 影子的小时重采样短窗。同一个 rank 数字在三种 kind 下不是同一个统计量；曾发生过回退后仍标\"同财报状态内\"的谎称口径缺陷。",
+          "**盘中实时 IV 的预览分位（rank_preview）永远不是正式分位**：它带 preview:True 标记，且它的财报状态按**今天的 ET 日历日**重算（in30_now），可能与最后结算日的 earn_in30 不同（曾有 PLTR 案例：沿用昨天状态把 0.513 错报成 0.026）。正式分位只在已结算的 stock_vol 上算。",
+          "**同一组常量在两处各写一遍字面量、没有 import 共享**：dashboard.py 的 IV_RANK_WIN=252/IV_RANK_MIN=120/EARN_COND_WIN=504/EARN_WINDOW_D=30/EARN_COND_MIN=60，与 regime/storage.py:963 stock_vol_latest_ranks 的默认参数 win/min_n/cond_win/earn_window_d/cond_min 数值一一对应但各自独立。改一处不会同步另一处——面板与 Hermes 横截面会静默口径分叉。同类情况还有 2 小时新鲜度闸：dashboard.py:298/739 写死 `2*3600_000`，而 dashboard.py:58 另有 OVERVIEW_TERM_FRESH_SEC=2*3600。",
+          "**新鲜度闸有三档、各不相同，过期即整块返回 None（不是显示旧值）**：币安近端 IV 与个股期限曲线 = 2 小时；实时 IV = 30 分钟；结算 IV 序列 = age_days > 4.0 天标 stale（不隐藏，但打陈旧标志）。所以卡片上\"没有这一项\"通常意味着采集断了，而不是数据不存在。",
+          "**earnings 的 point-in-time 是记录在案的先验、不是严格 as-of**：earnings_event_windows 明确不按 known_at 过滤（regime/storage.py:856-862），而库里 579/602 行的 known_at 是 NULL。回测里事件门槛用的是\"财报日期在当时已知\"这个强先验。若日后要求严格 as-of，收紧点只在 earnings_event_windows 这一处。",
+          "**earnings 的 ET 日历日语义含第 0 天**：earnings_event_windows 判 0 ≤ (财报 ET 日 − bar ET 日) ≤ 10，财报当天整天算在窗内；而 policy 层的 _policy_earnings_proximity 会再用 pub_type 把当天细分（BEFORE 过 09:30、AFTER 过 16:00 记作已过，pub_type 缺失标 uncertain）。两处对\"财报当天\"的判定粒度不同，是刻意的：确认层要保守（整天算窗内），展示层要准确。",
+          "**近端 IV 合成对单点坏报价的敏感度取决于 method**：method='interp' 且 n_expiries 多时读数稳；method='nearest' + n_expiries=1（今日 DOGE 就是）时是单到期单点估计，对坏 mark 极敏感——所以 method 与 n_expiries **必须随值出到消费方**，Hermes 与 vol_notes 都会把它们打进文案。",
+          "**个股 IV（moomoo 口径）与 CBOE iv30、指数 VIX/VXN 不同源**，加权算法未公开、绝对值有系统性偏差。stock_vol 把 source 放进主键就是为此。三条线各自独立算分位，绝不混拼；Hermes 输出也明写\"moomoo 口径不与 VIX 混比\"。",
+          "**个股 IV 目前是纯显示层**（dashboard.py:390 注释明示）：它不参与 RULES_VERSION 的状态判定。唯一进判定链的波动率是 features 层的 atr_rank/bbw_rank/vol_accel 等；唯一进 policy 动作的是 check_stop_vs_iv 的止损宽度校验，以及 earnings 事件窗对确认根数 +1。",
+          "**RV3/RV30 在美股永续上被周末稀释**：标的正股仅 9:30-16:00 ET 交易、合约 24/7，休市期波动塌陷。代码两处都自陈这是\"同一已知口径问题\"（dashboard.py:311），未做去季节化——去季节化只做在 ATR 分位的影子字段 atr_rank_ds 上（regime/features/volatility.py:62，48 桶 = ET 小时 × 是否周末）。"
+        ]
+      },
+      {
+        "layer": "policy 决策层（regime/policy/ 包 + dashboard.py 的 policy 装配与分层）",
+        "summary": "policy 层把「4h regime 分类结果」翻译成「今天该看哪几个品种、在什么位置、按哪个剧本」。它由四个纯函数模块和一层 dashboard 装配组成：levels.py 从 4h OHLCV + 币安 1h 量流提取 13 类关键位来源、扩成固定最小宽度的价格区间、聚类并正规化为互不重叠的 zone 列表；location.py 把 zone 放进当前 regime 和来向里判定角色（support/resistance）、角色反转、政策语义与 tradeable；volnote.py 产出波动率与财报风险文案；stopcheck.py 用命中 zone 的外沿算结构止损并与 IV 预期波动比宽度。dashboard.py 负责多周期共振（4h cRSI 主票 + 1d/1h 分级辅助）、剧本名映射（_policy_play）、以及总览页的六层分桶（armed / wait_signal / near / risk / middle / unavailable）。全层不写库、不读库（levels/location/volnote/stopcheck 都只消费调用方装配好的输入），所有缺口显式进 degraded 而不用占位值。四个模块各自带版本号（lv1 / loc1 / stop1 / vol1），随 payload 出到前端。",
+        "items": [
+          {
+            "name": "LEVELS_VERSION",
+            "what": "关键位提取层版本号，随 payload 的 policy_versions.levels 出前端",
+            "detail": "当前值 \"lv1\"",
+            "location": "regime/policy/levels.py:15"
+          },
+          {
+            "name": "ATR_PERIOD",
+            "what": "关键位区间宽度的度量单位——SMA-ATR 周期；所有 zone 宽度都以它为尺子",
+            "detail": "14；ATR 由 _strict_atr 算（横向 max 明确 skipna=False，与 volatility.atr 同口径但禁止跳 NaN）",
+            "location": "regime/policy/levels.py:17"
+          },
+          {
+            "name": "_valid_atr_window",
+            "what": "ATR 前置数据质量门：末 ATR_PERIOD+1 根 OHLC 必须全有限，且满足 high>=max(open,close,low)、low<=min(open,close,high) 的蜡烛约束；不满足直接 degraded=[\"no_atr\"] 返回。调用方传入复用 ATR 也绕不过这道门",
+            "detail": "检查窗 = 末 15 根",
+            "location": "regime/policy/levels.py:81-95"
+          },
+          {
+            "name": "来源①②：pivot_high / pivot_low",
+            "what": "结构摆动点。用 features/structure.swing_pivots(df, k=PIVOT_K) 取分形枢轴（左右各 k 根确认，最近 k 根内不标记，无未来函数）；同侧枢轴先按价格聚类，每簇成一个 zone",
+            "detail": "PIVOT_K=4（levels.py:18）；PIVOTS_PER_SIDE=4，按簇内最大 idx 排序后只保留最近 4 簇（levels.py:19, 538-539）；PIVOT_CLUSTER_ATR=0.35，同簇最大价格散布（levels.py:20）",
+            "location": "regime/policy/levels.py:18-20, 514-550"
+          },
+          {
+            "name": "来源③-⑥：ema21 / ema55 / ema100 / ema200",
+            "what": "四条 EMA 收盘均线，各成一个单点 zone。角色由当前价决定：price>=EMA 记 support，否则 resistance",
+            "detail": "EMA_PERIODS=(21,55,100,200)；ema() 用 ewm(span=n, adjust=False)；需要 len(close)>=period 且末 period 根全有限，否则 degraded 加 emaN_history_insufficient",
+            "location": "regime/policy/levels.py:21, 552-565"
+          },
+          {
+            "name": "来源⑦⑧：range_hi / range_lo",
+            "what": "近端区间边界：末 RANGE_WINDOW 根的 high 分位数与 low 分位数",
+            "detail": "RANGE_WINDOW=60；RANGE_HIGH_Q=0.90（角色固定 resistance）；RANGE_LOW_Q=0.10（角色固定 support）",
+            "location": "regime/policy/levels.py:22-24, 567-583"
+          },
+          {
+            "name": "来源⑨：poc",
+            "what": "成交密集区。用币安 1h 量流按小时槽取 quote_vol/volume 得每小时 VWAP，按 ATR 倍数分桶，取成交量最大的桶的中点。角色由当前价决定",
+            "detail": "POC_WINDOW_1H=240 小时窗；POC_BUCKET_ATR=0.25（桶宽=0.25×ATR）；POC_MIN_COVERAGE=0.80（覆盖率不足不出）；POC_MAX_LAG_HOURS=2；窗口末端 end = expected_end.floor('h') - 1h（vol1h.ts 是小时槽开端，4h 收线前最后一个完整槽）；idxmax 并列取价格较低桶",
+            "location": "regime/policy/levels.py:25-28, 407-464"
+          },
+          {
+            "name": "来源⑩-⑬：prev_day_hi/lo, prev_week_hi/lo",
+            "what": "前一自然日 / 前一自然周（周一起算）的最高最低。角色固定：hi=resistance，lo=support",
+            "detail": "日界用 ts.dt.floor('D')（UTC）；周界 = floor('D') - dayofweek 天",
+            "location": "regime/policy/levels.py:379-404"
+          },
+          {
+            "name": "_zone（单点扩宽规则）",
+            "what": "EMA / range / POC / prev-period 等单点来源扩成区间：以点位为中心 ±ZONE_HALF_ATR×ATR；POC 额外传入桶的 lo/hi 取并集；超过 MAX_ZONE_ATR 时以点位为中心裁到上限",
+            "detail": "ZONE_HALF_ATR=0.25（levels.py:29）→ 最小宽度 0.50 ATR；MAX_ZONE_ATR=1.50（levels.py:31）",
+            "location": "regime/policy/levels.py:29, 31, 98-123"
+          },
+          {
+            "name": "_pivot_zone（枢轴扩宽规则）",
+            "what": "枢轴 zone 的宽度由簇内反转价位的实际散布决定（P4「触碰散布定义宽度」），不读枢轴 K 线本身的 high-low 振幅；散布不足最小宽度时两侧对称补齐，超上限时裁剪。touches=簇成员数，established_ts=最早成员 ts，last_touch_bars=最近成员距末根的根数",
+            "detail": "min_width = 2×ZONE_HALF_ATR×ATR = 0.50 ATR；上限 MAX_ZONE_ATR×ATR = 1.50 ATR",
+            "location": "regime/policy/levels.py:172-204"
+          },
+          {
+            "name": "merge_zones（聚类算法，第一步：单链接聚类）",
+            "what": "全部候选按 mid 排序，逐个与上一簇末元素比较：|Δmid|/ATR < MERGE_ATR 且并入后 (hi-lo)/ATR <= MAX_ZONE_ATR 才并入，否则另起一簇。两个条件必须同时成立——宽度上限就是阻断链式吞并的闸",
+            "detail": "MERGE_ATR=0.50（严格小于）；MAX_ZONE_ATR=1.50（小于等于）",
+            "location": "regime/policy/levels.py:30-31, 334-376"
+          },
+          {
+            "name": "_merged_cluster（簇合并语义）",
+            "what": "合并后 lo=min、hi=max、kinds 去重合并（共振来源）、touches 求和、established_ts 取最早、last_touch_bars 取最小、chain_overflow 任一为真即真。origin_role 冲突时多数票，平票取 mid 最低成员的角色（保证确定性）",
+            "detail": "overlap_count/last_overlap_bars 在有 price_df 时按终态边界重算",
+            "location": "regime/policy/levels.py:207-251"
+          },
+          {
+            "name": "_resolve_overlaps（聚类第二步：正规化为互斥区间）",
+            "what": "拒并后仍重叠的分片先按连通分量分组，再按相邻 mid 的中点切开；切完每片宽度必须仍在 [0.50, 1.50] ATR 内且 lo<=hi，否则整个分量退化为一个合并 zone 并打 chain_overflow=True。最后有断言守卫：终态任意相邻两 zone 不得有 hi>=lo",
+            "detail": "切点用 np.nextafter 保证闭区间也不相交；违反时 raise AssertionError(\"policy zone 终态必须互不重叠\")",
+            "location": "regime/policy/levels.py:271-331"
+          },
+          {
+            "name": "_overlap_stats / overlap_count",
+            "what": "静态价格带被历史 K 线覆盖的次数（进入段数）与距最后一次覆盖的根数。注释明确标注这是非因果统计，不得冒充反转验证次数——与 touches 是两个概念",
+            "detail": "hit = (high>=lo)&(low<=hi)；entries=从未命中转命中的次数",
+            "location": "regime/policy/levels.py:126-146"
+          },
+          {
+            "name": "extract_levels（levels 主入口）",
+            "what": "返回 {version, atr, zones, sources, degraded}。sources 保留逐来源原始结果（缺失为 None），zones 是聚类后的终态列表，degraded 记录每一个不成立的来源原因",
+            "detail": "别名 build_levels = extract_levels（levels.py:630）；key_levels() 是只取 zones 的轻量入口（levels.py:619-626）",
+            "location": "regime/policy/levels.py:467-616"
+          },
+          {
+            "name": "levels 的 degraded 原因全集",
+            "what": "可能出现的降级码",
+            "detail": "ohlcv_missing / ohlcv_columns_missing / no_atr / no_price / pivot_history_insufficient / pivot_invalid_ohlc / pivot_high_unavailable / pivot_low_unavailable / emaN_history_insufficient / emaN_unavailable / range_history_insufficient / range_invalid_ohlc / prev_day_history_insufficient / prev_week_history_insufficient / poc_missing / poc_columns_missing / poc_expected_end_missing / poc_expected_end_invalid / poc_invalid_volume / poc_stale / poc_coverage_insufficient / poc_invalid_price / poc_no_atr / no_levels",
+            "location": "regime/policy/levels.py:411-614"
+          },
+          {
+            "name": "LOCATION_VERSION",
+            "what": "位置判定层版本号",
+            "detail": "当前值 \"loc1\"",
+            "location": "regime/policy/location.py:14"
+          },
+          {
+            "name": "AT_ZONE_ATR",
+            "what": "「到位」门槛：价格距 zone 边界的 ATR 距离不超过此值才算命中候选",
+            "detail": "0.50",
+            "location": "regime/policy/location.py:17"
+          },
+          {
+            "name": "APPROACH_BARS",
+            "what": "识别来向（回踩至/反弹至）的最短路径窗；也是 dashboard 传给 locate 的收盘序列长度",
+            "detail": "3；infer_approach 中 k<APPROACH_BARS 直接返回 None",
+            "location": "regime/policy/location.py:16, 66-69"
+          },
+          {
+            "name": "infer_approach（来向识别）",
+            "what": "取最近 k 根收盘的首末两点：起点必须明确在 zone 一侧（first>hi 或 first<lo），终点必须朝 zone 方向移动（last<first 或 last>first），且终点到 zone 的距离必须严格小于起点的距离。三条都满足才返回 from_above / from_below，否则 None。横盘、远离、从区间内部出发都不算",
+            "detail": "终点落在区间内时 last_dist 记 0",
+            "location": "regime/policy/location.py:66-97"
+          },
+          {
+            "name": "_zone_state（角色 + 角色反转）",
+            "what": "price>hi → role=support、dist=(price-hi)/ATR；price<lo → role=resistance、dist=(lo-price)/ATR；price 在区间内 → 沿用 origin_role、dist=0（区间内不宣告穿越）。role_flipped = (role != origin_role)",
+            "detail": "origin_role 必须是 support/resistance 之一，否则该 zone 返回 None 被跳过",
+            "location": "regime/policy/location.py:100-122"
+          },
+          {
+            "name": "_eligible / trend_up · support",
+            "what": "regime×位置资格表第 1 格：上升趋势的回踩支撑",
+            "detail": "kinds 命中 {ema21, ema55, range_lo} 任一；或命中 {pivot_high, prev_day_hi, prev_week_hi} 且 flipped=True（阻力翻支撑）；或 pivot_low 在 kinds 且 flipped=False（policy §2.1 未翻转的结构前低）",
+            "location": "regime/policy/location.py:128-134"
+          },
+          {
+            "name": "_eligible / trend_up · resistance",
+            "what": "第 2 格：上升趋势的上方结构位",
+            "detail": "仅 kinds 命中 {pivot_high, prev_day_hi, prev_week_hi} 且 flipped=False",
+            "location": "regime/policy/location.py:135"
+          },
+          {
+            "name": "_eligible / trend_down · support",
+            "what": "第 3 格：下降趋势的深跌支撑",
+            "detail": "kinds 命中 {ema100, ema200} 任一；或命中 {pivot_low, prev_day_lo, prev_week_lo} 且 flipped=False",
+            "location": "regime/policy/location.py:136-138"
+          },
+          {
+            "name": "_eligible / trend_down · resistance",
+            "what": "第 4 格：下降趋势的反弹压力",
+            "detail": "kinds 命中 {ema21, ema55, ema100, ema200, range_hi} 任一（policy §2.2：压力可以是任一 EMA）；或命中 {pivot_low, prev_day_lo, prev_week_lo} 且 flipped=True；或 pivot_high 在 kinds 且 flipped=False",
+            "location": "regime/policy/location.py:139-145"
+          },
+          {
+            "name": "_eligible / range · squeeze · high_vol_chop",
+            "what": "第 5-10 格：三种非趋势态共用一条规则——只认区间边界",
+            "detail": "role=support 要求 \"range_lo\" 在 kinds；role=resistance 要求 \"range_hi\" 在 kinds；其他来源一律不算机会位",
+            "location": "regime/policy/location.py:146-148"
+          },
+          {
+            "name": "_eligible 兜底",
+            "what": "未列入 VALID_REGIMES 的 regime 一律 return False",
+            "detail": "VALID_REGIMES = {trend_up, trend_down, range, squeeze, high_vol_chop}（location.py:19）",
+            "location": "regime/policy/location.py:19, 149"
+          },
+          {
+            "name": "_semantics（语义 + tradeable + 必须来向）表",
+            "what": "六格语义映射，返回 (meaning, tradeable, required_approach)",
+            "detail": "trend_up·support → (pullback_long_opportunity, True, from_above)；trend_up·resistance → (reduce_long_not_open_short, False, None)；trend_down·resistance → (bounce_short_opportunity, True, from_below)；trend_down·support 且 kinds∩{ema100,ema200} → (deep_long_requires_second_confirmation, True, None)；trend_down·support 其他 → (prior_low_support_not_tradeable, False, None)；range → (range_edge_opportunity, True, None)；squeeze → (wait_for_confirmed_breakout, False, None)；high_vol_chop → (high_vol_reduce_frequency, False, None)",
+            "location": "regime/policy/location.py:152-167"
+          },
+          {
+            "name": "locate（位置判定主流程）",
+            "what": "前置校验 → 逐 zone 过滤 → 选中一个 → 出语义与来向校验。chain_overflow 的 zone 直接跳过并计数；通过 _zone_state 与 _eligible 后，dist_atr<=AT_ZONE_ATR 才进候选",
+            "detail": "选中规则：min by (dist_atr, -len(kinds))——等距时优先共振来源更多的 zone；再保留输入顺序",
+            "location": "regime/policy/location.py:170-251"
+          },
+          {
+            "name": "locate 的 approach 校验",
+            "what": "选中 zone 后**才**对这个 zone 现算来向；tradeable 且 required_approach 不为 None 且实算来向不等于它 → tradeable 置 False、reason=\"wrong_approach\"",
+            "detail": "docstring 明确记录 2026-08-05 的 API 设计错误：传全局 approach 必然错配，实测导致 trend_up 的 23 个品种 tradeable 全为 0。正确用法是传 prices；prices 与 approach 同给时以 prices 为准",
+            "location": "regime/policy/location.py:170-181, 232-237"
+          },
+          {
+            "name": "locate 的三种返回形态",
+            "what": "_unavailable（at=None，reason 为 no_price/no_atr/unsupported_regime/no_zones/invalid_zones/invalid_approach/chain_overflow）；_middle（at=\"middle_zone\"，meaning=\"middle_zone_veto\"，reason=\"no_regime_key_level_nearby\"）；命中（at=at_support/at_resistance，带 zone/dist_atr/role/meaning/tradeable/role_flipped/approach/reason/degraded）",
+            "detail": "valid_zone_n==0 且有 overflow → chain_overflow；有效 zone 存在但无候选 → _middle",
+            "location": "regime/policy/location.py:36-63, 199-251"
+          },
+          {
+            "name": "VOLNOTE_VERSION / volnote 常量",
+            "what": "波动率与事件风险标注层",
+            "detail": "VOLNOTE_VERSION=\"vol1\"(:12)；HOLDING_DAYS=3(:14)；DAYS_PER_YEAR=365(:15)；TARGET_TENOR_DAYS=3.0(:16)；IV30_HIGH_RANK=0.85(:17)；EARNINGS_WINDOW_DAYS=3(:18)；EARNINGS_NEAR_DAYS=10(:19)",
+            "location": "regime/policy/volnote.py:12-19"
+          },
+          {
+            "name": "interpolate_iv_to_tenor",
+            "what": "按总方差线性插值到目标期限：variance = [w·iv1²·t1 + (1-w)·iv2²·t2] / target，w=(t2-target)/(t2-t1)，返回 sqrt(variance)。目标期限不被 [t1,t2] 夹住时不外推，返回 None",
+            "detail": "要求 iv1>0, iv2>0, t1>0, t2>t1, t1<=target<=t2；target 恰等 t1 时直接返回 iv1",
+            "location": "regime/policy/volnote.py:30-47"
+          },
+          {
+            "name": "vol_notes 文案①：预期波动",
+            "what": "expected_pct = iv3 / 100 × sqrt(use_days / 365) × 100。use_days 优先用传入 tenor_days，缺失回落 HOLDING_DAYS=3。三种措辞由 method 决定",
+            "detail": "method=\"nearest\" 且 use_days≠3.0 → \"预期波动 ±X%（按实际期限 ~Nd 计；近端IV V）· 近端IV ~Nd·单点（3d 代理）·可用到期数K\"；method=\"interp\" → \"3日预期波动 ±X%（IV3 V；~Nd·插值·K到期）\"；否则 → \"3日预期波动 ±X%（IV3 V）\"",
+            "location": "regime/policy/volnote.py:64-84"
+          },
+          {
+            "name": "vol_notes 文案②：IV30 历史高位",
+            "what": "iv30_rank > IV30_HIGH_RANK 时出提示（严格大于）",
+            "detail": "\"隐含波动历史高位（分位 R），policy §6.5 建议降频降仓\"，阈值 0.85",
+            "location": "regime/policy/volnote.py:86-90"
+          },
+          {
+            "name": "vol_notes 文案③：期限倒挂",
+            "what": "term_inverted is True 时出提示；前缀随 method 变",
+            "detail": "method==\"nearest\" 前缀\"近端\"，否则\"3d\"：\"{前缀}>30d 倒挂：近端定价高于制度层，短期有事\"",
+            "location": "regime/policy/volnote.py:92-94"
+          },
+          {
+            "name": "vol_notes 文案④：财报",
+            "what": "0<=earnings_days<=3 → 持仓窗内警告（uncertain 时追加\"，发布时间 uncertain\"）；3<earnings_days<=10 → \"财报临近（N 日）\"；>10 或负数不出",
+            "detail": "\"⚠ 持仓窗内有财报（还有 N 日…），非技术面风险\"",
+            "location": "regime/policy/volnote.py:96-103"
+          },
+          {
+            "name": "vol_notes 的未使用形参",
+            "what": "symbol / iv30 / rv3 保留在签名里但函数体 del 掉，本批三类文案不用它们——保留是为了让消费方按同一口径装配完整波动快照",
+            "detail": "del symbol, iv30, rv3",
+            "location": "regime/policy/volnote.py:59"
+          },
+          {
+            "name": "STOPCHECK_VERSION / stopcheck 常量",
+            "what": "结构止损与宽度校验层",
+            "detail": "STOPCHECK_VERSION=\"stop1\"(:12)；ZONE_BUFFER_ATR=0.25(:14)；MAX_STOP_DIST_ATR=3.0(:15)；HOLDING_DAYS_DEFAULT=3.0(:16)；DAYS_PER_YEAR=365.0(:17)；TOO_TIGHT_RATIO=1.0(:18)；TIGHT_RATIO=1.5(:19)",
+            "location": "regime/policy/stopcheck.py:12-19"
+          },
+          {
+            "name": "find_structural_stop",
+            "what": "多头止损 = 命中支撑区 lo − 0.25×ATR；空头 = 命中阻力区 hi + 0.25×ATR。返回 {side, stop_price, stop_dist_pct}",
+            "detail": "五道否决（返回 None）：side 不是 long/short；location.at/role 与 side 不匹配；location.zone 用 lo/hi 数值（rel_tol=abs_tol=1e-9）在完整 zones 列表里找不到同一个 zone；止损落在价格错误一侧或 <=0；stop_dist/ATR > MAX_STOP_DIST_ATR=3.0",
+            "location": "regime/policy/stopcheck.py:30-86"
+          },
+          {
+            "name": "check_stop_vs_iv",
+            "what": "expected_move_pct = iv3 × sqrt(holding_days / 365)；ratio = stop_dist_pct / expected_move_pct",
+            "detail": "ratio<1.0 → too_tight「止损在 1 倍预期波动内，正常波动就会打掉」；1.0<=ratio<1.5 → tight「止损偏紧」；>=1.5 → ok「止损宽度相对预期波动充足」。holding_days 默认 3.0，dashboard 有 tenor_days 时传实际期限",
+            "location": "regime/policy/stopcheck.py:89-117"
+          },
+          {
+            "name": "POLICY_VERSIONS",
+            "what": "四模块版本号汇总，出到详情页 policy.versions 与总览页 policy_versions",
+            "detail": "{levels: lv1, location: loc1, stopcheck: stop1, volnote: vol1}",
+            "location": "dashboard.py:71-76"
+          },
+          {
+            "name": "policy 层的周期常量",
+            "what": "决策周期与共振周期",
+            "detail": "POLICY_SIGNAL_TF=\"4h\"(:61)；POLICY_RESONANCE_TFS=(\"4h\",\"1d\",\"1h\")(:62)；POLICY_SIGNAL_OHLCV_LIMIT=400(:63)；POLICY_1D_MIN_BARS=90(:64)",
+            "location": "dashboard.py:61-64"
+          },
+          {
+            "name": "_signal_ok",
+            "what": "主导周期 cRSI 极值区是否与关键位方向一致",
+            "detail": "at_support 要求 zone==\"超卖区\"；at_resistance 要求 zone==\"超买区\"；at 为其他值（middle_zone/None）返回 None；crsi_zone 为 None 返回 None。cRSI 三个区标签是「超买区/超卖区/带内」（regime/features/crsi.py:146）",
+            "location": "dashboard.py:1115-1123"
+          },
+          {
+            "name": "_resonance（多周期共振：4h 主导 + 1d/1h 分级）",
+            "what": "armed 只看 4h 主票；1d/1h 只形成强/中/弱分级，冲突只降级不否决",
+            "detail": "expected = 超卖区(at_support)/超买区(at_resistance)；每个辅助周期投票：==expected 记 +1，==opposite 记 -1，其他（带内）记 0，缺失记 None；score=非 None 票之和（范围 -2..+2）",
+            "location": "dashboard.py:1126-1173"
+          },
+          {
+            "name": "_resonance 的分级门槛",
+            "what": "grade 只在 main_ok is True 时计算，否则为 None",
+            "detail": "score >= RESONANCE_STRONG_MIN(=1) → \"强\"；score <= RESONANCE_WEAK_MAX(=-1) → \"弱\"；其余（score==0）→ \"中\"",
+            "location": "dashboard.py:65-66, 1158-1164"
+          },
+          {
+            "name": "_resonance 的实证依据（写在 docstring 里）",
+            "what": "为什么不硬要求辅助周期同向",
+            "detail": "4h cRSI 超卖→超买循环中位 6.0 天、1h 1.4 天，用户持仓 1-3 天；4h 极值仅 15/71 品种，若硬要求辅助同向只剩 2 个",
+            "location": "dashboard.py:1128-1133"
+          },
+          {
+            "name": "_resonance 输出字段",
+            "what": "共振块结构",
+            "detail": "{main_tf: \"4h\", main_zone, main_ok, aux: {1d, 1h}, score, grade, conflicts}；conflicts 只在 main_ok is True 且辅助反向时记录，文案 \"{tf} {zone}与 4h {z4}反向\"",
+            "location": "dashboard.py:1141-1173"
+          },
+          {
+            "name": "_crsi_snapshot（共振的时点对齐）",
+            "what": "取指定周期截至 4h 决策收线时刻的最后一根已收线 cRSI",
+            "detail": "因果条件：ohlcv.ts（开盘时刻）+ TF_SEC[tf]×1000 <= asof_ms；1d 额外要求 len(frame)>=POLICY_1D_MIN_BARS=90，否则 crsi_1d_history_insufficient",
+            "location": "dashboard.py:1198-1232"
+          },
+          {
+            "name": "_policy_signal_snapshot",
+            "what": "装配 4h 主票与 1d/1h 辅助票，三者全部对齐同一个 4h 收线时点",
+            "detail": "输出 {signal_tf, crsi(4h), crsi_by_tf, signal_ok(=resonance.main_ok), resonance, degraded}",
+            "location": "dashboard.py:1235-1258"
+          },
+          {
+            "name": "_policy_play 剧本判定表（五格）",
+            "what": "regime × at（+ kinds、role_flipped）→ 剧本展示名",
+            "detail": "trend_up·at_support·role_flipped=True → \"S5 突破回踩加仓\"；trend_up·at_support·未翻转 → \"S4 趋势回踩做多\"；trend_down·at_resistance → \"S1 反弹至压力做空\"；trend_down·at_support 且 kinds∩{ema100,ema200} → \"S13 深跌逆势做多（需二次确认·仓位为顺势单的 1/3-1/2）\"；range·at_support → \"S3 区间下沿做多\"；range·at_resistance → \"S3 区间上沿做空\"。squeeze / high_vol_chop / trend_up·at_resistance / trend_down·at_support 非 EMA100/200 → play=None",
+            "location": "dashboard.py:1261-1288"
+          },
+          {
+            "name": "_policy_play 的三段后处理（顺序敏感）",
+            "what": "剧本名算出后依次套三层判断",
+            "detail": "① play 不为 None 且 tradeable is not True → 返回 \"WAIT · 路径未确认（P09[；reason]） · 参考剧本：{play}\"（reason 为 None 或 wrong_approach 时不追加）；② play 不为 None 且 signal_ok is False → 返回 \"{play}（位置到了信号没到）\"；③ 否则 signal_ok is not None 才返回 play，signal_ok is None 一律返回 None",
+            "location": "dashboard.py:1282-1288"
+          },
+          {
+            "name": "_policy_zone_payload",
+            "what": "给完整 zone 列表逐条补当前角色、距离与 regime 资格，不改 levels 原结果",
+            "detail": "输出 lo/hi/mid/kinds/touches/established_ts/last_touch_bars/overlap_count/last_overlap_bars/origin_role/width_atr/chain_overflow + dist_atr/role_now/role_flipped/eligible；chain_overflow 为 True 的 zone 一律 eligible=False",
+            "location": "dashboard.py:1291-1321"
+          },
+          {
+            "name": "_policy_side",
+            "what": "只为已有矩阵单元格标方向，决定是否尝试算结构止损",
+            "detail": "at_support 且 regime∈{trend_up, range} → \"long\"；at_support 且 regime==trend_down 且 kinds∩{ema100,ema200} → \"long\"；at_resistance 且 regime∈{trend_down, range} → \"short\"；其余 None",
+            "location": "dashboard.py:1324-1337"
+          },
+          {
+            "name": "_regime_conflict",
+            "what": "4h 与 1d regime 不同且至少一方为趋势态时输出背景警示，不修改 4h play",
+            "detail": "trend_up(4h)+trend_down(1d) → \"…：这是逆大势的反弹单\"；trend_down+trend_up → \"…：这是逆大势的回落单\"；其他 → \"…：周期状态冲突，仅作背景警示\"；severity 固定 \"warn\"",
+            "location": "dashboard.py:1176-1195"
+          },
+          {
+            "name": "_build_policy_payload（详情页政策卡装配）",
+            "what": "顺序：读 4h regime → 取 4h OHLCV(400) → 取 price → 取 1h 量流并截到 4h 收线 → extract_levels → locate（prices=末 APPROACH_BARS 根收盘）→ _policy_zone_payload 全量 zone 并按 (dist_atr, mid) 排序 → 共振快照 → _policy_play → vol_notes → _policy_side → 结构止损 + 宽度校验",
+            "detail": "OVERVIEW_OHLCV_LIMIT=400(:56)、OVERVIEW_VOL1H_HOURS=260(:57)；vol1h 截断条件 ts < last_close_ms",
+            "location": "dashboard.py:1340-1481"
+          },
+          {
+            "name": "_policy_earnings_proximity",
+            "what": "在 policy 层消费 pub_type，修正财报当日盘前/盘后的已发生边界",
+            "detail": "days==0 且 pub_type==\"BEFORE\" 且 ET 分钟数 >= EARNINGS_BEFORE_CUTOFF_MIN_ET(570=09:30) → days=-1；\"AFTER\" 且 >= EARNINGS_AFTER_CUTOFF_MIN_ET(960=16:00) → days=-1；pub_type 缺失 → uncertain=True。取 |days| 最小者，超出 horizon(EARNINGS_NEAR_DAYS=10) 返回 None",
+            "location": "dashboard.py:68-69, 1484-1520"
+          },
+          {
+            "name": "_overview_vol_inputs",
+            "what": "轻量装配 vol_notes / stopcheck 的输入，按品种类别分流",
+            "detail": "us_stock_perp：读 stock_iv_term，新鲜度 OVERVIEW_TERM_FRESH_SEC=7200s；先试 interpolate_iv_to_tenor(iv3,t3,iv9,t9,3.0) → method=\"interp\"/n_expiries=2；失败回落近端单点 → method=\"nearest\"/tenor=t3/n_expiries=1；iv30/iv30_rank 来自 _stock_iv_block（stale 则不取）。crypto 或配 vol_proxy：_xopt_block 近端币安期权 IV（自带 2 小时新鲜度闸）；BTC/ETH 额外读 DVOL 作 iv30，窗 OVERVIEW_DVOL_RANK_WIN=365、最少 OVERVIEW_DVOL_RANK_MIN=120 才出分位。term_inverted 未定且 iv3/iv30 都有时取 iv3>iv30",
+            "location": "dashboard.py:55-60, 1523-1607"
+          },
+          {
+            "name": "_scan_overview_symbol（总览逐品种扫描）",
+            "what": "总览页每个品种的完整测量链",
+            "detail": "陈旧闸：age_sec > STALE_TF_MULTIPLIER(1.5) × TF_SEC[\"4h\"] = 21600s → reason=\"stale_4h\"；regime_4h 缺失直接出局；1d 只作底座——缺 1d 时进 degraded=\"regime_1d_missing\" 但不作废 4h 判断（代码注释记录：实测 37/74 品种 1d 不足 90 根）",
+            "location": "dashboard.py:1628-1771"
+          },
+          {
+            "name": "_partition_overview（总览分层规则）",
+            "what": "六个桶的判定顺序",
+            "detail": "scan 无 item → unavailable（带 reason）；有 vol_notes → 并行进 risk（与其他桶重叠，不互斥）；tradeable is True 且 signal_ok is True → armed（完整 _OVERVIEW_FULL_KEYS）；tradeable is True 且 signal_ok 非 True → wait_signal（完整）；at∈{at_support,at_resistance} → near（_overview_lite 精简）；at==\"middle_zone\" → middle（精简）；其余 → unavailable",
+            "location": "dashboard.py:1805-1873"
+          },
+          {
+            "name": "总览排序规则",
+            "what": "各层排序键",
+            "detail": "armed / wait_signal：(resonance.grade 排名 强0/中1/弱2/缺失3, dist_atr 升序, symbol)；near：(dist_atr 升序, symbol)；risk / middle / unavailable：按 symbol",
+            "location": "dashboard.py:1842-1857"
+          },
+          {
+            "name": "_OVERVIEW_FULL_KEYS / _overview_lite",
+            "what": "armed / wait_signal 出全字段；near / middle 只出精简字段",
+            "detail": "FULL 30 键含 play/zone/vol_notes/stop_check/degraded/warmup；lite 只有 symbol/display/regime_4h/at/meaning/dist_atr/crsi.zone/crsi_by_tf/signal_ok/signal_tf/resonance/regime_conflict/stop_check/warmup/bar_close_ts/age_sec——**不含 play、不含 zone、不含 vol_notes**",
+            "location": "dashboard.py:1774-1802"
+          },
+          {
+            "name": "_overview_zone",
+            "what": "总览页 zone 的精简投影",
+            "detail": "只保留 lo/hi/kinds/touches/established_ts/overlap_count/width_atr/chain_overflow（丢掉 mid 与 last_touch_bars/last_overlap_bars）",
+            "location": "dashboard.py:1610-1625"
+          },
+          {
+            "name": "overview_payload（总览主入口）",
+            "what": "全宇宙横截面扫描，60 秒进程内缓存",
+            "detail": "OVERVIEW_TTL_SEC=60(:55)；连接 storage.connect_ro()；单品种异常显式落 unavailable（reason=\"measurement_error:{ExcType}\"）；asof = 所有品种 bar_close_ts 的**最小值**；输出 {updated_at, asof, tf:\"4h\", policy_versions, counts, armed, wait_signal, near, risk, middle, unavailable, heartbeat}",
+            "location": "dashboard.py:1876-1919"
+          },
+          {
+            "name": "policy 层测试文件",
+            "what": "pytest 覆盖",
+            "detail": "tests/test_policy_levels.py、test_policy_location.py、test_policy_stopcheck.py、test_policy_volnote.py、test_policy_batch3.py、test_policy_r2.py、test_policy_r3.py",
+            "location": "tests/"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "查询时刻",
+            "value": "2026-08-06 09:34 JST（00:34 UTC）",
+            "how": "date；全部数字用 .venv/bin/python 直接调 dashboard.overview_payload() / _scan_overview_symbol() / extract_levels() 实跑得到"
+          },
+          {
+            "name": "全宇宙品种数",
+            "value": "74",
+            "how": "regime.storage.symbols(conn)"
+          },
+          {
+            "name": "policy 可测量品种数",
+            "value": "72（另 2 个 4h_ohlcv_missing）",
+            "how": "_scan_overview_symbol 返回带 item 的条数"
+          },
+          {
+            "name": "总览六层计数",
+            "value": "armed 2 / wait_signal 13 / near 14 / risk 36 / middle 43 / unavailable 2",
+            "how": "overview_payload()['counts']"
+          },
+          {
+            "name": "overview asof",
+            "value": "1785974400000 = 2026-08-06 00:00 UTC",
+            "how": "overview_payload()['asof']（各品种 4h bar_close_ts 的最小值）"
+          },
+          {
+            "name": "policy_versions",
+            "value": "levels=lv1, location=loc1, stopcheck=stop1, volnote=vol1",
+            "how": "overview_payload()['policy_versions']"
+          },
+          {
+            "name": "regime_4h 分布",
+            "value": "range 26 / high_vol_chop 21 / trend_up 18 / squeeze 4 / trend_down 3",
+            "how": "72 个 item 的 regime_4h 计数"
+          },
+          {
+            "name": "位置分布（at）",
+            "value": "middle_zone 43 / at_resistance 21 / at_support 8",
+            "how": "72 个 item 的 at 计数；命中 29 个中 tradeable 15、非 tradeable 14（= near 层）"
+          },
+          {
+            "name": "tradeable 计数",
+            "value": "True 15 / False 57",
+            "how": "item['tradeable']"
+          },
+          {
+            "name": "meaning 分布",
+            "value": "middle_zone_veto 43 / range_edge_opportunity 12 / reduce_long_not_open_short 8 / high_vol_reduce_frequency 3 / pullback_long_opportunity 2 / prior_low_support_not_tradeable 1 / deep_long_requires_second_confirmation 1 / bounce_short_opportunity 1 / wait_for_confirmed_breakout 1",
+            "how": "item['meaning'] 计数——九种语义今天全部出现过"
+          },
+          {
+            "name": "今天的 armed 两条",
+            "value": "ORCL-USDT（trend_up·at_support·S4 趋势回踩做多·共振强·approach=from_above·dist 0.276 ATR·zone kinds=[ema21]）；JPM-USDT（range·S3 区间上沿做空·共振中）",
+            "how": "overview_payload()['armed']"
+          },
+          {
+            "name": "wait_signal 剧本构成",
+            "value": "13 条：S3 区间上沿做空 11 / S4 趋势回踩做多 1（SNOW）/ S13 深跌逆势做多 1（HYPE），全部带「（位置到了信号没到）」后缀",
+            "how": "overview_payload()['wait_signal'] 的 play 字段"
+          },
+          {
+            "name": "共振分级分布",
+            "value": "强 1 / 中 3 / 弱 0 / None 68",
+            "how": "item['resonance']['grade']——grade 只在 main_ok is True 时才有值，所以 68 个 None 里绝大多数是 4h cRSI 未到极值区"
+          },
+          {
+            "name": "zone 总数与每品种数",
+            "value": "共 571 个 zone；每品种最少 4、中位 8、最多 13、均值 7.9",
+            "how": "对 72 个品种逐个 extract_levels 后统计 len(zones)"
+          },
+          {
+            "name": "zone 宽度实测",
+            "value": "width_atr 最小 0.500、中位 0.566、最大 1.488",
+            "how": "571 个 zone 的 width_atr；正好卡在 [2×ZONE_HALF_ATR=0.50, MAX_ZONE_ATR=1.50] 之内"
+          },
+          {
+            "name": "chain_overflow 数量",
+            "value": "0 / 571",
+            "how": "P4 宽度根本解法之后今天没有任何 zone 被打溢出标记"
+          },
+          {
+            "name": "各来源命中 zone 次数",
+            "value": "pivot_high 248 / pivot_low 236 / prev_week_lo 72 / prev_day_lo 72 / range_lo 72 / poc 72 / ema21 72 / prev_day_hi 72 / ema55 72 / range_hi 72 / prev_week_hi 72 / ema100 71 / ema200 65",
+            "how": "571 个 zone 的 kinds 展开计数；非枢轴来源每品种恰好 1 个，说明 13 类来源今天全部可用"
+          },
+          {
+            "name": "levels 层缺失来源",
+            "value": "只有 ema200 缺 7 个品种、ema100 缺 1 个（历史根数不足）；POC 零缺失",
+            "how": "extract_levels()['sources'] 中为 None 的计数"
+          },
+          {
+            "name": "item 级 degraded 分布",
+            "value": "regime_1d_missing 37 / crsi_1d_missing 37 / iv3_missing_for_stop_check 15 / ema200_history_insufficient 7 / ema100_history_insufficient 1",
+            "how": "72 个 item 的 degraded 展开计数；一半品种缺 1d 底座是 X2 扩容后的已知状态"
+          },
+          {
+            "name": "结构止损与宽度校验",
+            "value": "_policy_side 判定有方向的 16 个中，全部找到结构止损；15 个因缺 iv3 出不了宽度结论，只有 1 个出了完整 stop_check，verdict=too_tight",
+            "how": "item['stop_check'] 与 degraded 中的 iv3_missing_for_stop_check"
+          },
+          {
+            "name": "IV 期限装配方式分布",
+            "value": "interp 5 / nearest 3 / 无 IV 66",
+            "how": "_overview_vol_inputs()['method'] 计数"
+          },
+          {
+            "name": "vol_notes 出现次数",
+            "value": "36 个品种至少 1 条；隐含波动历史高位 23、财报临近 5、3日预期波动（interp）5、预期波动（nearest）3、持仓窗内有财报 2",
+            "how": "逐品种 vol_notes()；risk 层 36 与之一致"
+          },
+          {
+            "name": "4h warmup 标志",
+            "value": "False 63 / True 9 / 无审计行 2",
+            "how": "_latest_state_snapshot(conn, symbol, '4h')['warmup']"
+          },
+          {
+            "name": "4h regime 时点与 OHLCV 末根对齐",
+            "value": "72/72 一致（regime_history 末行 ts == 4h ohlcv 末根 ts）",
+            "how": "逐品种比对；注意代码本身没有强制校验，是采集节奏保证的"
+          }
+        ],
+        "gotchas": [
+          "**approach 必须逐 zone 现算，不能传全局值**。locate 会从多个候选 zone 里自己选一个，调用方无从预知谁被选中。location.py:170-181 的 docstring 记录了实测后果：传全局 approach 时 trend_up 的 23 个品种 tradeable 全为 0（回踩买点被误判 wrong_approach）。正确用法是传 prices（末 APPROACH_BARS=3 根收盘序列）；approach 形参只为单 zone 场景与既有测试保留，两者同给时以 prices 为准。",
+          "**touches 和 overlap_count 是两个完全不同的东西，不能互相替代**。touches 只对枢轴来源有意义（= 簇内反转价位个数，是真正的结构验证次数）；overlap_count 是「这条静态价格带被历史 K 线覆盖过几段」，levels.py:128 的注释明确写了这是非因果统计，不得冒充反转验证次数。EMA/POC/range 来源的 touches 恒为 0，看到 0 不代表这条位置没被碰过。",
+          "**tradeable 不等于「可以下单」**。location.py 模块 docstring 写得很清楚：tradeable 只表示该位置是**政策承认的候选机会位**，信号与风控门槛仍由后续决策层负责。今天 tradeable=True 的 15 个里只有 2 个进 armed，其余 13 个是 signal_ok 未达成。",
+          "**_policy_play 的三段后处理顺序敏感，且 signal_ok is None 会吞掉整个剧本名**。tradeable 未成立时优先返回 \"WAIT · 路径未确认（P09…）\" 字符串（哪怕 signal_ok 是 True）；signal_ok is None（cRSI 取不到）时不管 play 算出了什么，最终返回 None。读到 play=None 不代表「无剧本」，也可能是信号层缺数据。",
+          "**WAIT 文案在总览页看不到**。tradeable 非 True 的品种被 _partition_overview 归到 near/middle，用 _overview_lite 投影，而 lite 里**没有 play 字段**。\"WAIT · 路径未确认（P09） · 参考剧本：Sx\" 这串文案只在详情页政策卡（_build_policy_payload）出现。",
+          "**risk 层与其它五层不互斥**。只要有 vol_notes 就并行进 risk（dashboard.py:1820-1827），同一个品种可以同时出现在 armed 和 risk 里。counts 六个数加起来不等于品种总数。",
+          "**squeeze 与 high_vol_chop 会命中 at_support/at_resistance 但永远 tradeable=False**。_eligible 对这两个 regime 认区间边界（与 range 同规则），但 _semantics 把它们判成 wait_for_confirmed_breakout / high_vol_reduce_frequency，tradeable 固定 False。所以它们只会落在 near 层，而 _policy_play 对这两格也返回 None。",
+          "**S13 深跌逆势做多的 required_approach 是 None，不校验来向**。trend_down·at_support·EMA100/200 这一格 tradeable=True 但不要求 from_below/from_above。同样 range 三格也不校验来向。只有 trend_up·support（要 from_above）和 trend_down·resistance（要 from_below）会因 wrong_approach 被否。",
+          "**价格落在 zone 区间内部时不宣告角色翻转**，沿用 origin_role 且 dist_atr=0（location.py:113-116）。所以 dist_atr=0 既可能是「贴着边界」也可能是「已经进到区间里面」，今天 near 层有 8 个品种 dist_atr 恰为 0.0。",
+          "**cRSI 的三个区标签是「超买区/超卖区/带内」（不是 overbought/oversold），且 _signal_ok 只认极值区**。中性的\"带内\"在辅助票里记 0 分而非 None——None 是「这个周期根本取不到数」。两者对 score 的效果相同，但 aux 字段里能区分出来。",
+          "**共振的 grade 只在 4h 主票成立时才有值**。main_ok 为 False 或 None 时 grade 恒为 None，但 score 照样计算并输出。今天 68 个品种 grade=None，读的时候不要把它当成「共振弱」。",
+          "**1d 是底座不是前提**。缺 1d（不足 POLICY_1D_MIN_BARS=90 根）时只在 degraded 里标 regime_1d_missing，4h 判断照常成立。dashboard.py:1655-1657 记录了这条用户裁决与实测依据（37/74 品种 1d 不足）。今天 37 个品种走这条路。",
+          "**POC 用的是每小时 VWAP（quote_vol/volume）分桶，不是真正的逐笔价格分布**。它只有 240 根小时槽、覆盖率门槛 0.80、末槽滞后不得超 2 小时；桶宽随 ATR 变化，所以 POC 位置对 ATR 也敏感。",
+          "**levels 的 ATR 前置门比看起来严**：即使调用方传入了现成的 atr_value，也要先过 _valid_atr_window 的 OHLC 完整性与蜡烛约束检查（levels.py:492-500 的 R2-1 注释），不满足直接 no_atr 返回，传入值被丢弃。",
+          "**merge_zones 的两个条件必须同时成立才合并**（|Δmid|/ATR < 0.50 **且** 并入后宽度 <= 1.50 ATR）。宽度上限不是事后裁剪，它就是阻断链式吞并的闸。合并失败后仍重叠的分片会被 _resolve_overlaps 按中点切开，切不动才退化成一个打 chain_overflow=True 的宽 zone——而 locate 会**直接跳过**所有 chain_overflow 的 zone。",
+          "**find_structural_stop 会按 lo/hi 数值核对 location.zone 确实来自传入的完整 zones 列表**（stopcheck.py:30-37，rel_tol=abs_tol=1e-9）。dashboard 传的是 _policy_zone_payload 加工过的 enriched 列表而不是 levels 原始 zones，两者 lo/hi 未经改动才使这个核对成立——改动 _policy_zone_payload 的边界字段会静默让所有 stop_check 失效。",
+          "**_policy_side 不看 tradeable**。range 两格、trend_up·support 等即使因 wrong_approach 被否，仍会去算结构止损。所以 stop_check 有值不代表这条可交易。",
+          "**vol_notes 的 symbol / iv30 / rv3 三个形参是接口占位，函数体第一行就 del 掉了**（volnote.py:59）。改这三个入参不会影响任何输出文案。",
+          "**expected_move 的 IV 单位是百分数**（如 45.0 代表 45%）。vol_notes 里除了 100 再乘回 100，stopcheck 里直接用百分数与 stop_dist_pct 比——两处口径一致但形式不同，改动时要成对改。",
+          "**overview 的 asof 取所有品种 bar_close_ts 的最小值**（dashboard.py:1912），不是最新值。混合品种池里只要有一个品种落后，整页 asof 就跟着落后。",
+          "**overview_payload 有 60 秒进程内缓存**（_OVERVIEW_CACHE，OVERVIEW_TTL_SEC=60）。调试时连续两次调用可能拿到同一份结果。",
+          "**4h regime 来自 regime_history 最新行，而 price/levels/locate 来自 ohlcv 最后一根，代码不校验两者 ts 一致**。今天实测 72/72 对齐，但这是采集节奏保证的，不是代码保证的——采集中断时可能出现 regime 与位置测量分属不同 bar。",
+          "**POLICY_SIGNAL_OHLCV_LIMIT=400 对 1d 的 90 根门槛是够的，但 EMA200 需要 200 根 4h**。今天 7 个品种因此缺 ema200、1 个缺 ema100，这直接减少了 trend_down·support 格（S13）的候选来源。",
+          "**全部常量的注释都写着「起步值，待校准」**——levels/location/volnote/stopcheck 四个模块共 26 个阈值目前都是未经回测校准的起步值。说明书里必须原样保留这个限定，不要写成已验证参数。"
+        ]
+      },
+      {
+        "layer": "界面与 Hermes（dashboard.py 路由/payload · web/ 三页面 · regime/agent.py 注入）",
+        "summary": "面板是一个零依赖的标准库 HTTP 服务（dashboard.py，默认 127.0.0.1:8787），只读连 SQLite，对外暴露 6 个 GET + 2 个 POST 接口和 web/ 下的静态文件。用户看到两个页面：`/`（overview.html 总览，全宇宙 74 品种的 4h 横截面，按 armed/位置候选/接近/风险/观望/不可用六层分组，60 秒自动刷新，纯 DOM 不用图表库）与 `/symbol`（index.html 详情，单品种的结论板 + 政策判断卡 + K线/IV/持仓三张 ECharts 图 + 状态时间线 + 耦合雷达 + 折叠的特征明细与采集器运维）。两页右侧都嵌 VVVhermes 对话框，走同一个 `/api/agent/chat`，但传不同 scope：`symbol` 注入 build_dashboard 的单品种全量文本 + overview_brief 全品种摘要，`overview` 注入 overview_payload 的 policy 横截面（不再叠 overview_brief）。每次提问的 system 由六段拼成：hermes_system.md（用户掌控）+ system_brief（机器生成能力简报）+ overview_brief（仅详情 scope）+ 时间跳变横幅（可选）+ PANEL_LEGEND（字段口径说明）+ POLICY_GUARD（不可覆盖的 WAIT/禁下单纪律）+ `<panel>` 上下文。对话历史存在库里的 chat 表，是**面板总览页、详情页、终端三方共享的唯一一条 append-only 流**。",
+        "items": [
+          {
+            "name": "GET /api/symbols",
+            "what": "返回品种注册表，供详情页顶栏下拉与深链校验",
+            "location": "dashboard.py:2028",
+            "detail": "{\"symbols\":[...]}；来源 storage.symbols(conn)，今日 74 个"
+          },
+          {
+            "name": "GET /api/dashboard?symbol=",
+            "what": "详情页唯一数据源，返回单品种全量 payload",
+            "location": "dashboard.py:2033",
+            "detail": "默认 symbol=BTC-USDT；顶层键 symbol/instrument/states_map/tfs/dvol/usvol/deriv/policy/health/flips/collector/heartbeat（build_dashboard，dashboard.py:1049）"
+          },
+          {
+            "name": "GET /api/overview",
+            "what": "总览页唯一数据源，全宇宙 4h 横截面 + 分层",
+            "location": "dashboard.py:2036",
+            "detail": "顶层键 updated_at/asof/tf/policy_versions/counts/armed/wait_signal/near/risk/middle/unavailable/heartbeat；服务端 60 秒缓存 _OVERVIEW_CACHE（dashboard.py:1876, OVERVIEW_TTL_SEC=60 @ dashboard.py:57）"
+          },
+          {
+            "name": "GET /api/coupling",
+            "what": "跨资产耦合雷达（详情页折叠卡），三面板统计 + pair FSM + 块级三票 + 复合相关矩阵",
+            "location": "dashboard.py:2038",
+            "detail": "键 updated_at/threshold_version/panels/pairs/blocks/matrix；服务端 300 秒缓存（dashboard.py:1925）；pair FSM 只对 all247 面板算（dashboard.py:1957）"
+          },
+          {
+            "name": "GET /api/agent/info",
+            "what": "Hermes 后端状态条：provider/model/是否自定义提示词/配置解析错误",
+            "location": "dashboard.py:2040",
+            "detail": "字段 provider,model,custom_system,config_error；config_error 存在时前端显示「agent.json 解析失败…已退回 mock」"
+          },
+          {
+            "name": "GET /api/agent/history?limit=",
+            "what": "拉共享对话历史，前端每次刷新与发送后同步",
+            "location": "dashboard.py:2052",
+            "detail": "limit 默认 60，钳制到 [1,200]；返回 {messages:[{id,ts,role,content,scope}]}"
+          },
+          {
+            "name": "GET / 与 /overview.html",
+            "what": "总览页（默认首页）",
+            "location": "dashboard.py:2059",
+            "detail": "回 web/overview.html"
+          },
+          {
+            "name": "GET /symbol 与 /index.html",
+            "what": "详情页；深链参数 ?symbol=",
+            "location": "dashboard.py:2061",
+            "detail": "回 web/index.html；深链在 index.html:228-231 用正则 ^[A-Za-z0-9._:/-]{1,64}$ 过滤后写入 S.symbol，app.js:82 再校验是否在注册表内"
+          },
+          {
+            "name": "静态文件兜底",
+            "what": "web/ 下同名文件按 MIME 表下发",
+            "location": "dashboard.py:2063",
+            "detail": "MIME 白名单只有 .html/.js/.css/.svg（dashboard.py:79）"
+          },
+          {
+            "name": "POST /api/agent/chat",
+            "what": "提问入口；服务端拼历史、调模型、成功后把 user+assistant 两条一起入库",
+            "location": "dashboard.py:2087",
+            "detail": "body {scope,symbol?,message}；scope 只允许 symbol/overview（否则 400）；symbol 必须在 storage.symbols 白名单内（防提示词注入，dashboard.py:2094）；请求体 >512KB 返 413；message 空返 400；>8000 字符直接返 413 而非静默截断（dashboard.py:2117）；只取库里最近 20 条作历史（dashboard.py:2126）"
+          },
+          {
+            "name": "POST /api/agent/clear",
+            "what": "清空共享对话历史",
+            "location": "dashboard.py:2139",
+            "detail": "storage.clear_chat；清的是总览/详情/终端共用的同一张表"
+          },
+          {
+            "name": "_same_origin_ok",
+            "what": "POST 的 CSRF 闸：有 Origin 头时必须等于 Host",
+            "location": "dashboard.py:2072",
+            "detail": "无 Origin（curl/同源导航）放行；不通过返 403「跨站请求被拒绝」"
+          },
+          {
+            "name": "_tf_payload",
+            "what": "详情页每个周期（1d/4h/1h）的一整块数据",
+            "location": "dashboard.py:123",
+            "detail": "键 source,health,candles,ema50,pivots,atr_rank_series,bbw_rank_series,segments,crsi,vwap,state,state_label,raw_state,candidate,preview,confidence,features；显示窗 CANDLES=240（dashboard.py:53），特征窗用 FEATURE_WINDOW 与 collector 对齐；<90 根返 None"
+          },
+          {
+            "name": "_tf_payload.health",
+            "what": "每周期数据健康：预热/陈旧",
+            "location": "dashboard.py:250",
+            "detail": "warmup=bars<WARMUP_BARS；stale=最后收线年龄 > STALE_TF_MULTIPLIER(1.5)×周期（dashboard.py:66）；last_close_age_min 由开盘 ts + 一个周期算收线时刻（dashboard.py:111）"
+          },
+          {
+            "name": "_policy_zone_payload / _build_policy_payload",
+            "what": "详情页政策判断卡的全部内容",
+            "location": "dashboard.py:1291 / dashboard.py:1340",
+            "detail": "policy 键 versions,tf,regime_4h,regime_1d,price,atr,location,crsi,crsi_by_tf,signal_ok,signal_tf,resonance,regime_conflict,play,zones,vol_notes,vol_meta,stop_check,degraded；zones 按 dist_atr 升序，每条含 lo,hi,mid,kinds,touches,width_atr,chain_overflow,dist_atr,role_now,role_flipped,eligible"
+          },
+          {
+            "name": "POLICY_VERSIONS",
+            "what": "policy 四模块版本号，随 payload 出到界面与 Hermes",
+            "location": "dashboard.py:71",
+            "detail": "今日实测 {levels: lv1, location: loc1, stopcheck: stop1, volnote: vol1}；前端显示为「先验 lv1/loc1/stop1/vol1 · 未校准」（app.js:492）"
+          },
+          {
+            "name": "_resonance",
+            "what": "4h 主票 + 1d/1h 辅助票的共振分级",
+            "location": "dashboard.py:1126",
+            "detail": "main_ok 只看 4h cRSI 与位置方向是否一致；aux 同向+1/反向-1/带内0/缺失None；grade 由 RESONANCE_STRONG_MIN=1、RESONANCE_WEAK_MAX=-1（dashboard.py:64-65）切强/中/弱；输出 main_tf,main_zone,main_ok,aux,score,grade,conflicts"
+          },
+          {
+            "name": "_policy_play",
+            "what": "把 regime×location 映射成剧本展示名（S1/S3/S4/S5/S13）",
+            "location": "dashboard.py:1261",
+            "detail": "tradeable≠True 时输出 \"WAIT · 路径未确认（P09…） · 参考剧本：X\"；signal_ok=False 时输出 \"X（位置到了信号没到）\""
+          },
+          {
+            "name": "_heartbeat",
+            "what": "顶栏五路采集心跳（两页共用）",
+            "location": "dashboard.py:988",
+            "detail": "固定 5 lane：近端IV(45/120分)、个股IV(15/30分, RTH门控)、期限曲线(90/180分, RTH门控)、衍生品(15/30分)、OpenD(TCP 127.0.0.1:11111 探活, 0.4s 超时 60s 缓存, dashboard.py:972)；state ∈ ok/warn/bad/idle，前端译为 正常/迟滞/断流/盘外（app.js:1290, overview.js:223）"
+          },
+          {
+            "name": "_collector_info",
+            "what": "详情页折叠区的采集器运维块",
+            "location": "dashboard.py:949",
+            "detail": "last_run,interval,cycle_sec,errors,counts(全部业务表行数),log_tail(collector.log 末 25 行)"
+          },
+          {
+            "name": "_flips",
+            "what": "状态翻转明细（详情页折叠表 + Hermes 上下文）",
+            "location": "dashboard.py:927",
+            "detail": "后端先排除 1h，只给 4h/1d 最近 40 条；字段 ts,tf,from,to,confidence"
+          },
+          {
+            "name": "_partition_overview",
+            "what": "总览六层分组与排序逻辑",
+            "location": "dashboard.py:1805",
+            "detail": "tradeable=True 且 signal_ok=True → armed；tradeable=True 其余 → wait_signal（两者都给 _OVERVIEW_FULL_KEYS 全字段，dashboard.py:1775）；at∈{at_support,at_resistance} → near（_overview_lite 精简）；at=middle_zone → middle；其余 → unavailable；有 vol_notes 的品种额外进 risk（与上面并行，不互斥）。armed/wait_signal 按 (共振grade, dist_atr, symbol) 排序，near 按 dist_atr"
+          },
+          {
+            "name": "overview.html 页面结构",
+            "what": "总览页六个区块 + 顶栏 + Hermes 侧栏",
+            "location": "web/overview.html:91-146",
+            "detail": "区块顺序：4h主票共振(armed, 卡片网格) / 位置候选(wait_signal, 卡片网格) / 接近关键位(near, 紧凑行) / 风险提示(risk, 紧凑行) / 观望(middle, details 折叠) / 数据不可用(unavailable, details 折叠)；顶栏 hbStrip 心跳 + updated 计算时刻 + asof 数据截至 + UTC 时钟 + 刷新倒计时 + VVVhermes 开关"
+          },
+          {
+            "name": "overview.js renderCandidates",
+            "what": "armed/wait_signal 卡片显示的每一行",
+            "location": "web/overview.js:96",
+            "detail": "symbol+display+预热角标+共振角标+4h regime 标签(带状态色)；zoneLabel(区间上/下沿·EMA·突破后回踩前高)+距 N ATR+触碰次数；共振行(main_ok 文案 + 4h cRSI 区域与值 + 1d/1h 辅助票与票值 + 1d regime)；建议关注·剧本；止损宽度 verdict+ratio+note；⚠vol_note、⚠共振弱、⚠regime_conflict"
+          },
+          {
+            "name": "overview.js MEANING / STATE",
+            "what": "位置语义与状态的中文标签表（总览页自带）",
+            "location": "web/overview.js:5-22",
+            "detail": "STATE 五态含颜色（trend_up #0a8a66 / trend_down #b91f31 / range #4a90d9 / squeeze #a87c05 / high_vol_chop #5f35c9）；MEANING 九条把 location.meaning 枚举翻成中文"
+          },
+          {
+            "name": "index.html 页面结构",
+            "what": "详情页区块顺序",
+            "location": "web/index.html:62-195",
+            "detail": "①结论板(三周期状态卡 + 波动率分位条 + 待确认切换) → ①b 政策判断卡 → ②价格结构+cRSI+VWAP 主图 / IV vs RV30 / IV vs RV3 / 持仓与杠杆 → ③状态时间线与翻转 → ③b 跨资产耦合雷达(折叠) → ④特征明细与运维(折叠)"
+          },
+          {
+            "name": "renderStateCards",
+            "what": "结论板每周期一张卡",
+            "location": "web/app.js:335",
+            "detail": "周期名+健康⚠角标+conf(原始)+状态名与色点+动态行(预览(未收线)/酝酿 n/need(含事件窗标注)/原始判定/⚡原始树边界 m<0.15)+标记行(SQZ挤压/HV高波/cRSI区域/背离/突破量分位, 最多4个)+VWAP 偏离双极条"
+          },
+          {
+            "name": "renderPolicy",
+            "what": "政策判断卡的全部渲染",
+            "location": "web/app.js:468",
+            "detail": "policyMeta(周期·4h态·1d态·先验版本·未校准)、policyConclusion(建议关注·剧本 或 WAIT 灰显)、policySignal 徽章(共振/未共振/不可判定 + 强弱与辅助净分, title 给 1d/1h 票与冲突)、zone 表六列(距最近已收线4h收盘价ATR / 区间[lo,hi] / 来源 / 枢轴反转次数 / 当前角色 / eligible，命中行高亮、ineligible 半透明)、APPROACH 路径、波动率提示、止损宽度校验、降级标注行"
+          },
+          {
+            "name": "policyZoneMarkAreas",
+            "what": "主图上的支撑/压力带（仅 4h）",
+            "location": "web/app.js:438",
+            "detail": "只画 eligible=true 且 role_now∈{support,resistance} 的 zone；绿虚线=支撑、红虚线=压力，命中的加粗；切到 1d/1h 返回空数组并在 priceMeta 标注「关键位按 4h 计算，本周期不显示」"
+          },
+          {
+            "name": "renderPriceChart",
+            "what": "主图四格",
+            "location": "web/app.js:657",
+            "detail": "格1 K线+EMA50+摆动高低H/L+VWAP虚线+状态背景色带+zone 带；格2 成交量；格3 cRSI+自适应上下带+30/70 参考线+背离散点；格4 VWAP 偏离(ATR 单位, 0/±2 参考线)"
+          },
+          {
+            "name": "renderDvol / renderUsvol / renderIv3",
+            "what": "波动率两张卡（30d 制度层 / 3d 持仓前端层）",
+            "location": "web/app.js:860 / 965 / 916",
+            "detail": "加密走 dvol（DVOL 隐含 + RV30）；美股/商品走 usvol 变体（个股IV实线 + RV30 + 指数锚虚线；meta 行给 实时(未结算)IV、结算IV与分位口径(条件/原始)、财报⚑、VRP、指数锚、期限结构 9D/30D 与 30D/3M、个股期限 3d/9d/30d）；3d 卡独立成图（IV3 vs RV3 + 3dIV−RV3 剪刀差）"
+          },
+          {
+            "name": "renderDeriv",
+            "what": "持仓与杠杆卡（Binance 永续）",
+            "location": "web/app.js:1060",
+            "detail": "九个指标格：OI张数(+分位)、OI Δ4h、OI Δ24h、Taker买卖比(+分位)、Funding 下期预测(/结算周期)、上期结算(+分位)、Funding 年化、Premium(+分位)、个股 iv30(标注 moomoo条件/原始分位 或 CBOE影子·短史)；下方 OI 折线 + 已结算 Funding 柱"
+          },
+          {
+            "name": "renderFeatTable",
+            "what": "折叠区 26 项特征明细表，按六个支柱分组",
+            "location": "web/app.js:1159",
+            "detail": "标识(TF/状态/原始/conf(原始))、结构(dir/ER%/摆动高/摆动低)、波动率(ATR%/ATR%ds/BBW%/RV年化%/加速度/下行方差)、量能(tilt/volZ/突破)、cRSI(值/带位%/区域/背离)、路径几何·影子(频率/主周期/τ/margin(原始树)/滞后)"
+          },
+          {
+            "name": "renderCoupMatrix",
+            "what": "复合相关矩阵热力图",
+            "location": "web/app.js:934",
+            "detail": "轴按主题块排序，观察池符号打 °，联合样本 < min_eff(今日 400) 的格子 opacity 0.22 淡显；高度随品种数自适应 max(720, n*13+160)"
+          },
+          {
+            "name": "PANEL_LEGEND",
+            "what": "随 <panel> 一起注入的字段口径说明（机制文本，不占用户提示词）",
+            "location": "regime/agent.py:44",
+            "detail": "2338 字符，覆盖：dir/ER%/ATR%/BBW%/tilt/cRSI/conf、VWAP 仅展示层、DVOL 与近端IV/RV30/RV3/3dIV−RV3、OI/Funding(预测 vs 结算分位)/Premium/Taker、迟滞确认态与事件窗门槛、加速度与下行方差、路径几何与 margin(按原始树)、美股专属(ATR%ds/个股IV cond与raw分位/指数IV不混算/°未确权/VRP/期限双速/⚑财报)、心跳五路、时间语义(当前时刻打头 + 历史消息 [时间·距今] 前缀，冲突以 <panel> 为准)、policy 共振口径(signal_ok 是 main_ok 的兼容副本)、总览 scope 的 counts 含义"
+          },
+          {
+            "name": "POLICY_GUARD",
+            "what": "不可覆盖的行为纪律，永远拼在 <panel> 之前",
+            "location": "regime/agent.py:94",
+            "detail": "177 字符，四条：WAIT 是正常输出且须逐项列未过的门；只给建议与理由、禁命令式开平仓与仓位指令、系统不下单；消息与叙事不构成开仓依据(P20)；满仓/一把梭一律否决、改讨论 DCA(P21)"
+          },
+          {
+            "name": "chat() 的 system 装配顺序",
+            "what": "Hermes 每次提问看到的完整 system",
+            "location": "regime/agent.py:786-810",
+            "detail": "load_system()（hermes_system.md，缺失时用 DEFAULT_SYSTEM）+ system_brief() + overview_brief()（仅 symbol scope）+ gap_note（可选）+ PANEL_LEGEND + POLICY_GUARD + <panel>context</panel>"
+          },
+          {
+            "name": "render_context（symbol scope 的 <panel>）",
+            "what": "单品种上下文文本",
+            "location": "regime/agent.py:174",
+            "detail": "依次为 当前时刻行 / 品种与类型（美股永续标注正股盘中或休市及休市假象警告）/ ⚠数据健康警告 / 每周期一行（状态+原始判定+酝酿+未收线预览+dir/ER%/ATR%(去季节化)/BBW%/RV/加速度/下行方差/路径几何/tilt/摆动高低/cRSI/VWAP偏离/突破量分位）/ Policy测量 / Policy resonance / Policy regime_conflict / Policy GATE1止损 / Policy IV meta / Policy vol_notes / Policy degraded / 波动率 / 美股(或商品)波动率 / 持仓(Binance永续) / 近期状态翻转(前6条) / 采集心跳(五路) / 采集器"
+          },
+          {
+            "name": "render_overview_context（overview scope 的 <panel>）",
+            "what": "总览横截面上下文文本",
+            "location": "regime/agent.py:454",
+            "detail": "当前时刻 / 总览口径 / 分层统计六个数 / asof / updated_at / 采集心跳 / 4h主票共振逐条 / 位置候选逐条（每条含 symbol、4h与1d regime、位置+meaning+距ATR+来向、信号cRSI与主票、剧本、resonance 串、regime_conflict、stop_check、波动率提示、warmup、degraded）/ 接近关键位逐条 / 不可用逐条 / 风险位逐条 / 观望区只给数量"
+          },
+          {
+            "name": "system_brief",
+            "what": "机器生成的系统能力简报，随升级自动更新",
+            "location": "regime/agent.py:586",
+            "detail": "版本(RULES_VERSION/AUDIT_VERSION/回测锁箱) + 品种清单与数据跨度 + 权威文档(最近两个 SYSTEM_LOG + docs/ 末10个) + git log -8 + 「以上及仓库代码/文档才是权威描述、你在只读沙箱可自查」"
+          },
+          {
+            "name": "overview_brief",
+            "what": "仅 symbol scope 注入的全品种横截面摘要",
+            "location": "regime/agent.py:652",
+            "detail": "<all_symbols_snapshot>：每品种 1d/4h/1h 最新确认态(含原始分歧、conf、atr%、⚠预热/⚠陈旧) + 个股隐波横截面(moomoo 条件分位，°=252日原始) + 耦合雷达一行 + 块级票 + vvvquery.py 只读查询接口用法（panel/states/tables/sql，含 stock_vol 必须带 source 条件的警告）"
+          },
+          {
+            "name": "时间感知三件套",
+            "what": "当前时刻锚点 / 历史消息时间前缀 / 时间跳变横幅",
+            "location": "regime/agent.py:771 / 783 / 797",
+            "detail": "_time_tag 给每条历史消息加 [MM-DD HH:MM UTC·距今] 前缀（加在 8000 字符截断之后，前缀不会被截掉）；CHAT_GAP_NOTICE_MIN=15 分钟，超过则在 system 插入 ⚠ 横幅要求以本轮 <panel> 为准"
+          },
+          {
+            "name": "scope 前缀",
+            "what": "历史消息按来源标注 [scope:overview] / [scope:symbol]",
+            "location": "regime/agent.py:816",
+            "detail": "两页共享同一条流，靠这个前缀让模型知道某条问答是在哪个视角下发生的"
+          },
+          {
+            "name": "消息裁剪与掐头",
+            "what": "送模前只留最近 20 条，且必须以 user 开头、以 user 结尾",
+            "location": "regime/agent.py:821-825",
+            "detail": "开头的孤立 assistant 会被 pop 掉（避免把上一轮回答当成对当前问题的既有立场）；最后一条不是 user 则返回 {\"error\":\"最后一条消息必须是用户消息\"}"
+          },
+          {
+            "name": "provider 分支",
+            "what": "Hermes 可插拔后端",
+            "location": "regime/agent.py:828-846",
+            "detail": "mock / anthropic / openai / ollama / codex；未知 provider 返错。当前 agent.json：provider=codex, model=gpt-5.6-sol, codex_args=[-c, model_reasoning_effort=\"high\"], timeout_sec=600"
+          },
+          {
+            "name": "_safe_codex_args / _CODEX_FORBIDDEN",
+            "what": "codex 后端的沙箱保护（拒绝危险参数，强制 -s read-only）",
+            "location": "regime/agent.py:860 / 869",
+            "detail": "拒绝列表：--dangerously-bypass-approvals-and-sandbox, --full-auto, --yolo, -s/--sandbox, -C/--cd, -a/--ask-for-approval；命令末尾固定追加 -s read-only，cwd=项目根。注释明说这是黑名单不是白名单，未知参数仍放行"
+          },
+          {
+            "name": "_chat_has_scope / _ensure_chat_scope",
+            "what": "chat 表的 scope 列由 dashboard 惰性 ALTER 添加（storage.py 冻结不改）",
+            "location": "dashboard.py:1981 / 1986",
+            "detail": "ALTER TABLE chat ADD COLUMN scope TEXT NOT NULL DEFAULT 'symbol'，立即提交；旧终端走 storage.add_chat() 的消息自动记为 symbol"
+          },
+          {
+            "name": "前端 Hermes 交互（两页一致）",
+            "what": "发送/清空/同步/折叠状态",
+            "location": "web/app.js:1297-1421 / web/overview.js:289-416",
+            "detail": "Enter 发送 Shift+Enter 换行；发送时乐观气泡，失败标 unsent 并提示「此条未入共享历史」；忙时禁止清空；每次数据刷新顺带 hermesSync（终端里的新提问会出现在页面上）；侧栏开合记 localStorage 键 vvvhermes_open；预设 chips 详情页 4 个、总览页 3 个"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "查询时刻",
+            "value": "2026-08-06 00:34 UTC",
+            "how": "date -u，本清单全部实测数字的时点"
+          },
+          {
+            "name": "注册品种数",
+            "value": "74",
+            "how": "storage.symbols(connect_ro())"
+          },
+          {
+            "name": "总览分层 counts",
+            "value": "armed 2 / wait_signal 13 / near 14 / risk 36 / middle 43 / unavailable 2",
+            "how": "dashboard.overview_payload()['counts']"
+          },
+          {
+            "name": "armed 品种",
+            "value": "ORCL-USDT, JPM-USDT",
+            "how": "overview_payload()['armed'] 的 symbol"
+          },
+          {
+            "name": "wait_signal 品种",
+            "value": "BNB, EWY, IBM, INTC, MSTR, RKLB, XBI, HYPE, SNOW, V, ARM, BABA, META（均 -USDT）",
+            "how": "overview_payload()['wait_signal'] 的 symbol，按 (共振grade, dist_atr) 排序"
+          },
+          {
+            "name": "unavailable 原因分布",
+            "value": "4h_ohlcv_missing × 2",
+            "how": "Counter(x['reason'] for x in overview_payload()['unavailable'])"
+          },
+          {
+            "name": "overview_payload 冷计算耗时",
+            "value": "2.8 秒",
+            "how": "time.time() 包住一次未命中缓存的 overview_payload()"
+          },
+          {
+            "name": "总览 asof",
+            "value": "2026-08-06 00:00 UTC",
+            "how": "overview_payload()['asof']（各品种 4h 收线时刻的最小值）"
+          },
+          {
+            "name": "policy_versions",
+            "value": "levels lv1 / location loc1 / stopcheck stop1 / volnote vol1",
+            "how": "overview_payload()['policy_versions']"
+          },
+          {
+            "name": "五路心跳实测",
+            "value": "近端IV ok 25.7分 / 个股IV idle 276.0分 / 期限曲线 idle 285.9分 / 衍生品 ok 0.6分 / OpenD ok",
+            "how": "dashboard._heartbeat(connect_ro())，此刻为美股盘外，两条 RTH 门控管线判 idle"
+          },
+          {
+            "name": "耦合雷达规模",
+            "value": "面板 3 个(all247/usrth/cross)、pairs 37 对、blocks 1 条、矩阵 74×74、min_eff 400、threshold_version calibrated-1",
+            "how": "dashboard.coupling_payload()"
+          },
+          {
+            "name": "chat 表行数",
+            "value": "90 行，scope 全部为 symbol",
+            "how": "sqlite3 SELECT COUNT(*)/GROUP BY scope FROM chat"
+          },
+          {
+            "name": "collector 运维读数",
+            "value": "间隔 300s、单轮 59.3s、本轮错误 10 个、业务表 19 张",
+            "how": "dashboard._collector_info(connect_ro())"
+          },
+          {
+            "name": "Hermes system 总长度（symbol scope, BTC-USDT）",
+            "value": "约 16875 字符",
+            "how": "len(hermes_system.md 788 + system_brief 1945 + overview_brief 9449 + PANEL_LEGEND 2338 + POLICY_GUARD 177 + render_context 2178)"
+          },
+          {
+            "name": "Hermes system 总长度（overview scope）",
+            "value": "约 16871 字符",
+            "how": "len(788 + 1945 + 2338 + 177 + render_overview_context 11623)；不含 overview_brief"
+          },
+          {
+            "name": "render_context(BTC-USDT) 规模",
+            "value": "2178 字符 / 17 行",
+            "how": "regime.agent.render_context(build_dashboard('BTC-USDT'))"
+          },
+          {
+            "name": "render_overview_context 规模",
+            "value": "11623 字符 / 79 行",
+            "how": "regime.agent.render_overview_context(overview_payload())"
+          },
+          {
+            "name": "前端刷新周期",
+            "value": "两页均 60000 ms",
+            "how": "web/app.js:20 与 web/overview.js:4 的 REFRESH_MS"
+          },
+          {
+            "name": "服务默认监听",
+            "value": "127.0.0.1:8787",
+            "how": "dashboard.py:2178-2179 argparse 默认值"
+          }
+        ],
+        "gotchas": [
+          "首页是总览不是详情页：`/` 与 `/overview.html` 都返回 overview.html；详情页在 `/symbol`（或 `/index.html`），深链形如 `/symbol?symbol=NVDA-USDT`。总览卡片的链接就是 detailHref() 生成的这个地址（web/overview.js:40）。",
+          "Hermes 对话历史只有一条：总览页、详情页、终端 vvvhermes.py 共享 chat 表这一条 append-only 流。scope 只决定注入什么上下文、以及历史消息前缀标 [scope:overview]/[scope:symbol]，**不分流也不隔离**；点「清空」清的是三方共用的全部历史（dashboard.py:2139）。",
+          "两个 scope 注入的东西不对称：symbol scope = 单品种 <panel> + overview_brief（全品种状态横截面 + 个股隐波 + 耦合雷达 + vvvquery 用法）；overview scope = policy 横截面 <panel>，**不注入 overview_brief**（agent.py:792 注释：总览上下文本身已是横截面）。所以在总览页问某个品种的深度特征，模型手里没有那些数字，得自己跑 vvvquery。",
+          "signal_ok 不是独立判据，它只是 resonance.main_ok 的兼容副本（dashboard.py:1273 与 PANEL_LEGEND 明写）。1d/1h 辅助票只影响 grade 强/中/弱与排序，永远不否决 4h 主票，也不改 play、不影响是否进 armed。",
+          "risk 分组与其他五组**不互斥**：任何有 vol_notes 的品种都会额外进 risk（dashboard.py:1821），所以六个 counts 相加大于品种总数。今日 74 个品种、counts 合计 110。",
+          "总览 armed/wait_signal 给全字段（_OVERVIEW_FULL_KEYS，dashboard.py:1775），near/middle 只给精简字段（_overview_lite，dashboard.py:1784）——near 行里的 crsi 只有 zone 一个键，没有数值；middle 在 Hermes 上下文里按约定只给数量不逐条。",
+          "zone 表里的「枢轴反转次数」= zone.touches，是枢轴价位簇的成员数，**不是价格回扫该价带的次数**（app.js:557 的 title 就是这么写的）。总览卡片上写作「触碰N次」，用词不一致但同一个字段。",
+          "详情页政策卡的 zone 与主图上的支撑/压力带**固定由 4h 计算**；切到 1d/1h 时主图不画带子，并在 priceMeta 追加「关键位按 4h 计算，本周期不显示」（app.js:441, 666）。",
+          "conf 是原始逐根判定的子信号一致度，属于「原始」列；确认态（迟滞折叠后的 state）没有独立置信度。特征表的表头写成 conf(原始)、Hermes 文本写成「原始判定conf …——确认态无独立置信度」。同理 margin 是相对原始树算的，与当前确认态可能不同。",
+          "IV 分位有三条互不混算的线：moomoo 个股 IV（rank_kind=cond 是 504 日同财报状态条件分位，样本不足回退 raw 252 日原始分位）、CBOE 自采 iv30（影子值，短史，分位基本恒空）、CBOE 指数 VIX/VXN（长历史锚）。前端与 Hermes 都必须跟着 rank_kind / iv30_src / spread_src 标注口径，绝不跨线比较。",
+          "实时 IV 与结算 IV 分列：live 块打 preview 标记，其分位是「预览分位」，正式分位只在已结算序列上算（dashboard.py:453 文档串）。同理未收线 K 线的 preview 状态只作预警，永不入 regime_history。",
+          "index.html 与 app.js 的注释仍写「38×38 复合相关矩阵」，实际今天是 74×74（矩阵尺寸随注册品种自适应）。注释已过时，说明书不要照抄。",
+          "ECharts 走 CDN（index.html:224）。CDN 不可达时详情页降级为「仅显示表格与时间线」并在 banner 里说明（app.js:305）；总览页完全不用图表库，不受影响。",
+          "POST /api/agent/chat 只接受一条新消息，历史一律由服务端从 chat 表拼（旧的 messages 整段直传形态已删除，dashboard.py:2120 注释）——所以前端无法伪造对话史。超过 8000 字符的提问直接 413 拒绝，而不是静默截断。",
+          "缓存有两层且时长不同：/api/overview 服务端 60 秒（与前端刷新周期同步），/api/coupling 服务端 300 秒。总览页顶栏的「计算 …」是 updated_at（本次计算时刻），「数据截至 …」是 asof（各品种 4h 收线时刻的最小值），两者含义不同不要混说。",
+          "codex 后端的参数过滤是黑名单不是白名单：_CODEX_FORBIDDEN 只列出已知的危险开关，未知参数仍会放行（agent.py:928 注释自认这一点）。末尾强制追加的 -s read-only 也不能抵消 --dangerously-bypass-approvals-and-sandbox 这类独立开关。",
+          "chat 表的 scope 列不是 storage.py 建表时就有的，而是 dashboard 首次写入时惰性 ALTER 补上（dashboard.py:1986）；旧库读历史时 scope 会是 None，前缀就不加。"
+        ]
+      },
+      {
+        "layer": "运维治理",
+        "summary": "VVV_Trade 是单机双进程系统：collector.py 常驻每 300 秒采一轮写 data/market.db（WAL），dashboard.py 起本地 HTTP 服务（127.0.0.1:8787）只读同一个库，两者靠 WAL 解耦；美股标的级 IV 另需本机 moomoo OpenD 常驻（127.0.0.1:11111）。所有进程当前都是手工前台拉起——仓库里有 launchd/com.vvv.collector.plist，但 ~/Library/LaunchAgents/ 为空、launchctl list 无 com.vvv.collector、data/launchd.*.log 不存在，即从未安装，机器重启后不自启；crontab 也为空，scripts/weekly_rerun.sh 同样没有调度器挂载。日志只有一个 data/collector.log（无轮转，17.9 MiB / 190,667 行，约 3.1 MB/天），面板每次请求全文件 readlines() 后取尾 25 行。测试实跑 23 文件 / 302 用例 / 59.80 秒全过，CI 是 GitHub Actions 单 job（Python 3.9 + pytest tests/ -q），最近 5 次推送全 success。版本纪律共 7 条独立版本线，其中只有 RULES_VERSION 与 AUDIT_VERSION 进 state_ts_set 谓词、升版即自动重算。",
+        "items": [
+          {
+            "name": "collector.py 常驻模式",
+            "what": "数据采集器主进程。每轮拉行情写 SQLite + walk-forward 判态，只写库；单进程内串行跑 OHLCV/衍生品/CBOE 波动率/moomoo IV/宽度/DVOL 等管线",
+            "detail": "启动 `.venv/bin/python collector.py`（README:130-132）。--interval 默认 300 秒（collector.py:821）、--once 只跑一轮（collector.py:822）、--symbols 默认 74 品种（collector.py:51-64）、--timeframes 默认 1d,4h,1h（collector.py:65）、--sources 默认 auto。循环体 collector.py:838-853：`time.sleep(max(5.0, args.interval - elapsed))`。当前实跑进程 PID 54221，STARTED Wed Aug 5 23:33:29 2026，NI=5（nice 过）",
+            "location": "collector.py:812-857"
+          },
+          {
+            "name": "collector.py --once + launchd",
+            "what": "给 launchd/cron 用的单轮模式；仓库自带 macOS LaunchAgent 描述文件，未安装",
+            "detail": "plist：Label=com.vvv.collector，ProgramArguments=[.venv/bin/python, /Users/luoyingdong/Documents/VVV_Trade/collector.py, --once]，StartInterval=300，RunAtLoad=true，StandardOutPath=data/launchd.out.log，StandardErrorPath=data/launchd.err.log。实测未加载：`launchctl list | grep -i vvv` 退出码 1、`~/Library/LaunchAgents/` 目录为空、data/launchd.out.log 与 data/launchd.err.log 均不存在",
+            "location": "launchd/com.vvv.collector.plist:1-17"
+          },
+          {
+            "name": "dashboard.py",
+            "what": "面板 HTTP 服务（ThreadingHTTPServer，标准库，零额外依赖）。只读库 + 提供 /api/* JSON 与 web/ 静态文件",
+            "detail": "启动 `.venv/bin/python dashboard.py`，--host 默认 127.0.0.1（dashboard.py:2178）、--port 默认 8787（dashboard.py:2179）。库连接一律 storage.connect_ro()（dashboard.py:1050/1886/1937/2029/2054/2100），只有 Hermes 写聊天用 connect_rw_nomigrate()（2118/2140）。访问日志被静默（log_message 空实现）。当前实跑 PID 88550，STARTED Thu Aug 6 09:17:15 2026",
+            "location": "dashboard.py:2176-2186"
+          },
+          {
+            "name": "moomoo OpenD",
+            "what": "标的级 IV（协议 3303/3304）的数据网关，本机常驻的第三方进程。凭据只在 OpenD 侧，代码只连本地回环",
+            "detail": "HOST, PORT = \"127.0.0.1\", 11111（regime/moomoo_iv.py:18）；opend_alive() 用 socket.connect_ex 探活（:56）；open_ctx() 建 OpenQuoteContext（:65）。requirements 要求 moomoo-api>=10.8（10.8.6808 起才有该协议）。当前实跑 PID 669，moomoo_OpenD.app，进程附带 CrashReporter 标注 main_client_version=10.9.6918",
+            "location": "regime/moomoo_iv.py:18"
+          },
+          {
+            "name": "面板 OpenD 心跳 + 分管线心跳",
+            "what": "面板顶部把「OpenD 是否活着」和「每条采集管线各自的新鲜度」显式画出来，专治 OpenD 登出导致美股 IV 静默断流",
+            "detail": "_opend_alive()：TCP 探 127.0.0.1:11111，0.4 秒超时、60 秒缓存（dashboard.py:972-986）。_heartbeat()：按管线各自节奏判新鲜度，RTH 门控的管线盘外记 idle 不误报，盘外 OpenD 离线给 warn",
+            "location": "dashboard.py:972-1048"
+          },
+          {
+            "name": "main.py",
+            "what": "CLI 轻量对照入口，直连数据源现算原始态（单根规则树、无迟滞确认），不写库",
+            "detail": "`.venv/bin/python main.py --symbols SOL-USDT --timeframes 1d,4h`；--demo 用合成数据自检管线；--sources auto 按 instruments 注册表逐品种路由",
+            "location": "main.py:35-79"
+          },
+          {
+            "name": "vvvhermes.py",
+            "what": "终端里的面板助手 REPL，与面板共享同一份对话历史（market.db·chat 表）",
+            "detail": "`.venv/bin/python vvvhermes.py` 交互 / 带参单问单答 / -s 指定注入品种。品种白名单 _check_symbol() 用 connect_ro 校验（提示词注入向量的防线）。不需要面板服务在跑，但需要 collector 采过数据。已写 ~/.zshrc alias：VVVhermes / vvvhermes",
+            "location": "vvvhermes.py:1-40"
+          },
+          {
+            "name": "scripts/vvvquery.py",
+            "what": "只读查询接口，终端与 Hermes 只读沙箱共用",
+            "detail": "子命令 overview / panel <品种> / states <品种> <tf> <N> / tables / sql \"SELECT ...\"。纪律：全程 connect_ro，sql 只接受单条 SELECT",
+            "location": "scripts/vvvquery.py:1-16"
+          },
+          {
+            "name": "scripts/weekly_rerun.sh",
+            "what": "每周复跑：P0 验收实验 + 梯队一 E1-E4 + A1 事件门槛预登记复评。幂等（数据没变则 experiment_id 不变）",
+            "detail": "#!/bin/zsh，set -e，cd 到仓库根；依次跑 run_backtest_p0.py --note \"weekly rerun\"、run_tier1_experiments.py、exp_event_gate.py。**当前无调度器挂载**：crontab -l 报 no crontab，launchctl 也无对应条目——靠手工执行",
+            "location": "scripts/weekly_rerun.sh:1-11"
+          },
+          {
+            "name": "setup_logging() / data/collector.log",
+            "what": "collector 唯一日志出口，StreamHandler + FileHandler 双写，INFO 级",
+            "detail": "格式 `%(asctime)s %(levelname)s %(message)s`，datefmt `%Y-%m-%d %H:%M:%S`。文件路径 os.path.join(storage.DATA_DIR, \"collector.log\")。**全仓无 RotatingFileHandler / maxBytes / logrotate**（grep 确认，仅 collector.py:224 的 `rotated` 是 IV 期限曲线轮转起点，与日志无关）",
+            "location": "collector.py:69-79"
+          },
+          {
+            "name": "_collector_info() 日志尾部读取",
+            "what": "面板「采集器监控」区把日志尾 25 行显示出来",
+            "detail": "`f.readlines()[-25:]` —— 先把整个 collector.log 读进内存再取尾；当前文件 17.9 MiB，面板 60 秒自动刷新一次",
+            "location": "dashboard.py:949-970"
+          },
+          {
+            "name": "_status_payload() / meta.status",
+            "what": "每轮把 interval、cycle_sec、错误列表写进 meta 表，供面板读",
+            "detail": "`\"errors\": errors[-10:]` —— **只留最后 10 条**，面板看到的不是全量错误。同轮还写 meta.last_run（毫秒时间戳）",
+            "location": "collector.py:803-809"
+          },
+          {
+            "name": "data/market.db",
+            "what": "主库。collector 写、面板/回测/实验/耦合只读；WAL 模式支持并发读写",
+            "detail": "路径由 storage.DATA_DIR（regime/storage.py:15）+ DB_PATH（:16）推导 = <仓库根>/data/market.db。三个连接口径：connect() 建表+迁移+PRAGMA journal_mode=WAL（:121-134）、connect_ro() 走 `file:...?mode=ro` URI（:136-144）、connect_rw_nomigrate() 走 mode=rw 不跑迁移（:146-155）。timeout 均为 15 秒。实测 journal_mode=wal，page_size=4096，page_count=58884",
+            "location": "regime/storage.py:15-16"
+          },
+          {
+            "name": "data/backtest_ledger.sqlite3",
+            "what": "回测/实验账本，与主库物理分离",
+            "detail": "LEDGER_PATH 默认 None（regime/backtest.py:60），实际路径在 _ledger_conn 里拼为 storage.DATA_DIR + \"/backtest_ledger.sqlite3\"（:422）。含两张表：experiments、coupling_events",
+            "location": "regime/backtest.py:422"
+          },
+          {
+            "name": "data/vvv.db",
+            "what": "0 字节遗留空文件，grep 全仓无任何代码引用。真库是 market.db",
+            "detail": "0 B，mtime 2026-08-05 09:56",
+            "location": "data/vvv.db"
+          },
+          {
+            "name": "_should() 跨进程节流闸",
+            "what": "低频动作的限频机制，时间戳持久化在 meta 表（跨进程、跨重启有效）。到期即更新时间戳并放行",
+            "detail": "四处调用：binance_opt_iv_last 1800 秒（collector.py:168）、stock_iv_term_last 3600 秒（:201）、usvol_last_fetch 1800 秒（:736，CBOE delayed_quotes 属 ToS 灰区）、moomoo_iv_last_fetch 3600 秒（:761）。盘中实时 IV（sync_moomoo_iv_live）与币安近端 IV 的外层每轮都跑，不过 _should",
+            "location": "collector.py:82-90"
+          },
+          {
+            "name": "tests/ 测试套",
+            "what": "离线单元/一致性/因果测试，不碰网络与真库",
+            "detail": "23 个 .py 文件；无 conftest.py、无 pytest.ini/pyproject.toml/setup.cfg/tox.ini（零配置，纯默认发现）。7 个文件带 `if __name__ == \"__main__\"` 支持 python 直跑：test_causality / test_confirm_states / test_pathgeom / test_resample_4h / test_session_ds / test_usvol_authority / test_stock_vol",
+            "location": "tests/"
+          },
+          {
+            "name": ".github/workflows/ci.yml",
+            "what": "唯一 CI 配置。name: tests，触发条件 push 到 main + 所有 pull_request",
+            "detail": "单 job `pytest`，runs-on ubuntu-latest，actions/checkout@v4 + actions/setup-python@v5，python-version 固定 \"3.9\"（注释：与生产环境一致，macOS CommandLineTools 的 3.9），步骤 = pip install -r requirements.txt → python -m pytest tests/ -q",
+            "location": ".github/workflows/ci.yml:1-19"
+          },
+          {
+            "name": "RULES_VERSION",
+            "what": "版本线 1/7。规则版本号：THRESHOLDS 或 classify 规则结构一改必须递增。**触发自动重算**——进 state_ts_set 跳过谓词，旧版行被判为缺失、下轮 upsert 原地重算",
+            "detail": "当前值 \"v3.1\"。代际：v1 → v2（2026-08-02，EMA200 缺席时权重重归一）→ v3（2026-08-05，A1 事件感知确认门槛）→ v3.1（同日，事件窗改按 ET 日历日比较）。消费点：collector.py:623/637、regime/backtest.py:310/315/359、regime/experiments.py:279",
+            "location": "regime/classify.py:45"
+          },
+          {
+            "name": "AUDIT_VERSION",
+            "what": "版本线 2/7。审计特征集版本：features JSON 的键集或任一字段口径一变就递增（规则可不变）。**触发自动重算**，与 RULES_VERSION 同进 state_ts_set 谓词",
+            "detail": "当前值 \"a8\"。代际史（注释原文）：v2 补四列 / v3 pathgeom+margin / v4 atr_ds / v5 时间对齐批 / a6 加 src 键 / a7 direction 重归一改 dir 口径 + src→src_round 改名 / a8 健康位入库（win/warmup）",
+            "location": "regime/classify.py:58"
+          },
+          {
+            "name": "THRESHOLD_VERSION",
+            "what": "版本线 3/7。耦合 FSM 的阈值代。**不触发重算**——只随事件写进 coupling_events 账本与 /api/coupling 输出",
+            "detail": "当前值 \"calibrated-1\"。代际：prior-1 → prior-2 → calibrated-1（27 组合网格，推导链 docs/COUPLING_CALIBRATED1_20260804.md，2026-08-04 用户批准）。写出点 regime/coupling_fsm.py:129/346、dashboard.py:1935",
+            "location": "regime/coupling_fsm.py:22"
+          },
+          {
+            "name": "LEVELS_VERSION / LOCATION_VERSION / STOPCHECK_VERSION / VOLNOTE_VERSION",
+            "what": "版本线 4-7/7。policy 层四个子模块各自的版本号。**均不触发重算**——policy 层不入库，只在面板 API 输出里标版",
+            "detail": "当前值分别 \"lv1\"（regime/policy/levels.py:15）、\"loc1\"（regime/policy/location.py:14）、\"stop1\"（regime/policy/stopcheck.py:12）、\"vol1\"（regime/policy/volnote.py:12）。四者汇总进 POLICY_VERSIONS 字典（dashboard.py:71-76）。tests/test_policy_volnote.py:68 与 tests/test_policy_stopcheck.py:65 各有一条硬断言钉死当前值",
+            "location": "dashboard.py:71-76"
+          },
+          {
+            "name": "docs/ 顶层文档（23 个 .md）",
+            "what": "设计规格 / 审计报告 / 实验报告 / 预研三类",
+            "detail": "设计与规格：DESIGN_COUPLING_20260804（耦合四段操作化）、DESIGN_POLICY_LAYER_20260805（Eric Policy 决策层设计）、POLICY_SCOPE_20260806（policy 分期边界，以根目录 eric-policy.md v2026-07-11 为唯一规格边界）、A1_EVENT_GATE_20260805（事件门槛诊断→v3 升版→回测）、X2_EXPANSION_20260805（38→74 扩容）。审计：AUDIT_CODEX_20260805（6 路）、AUDIT_CODEX_R2_20260805（12 路）、AUDIT_CONSISTENCY_20260805（一致性与死代码专项，59 KB）、GAPS_20260805（空白与未升级项盘点，按离错误读数的距离排序）。实验报告：BACKTEST_P0_20260803 ×2（不同 experiment_id）、EXPERIMENTS_TIER1_20260803、COUPLING_M1/M2/M2B/CALIBRATED1_20260804。预研与判决：PRERESEARCH_VOL_20260803、PRERESEARCH_XASSET_20260803、DIMENSIONS_VERDICT_20260804、PROBE_NEW_DIMENSIONS_20260804、RESEARCH_IV_PERSTOCK_20260804、RESEARCH_IV_PLATFORMS_20260804、EARNINGS_IV_CONTAMINATION_20260804",
+            "location": "docs/"
+          },
+          {
+            "name": "docs/research/ 原始调研材料",
+            "what": "多路 agent 调研的原始输出留档，被顶层文档引用",
+            "detail": "6 个子目录：20260803/（8 文件，波动率文献预研 t1-t5 + brief）、20260803-xasset/（7 文件，跨资产 t1-t6）、20260804-coupling/（9 文件，c1-c6 + 核实）、consistency_20260805/（30 文件，brief + out1-out14 + 核验）、policy_audit_20260806/（26 文件，brief + out1-out12 + 核验）、policy_design_20260805/（1 文件，design_and_review.json）",
+            "location": "docs/research/"
+          },
+          {
+            "name": "SYSTEM_LOG_*.md（根目录 3 份）",
+            "what": "全量系统日志/快照，逐版留档不改史，只在结论变了的地方明写「旧版说 X，现在是 Y」",
+            "detail": "SYSTEM_LOG_20260731.md（954 行，v1 诚实状态，头部已挂后继指针）、SYSTEM_LOG_20260802.md（384 行，基于 HEAD d9a2fb1 的当日快照）、SYSTEM_LOG_20260805.md（397 行，截至 2026-08-05 06:01 UTC，覆盖 08-01→08-05 共 72 提交）",
+            "location": "SYSTEM_LOG_20260731.md"
+          },
+          {
+            "name": "根目录其余治理文件",
+            "what": "README 是唯一面向使用的总说明；eric-policy.md 是 policy 层的规格源；hermes_system.md 是 Hermes 系统提示词（用户掌控，热读）",
+            "detail": "README.md（21 KB，「运行」章在 122-149 行）、eric-policy.md（17.8 KB，v2026-07-11）、hermes_system.md（1.8 KB）、instruments.json（20 KB，品种注册表，属性每次调用热读）、agent.example.json（模型后端模板，含 anthropic/openai/ollama/codex 四方案）、agent.json（实际配置，已进 .gitignore 因可能含 key）、CRSI.rtf（用户提供的 Pine v6 原稿）、LICENSE",
+            "location": "README.md:122-149"
+          },
+          {
+            "name": ".gitignore 的运维含义",
+            "what": "决定哪些运维产物不入版本控制",
+            "detail": "忽略 .venv/、__pycache__/、*.pyc、.DS_Store、**data/**（注释：数百 MB 级且持续增长，靠 collector 自采积累）、agent.json（可能含 API key）、.claude/settings.local.json、web/*.bak",
+            "location": ".gitignore:1-16"
+          },
+          {
+            "name": ".venv 与 .claude/launch.json",
+            "what": "运行时环境与 IDE 预览配置",
+            "detail": ".venv/pyvenv.cfg：home=/Library/Developer/CommandLineTools/usr/bin，version=3.9.6，include-system-site-packages=false。`.venv/bin/python -V` = Python 3.9.6。.claude/launch.json 只有一条 configuration：name=dashboard，url=http://localhost:8787，port=8787，无 runtimeExecutable（纯挂载已运行服务的预览配置，dashboard.py 本身不读它）",
+            "location": ".claude/launch.json:1-10"
+          },
+          {
+            "name": "运维风险：无自启",
+            "what": "机器重启 / 用户登出后采集与面板都不会自己回来",
+            "detail": "launchd plist 在仓库里但未安装（~/Library/LaunchAgents/ 为空、launchctl list 无 com.vvv.collector）；crontab 为空。日志显示 2026-08-05 一天内 collector 被手工重启 5 次（12:00:33 / 12:21:02 / 17:29:37 / 22:54:06 / 23:33:29）。GAPS C4 已立案：「OpenD 依赖登录会话，重启机器/登出后采集停；命令行版+launchd 方案已备未启用」",
+            "location": "docs/GAPS_20260805.md:75"
+          },
+          {
+            "name": "运维风险：休眠断档",
+            "what": "机器睡眠期间整轮不跑，属永久数据损失（宽度等零历史影子字段每天不采都补不回）",
+            "detail": "pmset -g 显示 sleep=1（当前被 coreaudiod/powerd 临时阻止）、disksleep=10、SleepDisabled=0、hibernatemode=3。无 caffeinate 进程。实测近 900 轮（2026-08-03 03:56 → 08-06 09:34）中间隔中位数 300.0 秒，>15 分钟的断档 7 次，最长 42 分钟",
+            "location": "collector.py:852"
+          },
+          {
+            "name": "运维风险：CBOE iv30 循环无限速（GAPS E1，P0，仍未修）",
+            "what": "美股 iv30 逐品种串行调 CBOE，循环体内无 time.sleep，超过约 26 个后被 429，导致部分美股品种永久零 iv30 且失败不打日志",
+            "detail": "循环 collector.py:744-758，`fetch_stock_iv30` 在 :749，except 只 append 到 errors 不 log.warning。GAPS 记的行号 714-728 已随代码漂到 744-758。实证恒等式（GAPS 原文）：每轮错误数 = 42 + (61 − iv30 成功数)",
+            "location": "collector.py:744-758"
+          },
+          {
+            "name": "运维风险：日志无轮转 + 面板全量读（GAPS E15 第 1 条，仍未修）",
+            "what": "collector.log 只增不减，且面板每次请求都把整个文件读进内存",
+            "detail": "setup_logging 用裸 FileHandler（collector.py:77）；_collector_info 用 readlines()[-25:]（dashboard.py:957）。E15 四条里 `web/*.bak` 被 HTTP 服务出去这条已消除（实测 web/ 下无 .bak 文件）",
+            "location": "docs/GAPS_20260805.md:26"
+          },
+          {
+            "name": "运维风险：静态文件无缓存控制头（GAPS E15 第 3 条，仍未修）",
+            "what": "web/ 静态资源响应只带 Content-Type 与 Content-Length，无 Cache-Control / ETag / Last-Modified",
+            "detail": "_file() 只发两个头（dashboard.py:2161-2170）。对比 _json() 明确发了 `Cache-Control: no-store`（dashboard.py:2157）",
+            "location": "dashboard.py:2161-2170"
+          },
+          {
+            "name": "运维风险：常驻 collector 与 launchd 潜在双写（GAPS E15 第 4 条）",
+            "what": "若日后装上 plist 而前台常驻进程还在跑，两个进程会同时对 market.db 写",
+            "detail": "当前不成立（plist 未装，只有 PID 54221 一个写进程）。WAL 模式本身支持并发，connect() timeout=15 秒",
+            "location": "docs/GAPS_20260805.md:26"
+          },
+          {
+            "name": "运维风险：OpenD 强制升级 / 登出致 IV 静默断流（GAPS C3，部分缓解）",
+            "what": "moomoo 版本过旧拒登录或用户登出 → 个股 IV 采集静默停，采集循环照常转不报错",
+            "detail": "已有缓解：opend_alive 跳过保护（不拖累整轮）+ 面板分管线心跳条 + OpenD TCP 探活。GAPS 原文明记「主动推送报警仍空缺」",
+            "location": "docs/GAPS_20260805.md:74"
+          },
+          {
+            "name": "运维风险：backfill_history 不读 series_floor（GAPS C8）",
+            "what": "手工回填会把断点前段灌回库里",
+            "detail": "GAPS 原文：「C8 backfill_history 不读 series_floor：手工回填会把断点前段灌回，运维时注意」",
+            "location": "docs/GAPS_20260805.md:98"
+          },
+          {
+            "name": "运维风险：文档与代码漂移（GAPS E16，根因结构性）",
+            "what": "README/注释更新频率远低于代码，数字类陈述系统性滞后",
+            "detail": "GAPS 原文诊断：「README 在 72 个提交里只改过 4 次，而 regime/ 改过 40 次；RULES_VERSION 有硬纪律兜底，注释与 README 没有」。本次盘点实测命中两处：ci.yml:17 与 requirements.txt:6 的测试规模注释",
+            "location": "docs/GAPS_20260805.md:28"
+          }
+        ],
+        "numbers": [
+          {
+            "name": "盘点查询时刻",
+            "value": "2026-08-06 09:33–09:37 JST（UTC+0900）",
+            "how": "全部数字均在此窗口内实测；库查询用 sqlite3 file:...?mode=ro"
+          },
+          {
+            "name": "data/ 目录总体积",
+            "value": "261 MB",
+            "how": "du -sh data/"
+          },
+          {
+            "name": "market.db 文件体积",
+            "value": "241,168,384 字节 = 230 MiB（约 241 MB）",
+            "how": "ls -la data/market.db；另 pragma page_count=58884 × page_size=4096 = 230 MiB，journal_mode=wal"
+          },
+          {
+            "name": "market.db-wal",
+            "value": "1,252,512 字节（1.2 MiB）",
+            "how": "ls -la data/market.db-wal"
+          },
+          {
+            "name": "backtest_ledger.sqlite3 体积",
+            "value": "299,008 字节（292 KiB）",
+            "how": "ls -la data/backtest_ledger.sqlite3"
+          },
+          {
+            "name": "market.db 表数量",
+            "value": "19 张",
+            "how": "sqlite3 .tables：bbo/breadth/chat/deriv/dvol/earnings/live_bars/meta/ohlcv/opt_iv_near/ref_daily/regime_history/stock_iv_term/stock_option_stat/stock_vol/stock_vol_live/universe_snapshot/usvol/vol1h"
+          },
+          {
+            "name": "market.db 各表行数",
+            "value": "ohlcv 254,666｜regime_history 238,557｜vol1h 203,198｜deriv 108,978｜stock_vol 47,248｜stock_option_stat 46,495｜bbo 38,205｜usvol 25,901｜ref_daily 15,340｜stock_vol_live 6,743｜dvol 742｜earnings 602｜stock_iv_term 345｜meta 326｜opt_iv_near 312｜universe_snapshot 224｜live_bars 181｜chat 90｜breadth 4",
+            "how": "逐表 select count(*)，与 09:34:38 那轮日志尾部 collector 自报的库计数逐项一致"
+          },
+          {
+            "name": "backtest_ledger 行数",
+            "value": "coupling_events 49｜experiments 5",
+            "how": "逐表 select count(*)"
+          },
+          {
+            "name": "collector.log 体积 / 行数",
+            "value": "18,748,798 字节（17.9 MiB）/ 190,667 行",
+            "how": "ls -l + wc -l"
+          },
+          {
+            "name": "collector.log 覆盖期与增长率",
+            "value": "2026-07-31 15:32:23 → 2026-08-06 09:34:38（5.75 天），约 3.1 MB/天",
+            "how": "head -1 / tail -1 取时间戳，体积除以天数"
+          },
+          {
+            "name": "market.db 平均增长率",
+            "value": "约 40 MB/天（230 MiB ÷ 5.75 天；含 07-31 前的历史回填，非纯自采速率）",
+            "how": "文件体积 ÷ 日志覆盖天数"
+          },
+          {
+            "name": "测试文件数",
+            "value": "23 个",
+            "how": "ls tests/*.py | wc -l"
+          },
+          {
+            "name": "测试用例数与实跑结果",
+            "value": "302 passed in 59.80s",
+            "how": ".venv/bin/python -m pytest tests/ -q（09:35 实跑，0 失败 0 跳过）"
+          },
+          {
+            "name": "用例数分布（前 6）",
+            "value": "test_policy_location 126｜test_stock_vol 39｜test_dashboard_overview 23｜test_policy_r3 19｜test_policy_levels 14｜test_display_consistency 13",
+            "how": "pytest --collect-only 后按文件聚合；23 文件合计 302"
+          },
+          {
+            "name": "支持 python 直跑的测试文件",
+            "value": "7 个（含 __main__ 块）",
+            "how": "grep -l \"__main__\" tests/*.py | wc -l"
+          },
+          {
+            "name": "CI 最近 5 次运行",
+            "value": "5/5 success，耗时 2m31s–3m27s",
+            "how": "gh run list -L 5；最新 run 31059302074（2026-08-06T00:18:54Z，对应 HEAD 7e2239e）"
+          },
+          {
+            "name": "版本线数量",
+            "value": "7 条（RULES_VERSION v3.1 / AUDIT_VERSION a8 / THRESHOLD_VERSION calibrated-1 / LEVELS_VERSION lv1 / LOCATION_VERSION loc1 / STOPCHECK_VERSION stop1 / VOLNOTE_VERSION vol1）",
+            "how": "grep -rn \"_VERSION\" --include=*.py regime collector.py dashboard.py 并逐条读定义"
+          },
+          {
+            "name": "触发自动重算的版本线",
+            "value": "2 条（RULES_VERSION、AUDIT_VERSION）",
+            "how": "collector.py:623 storage.state_ts_set(conn, sym, tf, RULES_VERSION, AUDIT_VERSION) —— 只有这两个进跳过谓词；另 5 条只随输出/账本标版"
+          },
+          {
+            "name": "docs/ 文档数",
+            "value": "顶层 23 个 .md + research/ 6 个子目录共 81 个文件",
+            "how": "ls docs/*.md | wc；逐子目录 ls | wc（20260803 8｜20260803-xasset 7｜20260804-coupling 9｜consistency_20260805 30｜policy_audit_20260806 26｜policy_design_20260805 1）"
+          },
+          {
+            "name": "采集品种数 / 周期",
+            "value": "74 品种 × 3 周期（1d/4h/1h）",
+            "how": "python 解析 collector.DEFAULT_SYMBOLS 得 74；库内 select count(distinct symbol) from ohlcv 同为 74"
+          },
+          {
+            "name": "当前轮耗时与错误数",
+            "value": "cycle_sec 59.3 秒，错误 41 条（meta.status 只留最后 10 条）",
+            "how": "sqlite3 select value from meta where key='status'；最后一轮 last_run=1785976478557"
+          },
+          {
+            "name": "今日错误数分布",
+            "value": "41 出现 97 轮｜75 出现 1 轮｜77 出现 17 轮（共 115 轮）",
+            "how": "grep \"本轮完成\" data/collector.log 过滤 2026-08-06 后取「错误=N」计频"
+          },
+          {
+            "name": "错误主体成分",
+            "value": "绝大多数是 binance_futures「仅 N 根已收盘 K 线，不足 90」的 WARNING（新上架永续历史不够）",
+            "how": "tail -400 collector.log 后对 WARNING 行去时间戳聚类；meta.status 的 10 条样本全部属此类"
+          },
+          {
+            "name": "采集断档（近 3.2 天）",
+            "value": "900 轮中间隔中位数 300.0 秒；>15 分钟断档 7 次，最长 42 分钟（2026-08-04 10:36→11:18 与 08-05 11:13→11:55）",
+            "how": "解析 collector.log 中「本轮完成」时间戳序列算相邻差"
+          },
+          {
+            "name": "collector 手工重启次数",
+            "value": "2026-08-05 一天内 5 次（12:00:33 / 12:21:02 / 17:29:37 / 22:54:06 / 23:33:29）",
+            "how": "grep \"采集器启动\" data/collector.log | tail -5"
+          },
+          {
+            "name": "当前进程",
+            "value": "collector PID 54221（启动 2026-08-05 23:33:29，NI=5）｜dashboard PID 88550（启动 2026-08-06 09:17:15，NI=5）｜moomoo_OpenD PID 669（启动 12:17PM）",
+            "how": "ps -o pid,nice,stat,lstart,command"
+          },
+          {
+            "name": "进程实际使用的解释器",
+            "value": "两个 Python 进程都在 .venv 内（Python 3.9.6）",
+            "how": "lsof -p 54221 / -p 88550 显示 txt 段加载 /Users/luoyingdong/Documents/VVV_Trade/.venv/lib/python3.9/site-packages/*.so；ps 显示的 CommandLineTools 路径是 venv 的 base 解释器"
+          },
+          {
+            "name": "Git 状态",
+            "value": "HEAD 7e2239e（main，与 origin/main 同步），工作树干净，累计 90 个提交",
+            "how": "git log --oneline -3 --decorate / git status --short（空）/ git rev-list --count HEAD"
+          },
+          {
+            "name": "节流闸间隔",
+            "value": "binance_opt_iv 1800s｜stock_iv_term 3600s｜usvol（含 CBOE iv30）1800s｜moomoo_iv 3600s",
+            "how": "grep _should( collector.py 取四处调用的 interval_s 实参；meta 表内对应 key 的时间戳可核（如 usvol_last_fetch=1785976172.9）"
+          }
+        ],
+        "gotchas": [
+          "**launchd plist 在仓库里，但没有安装**。README:146-148 写「安装 plist 到 ~/Library/LaunchAgents/ 并 launchctl load」，是可选步骤且当前未执行：launchctl list 无 com.vvv.collector、~/Library/LaunchAgents/ 目录为空、plist 里声明的 data/launchd.out.log 与 data/launchd.err.log 都不存在。说明书里必须写清楚「现状 = 手工前台常驻，重启不自启」，不能照抄 plist 当成已生效的机制。",
+          "**collector 与 dashboard 都在 .venv 里，别被 ps 输出骗了**。ps 显示的可执行路径是 /Library/Developer/CommandLineTools/.../Python.app，那是 venv 的 base 解释器（pyvenv.cfg 的 home）。lsof 证实两个进程加载的都是 .venv/lib/python3.9/site-packages 下的 .so。判断「是不是在 venv 里跑」要看 lsof，不看 ps。",
+          "**CI 与 requirements 里的测试规模注释已经过期一代**。ci.yml:17 写「截至 2026-08-05：12 个测试文件 / 69 个用例」、requirements.txt:6 写「12 个测试文件中 7 个支持 python 直跑」。今日实跑是 **23 个文件 / 302 个用例**（直跑数 7 仍准确）。说明书写数字要用实跑值，不能引这两处注释。",
+          "**「错误=41」是常态基线，不是故障信号**。这 41 条绝大多数是 binance_futures 对新上架永续报「仅 N 根已收盘 K 线，不足 90」的 WARNING。真正需要盯的是错误数在 41↔77 之间跳变——多出来的那 36 条来自 CBOE iv30 无限速被 429（GAPS E1，P0，代码在 collector.py:744-758 至今没加 sleep，且 except 分支不打日志，日志里完全看不见）。",
+          "**面板上看到的错误列表不是全量**。_status_payload 里 `errors[-10:]`（collector.py:808）只把最后 10 条写进 meta.status。要看全貌得读 data/collector.log 或看日志末尾的「本轮完成 … 错误=N」计数。",
+          "**collector.log 没有任何轮转机制，而面板每 60 秒把它整个读一遍**。setup_logging 用的是裸 FileHandler（collector.py:77），_collector_info 用 `readlines()[-25:]`（dashboard.py:957）。当前 17.9 MiB、约 3.1 MB/天，这条随时间线性恶化。全仓 grep 无 RotatingFileHandler、无 logrotate 配置（collector.py:224 那个 `rotated` 变量是 IV 期限曲线的轮转起点，跟日志无关）。",
+          "**「每周复跑」目前没有调度器**。scripts/weekly_rerun.sh 写得很完整（幂等、自带锁箱纪律说明），但 crontab -l 报 no crontab、launchctl 也无对应条目——完全靠手工执行。说明书不能把它描述成自动机制。",
+          "**7 条版本线里只有 2 条会触发重算**。RULES_VERSION 与 AUDIT_VERSION 进 state_ts_set 的跳过谓词（collector.py:623），升版后旧行被判为「缺失」、下一轮 upsert 原地重算——这是自动的，不需要 DELETE 迁移。THRESHOLD_VERSION 只随耦合事件写账本，四条 policy 版本（lv1/loc1/stop1/vol1）只在 API 输出里标版，改它们**不会**重算任何历史数据。把七条混为一谈会误判升版成本。",
+          "**policy 层的常数几乎全部标着「起步值，待校准」**。levels/location/stopcheck/volnote 四个模块以及 dashboard.py:60-69 的一批阈值（OVERVIEW_DVOL_RANK_MIN=120、POLICY_1D_MIN_BARS=90、RESONANCE_STRONG_MIN=1、STALE_TF_MULTIPLIER=1.5 等）都带这个后缀。说明书引用这些数字时必须保留「待校准」的限定，否则读者会以为是回测出来的。",
+          "**data/vvv.db 是 0 字节遗留文件，不是数据库**。真库只有 data/market.db（主库）和 data/backtest_ledger.sqlite3（账本）。grep 全仓无任何代码引用 vvv.db。",
+          "**.claude/launch.json 里的 8787 不是面板的配置来源**。dashboard.py 自己的默认端口写在 dashboard.py:2179（--port 默认 8787），launch.json 只是给 IDE 预览面板用的挂载描述（无 runtimeExecutable，纯 attach），改它不影响服务。",
+          "**GAPS_20260805.md 里引的行号会漂**。例如 E1 记的是 collector.py:714-728，今日实际在 744-758。用 GAPS 做说明书素材时要重新定位行号，结论仍成立但坐标要更新。同理 E15 的四条里「web/*.bak 被 HTTP 服务出去」已经消除（web/ 下已无 .bak），另三条（无日志轮转、静态文件无缓存头、与 launchd 潜在双写）仍在。",
+          "**面板静态文件不发缓存头，但 JSON 发了 no-store**。别把两者混说：_json 明确带 `Cache-Control: no-store`（dashboard.py:2157），_file 只带 Content-Type + Content-Length（dashboard.py:2161-2170）。",
+          "**OpenD 是外部依赖，不受本系统生命周期管理**。它需要用户登录会话，重启机器或登出后个股 IV 就断流。已有的缓解只到「面板能看见」（opend_alive 跳过保护 + 分管线心跳条 + TCP 探活），**主动推送报警仍是空缺**（GAPS C3 原文）。requirements 要求 moomoo-api>=10.8，本机 OpenD 实际是 10.9.6918。"
+        ]
+      }
+    ]
+  },
+  "workflowProgress": [
+    {
+      "type": "workflow_phase",
+      "index": 1,
+      "title": "清点"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "清点:采集层",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "af4c72eebe3db1089",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976376479,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "采集层（collector.py + regime/data.py + regime/deriv.py + r…",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：采集层\n\n清点数据采集：collector.py 的每个 sync_* 函数（做什么、频率/节流、门控条件）、\nregime/dat…",
+      "lastProgressAt": 1785976821590,
+      "tokens": 115035,
+      "toolCalls": 33,
+      "durationMs": 445110,
+      "resultPreview": "{\"layer\":\"采集层（collector.py + regime/data.py + regime/deriv.py + regime/usvol.py + regime/moomoo_iv.py + regime/binance_opt_iv.py + regime/stock_iv_term.py + regime/breadth.py + instruments.json）\",\"summary\":\"采集层是一个单进程的「一轮到底」采集器：`collector.py` 的 `cycle()` 按固定顺序跑完全部管线，launchd（`launchd/com.vvv.collector.plist`，`StartInterval=300`）每 5 分钟以 `--once` 拉起一次；常驻模式下 `--interval` 默认也是 300 秒。所有低频动作不靠进程内计时，而是用 `_…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "清点:存储层",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "adc34106b44e2f576",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976377896,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "存储层（regime/storage.py + data/market.db）",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：存储层\n\n清点 regime/storage.py：**全部业务表**逐张给出——表名、主键、用途、当前行数、\n时间跨度、谁写谁读。…",
+      "lastProgressAt": 1785976731511,
+      "tokens": 98533,
+      "toolCalls": 26,
+      "durationMs": 353614,
+      "resultPreview": "{\"layer\":\"存储层（regime/storage.py + data/market.db）\",\"summary\":\"存储层是单文件 SQLite（/Users/luoyingdong/Documents/VVV_Trade/data/market.db，WAL 模式，实测 241 MB），全部 schema 与读写出口集中在 /Users/luoyingdong/Documents/VVV_Trade/regime/storage.py（1092 行）。库内有 19 张业务表（sqlite_master 去掉 sqlite_sequence 后），时间戳一律 UTC 毫秒整数，K 线/日线的 ts 取开盘（或交易日 00:00 UTC）时刻。写者只有 collector.py 与 scripts/ 下的回填/修复脚本（唯一持有建表+迁移扳机的是 storage.connect()）…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 3,
+      "label": "清点:判定层",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "af4dbc1f711b22b1e",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976376048,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "判定层（regime/classify.py + regime/features/）",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：判定层\n\n清点 regime/classify.py 与 regime/features/：五个状态的判定规则与**全部阈值当前值*…",
+      "lastProgressAt": 1785976704530,
+      "tokens": 81657,
+      "toolCalls": 34,
+      "durationMs": 328482,
+      "resultPreview": "{\"layer\":\"判定层（regime/classify.py + regime/features/）\",\"summary\":\"判定层把三支柱特征（结构 structure / 波动率 volatility / 成交量 volume）合成为五个互斥状态之一，规则完全显式、无黑盒。核心是一棵**分层短路树**：先判 trend（ER 分位与方向分两个 AND 条件同时满足），否则 squeeze（波动率模块的布尔位），否则 high_vol_chop，兜底 range；置信度每个状态各有一条独立公式。逐根 walk-forward 计算（窗口 FEATURE_WINDOW=400、min_bars=90），产出的原始态 raw_state 再经**非对称迟滞** confirm_states 折叠成确认态写回 state 列。规则与特征集分别由 RULES_VERSION=\\\"v3.1\\\"…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 4,
+      "label": "清点:波动率栈",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "ad4a519a61c3c1106",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976377711,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "波动率栈（3d 持仓前端 / 9d 中段 / 30d 制度层 / 事件轴 + VRP…",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：波动率栈\n\n清点四层波动率：3d 持仓前端（opt_iv_near / stock_iv_term.iv3）、9d、\n30d 制度层…",
+      "lastProgressAt": 1785976893417,
+      "tokens": 134380,
+      "toolCalls": 54,
+      "durationMs": 515706,
+      "resultPreview": "{\"layer\":\"波动率栈（3d 持仓前端 / 9d 中段 / 30d 制度层 / 事件轴 + VRP、期限结构双速、RV3/RV30）\",\"summary\":\"波动率栈按**期限**分四层，四层各有独立数据源、独立表、独立分位规则，代码里从不混拼。3d 持仓前端有两条腿：加密/商品走币安期权链自合成（regime/binance_opt_iv.py → opt_iv_near，24/7，30 分钟一轮），美股走 moomoo 期权链 ATM（regime/stock_iv_term.py → stock_iv_term.iv3，RTH 每小时）；两条腿今天都只有 1 天历史，**不算分位**（代码里根本没有 rank 字段）。9d 只存在于 stock_iv_term.iv9，无分位、无独立判定消费者——它唯一的实际用途是给 iv3 插值到 3.0 天当远腿。30d 制度层是唯一分位可…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 5,
+      "label": "清点:policy决策层",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "ad39c57bc200e54fb",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976376755,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "policy 决策层（regime/policy/ 包 + dashboard.py 的 policy …",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：policy决策层\n\n清点新建的 regime/policy/ 包：levels.py（六类关键位来源、宽度规则、\n聚类算法、全部常…",
+      "lastProgressAt": 1785976831024,
+      "tokens": 94804,
+      "toolCalls": 32,
+      "durationMs": 454269,
+      "resultPreview": "{\"layer\":\"policy 决策层（regime/policy/ 包 + dashboard.py 的 policy 装配与分层）\",\"summary\":\"policy 层把「4h regime 分类结果」翻译成「今天该看哪几个品种、在什么位置、按哪个剧本」。它由四个纯函数模块和一层 dashboard 装配组成：levels.py 从 4h OHLCV + 币安 1h 量流提取 13 类关键位来源、扩成固定最小宽度的价格区间、聚类并正规化为互不重叠的 zone 列表；location.py 把 zone 放进当前 regime 和来向里判定角色（support/resistance）、角色反转、政策语义与 tradeable；volnote.py 产出波动率与财报风险文案；stopcheck.py 用命中 zone 的外沿算结构止损并与 IV 预期波动比宽度。dashboard.p…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 6,
+      "label": "清点:界面与Hermes",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "afb373948234ada99",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976377823,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "界面与 Hermes（dashboard.py 路由/payload · web/ 三页面 · re…",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：界面与Hermes\n\n清点 dashboard.py 的全部路由与 payload 结构、web/ 三个页面\n（overview.h…",
+      "lastProgressAt": 1785976739912,
+      "tokens": 160175,
+      "toolCalls": 41,
+      "durationMs": 362089,
+      "resultPreview": "{\"layer\":\"界面与 Hermes（dashboard.py 路由/payload · web/ 三页面 · regime/agent.py 注入）\",\"summary\":\"面板是一个零依赖的标准库 HTTP 服务（dashboard.py，默认 127.0.0.1:8787），只读连 SQLite，对外暴露 6 个 GET + 2 个 POST 接口和 web/ 下的静态文件。用户看到两个页面：`/`（overview.html 总览，全宇宙 74 品种的 4h 横截面，按 armed/位置候选/接近/风险/观望/不可用六层分组，60 秒自动刷新，纯 DOM 不用图表库）与 `/symbol`（index.html 详情，单品种的结论板 + 政策判断卡 + K线/IV/持仓三张 ECharts 图 + 状态时间线 + 耦合雷达 + 折叠的特征明细与采集器运维）。两页右侧都嵌 VVV…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 7,
+      "label": "清点:运维治理",
+      "phaseIndex": 1,
+      "phaseTitle": "清点",
+      "agentId": "a0a088b8f20fa015f",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1785976376446,
+      "queuedAt": 1785976371028,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "运维治理",
+      "promptPreview": "你在为 /Users/luoyingdong/Documents/VVV_Trade（VVV_Trade）的**系统说明书**做清单盘点。只读，不改任何文件。\n查库用 sqlite3 \"file:/Users/luoyingdong/Documents/VVV_Trade/data/market.db?mode=ro\" \"...\"。\n\n**这不是审查，是清点**——目标是产出准确、完整、可直接写进说明书的清单。\n要求：\n- 每一项都要**实际验证存在**（读代码/查库），不许凭注释或文档转述\n- 常量给出**当前值**与所在 file:line\n- 数字给出**今天实际查到的**（标注查询时刻）\n- 用词与代码保持一致，不要自创术语\n- 中文\n\n# 清点范围：运维治理\n\n清点：进程怎么启动（collector/dashboard/OpenD）、日志位置、\n数据库位置与体积、测试规模（文件数…",
+      "lastProgressAt": 1785976923291,
+      "tokens": 102940,
+      "toolCalls": 57,
+      "durationMs": 546845,
+      "resultPreview": "{\"layer\":\"运维治理\",\"summary\":\"VVV_Trade 是单机双进程系统：collector.py 常驻每 300 秒采一轮写 data/market.db（WAL），dashboard.py 起本地 HTTP 服务（127.0.0.1:8787）只读同一个库，两者靠 WAL 解耦；美股标的级 IV 另需本机 moomoo OpenD 常驻（127.0.0.1:11111）。所有进程当前都是手工前台拉起——仓库里有 launchd/com.vvv.collector.plist，但 ~/Library/LaunchAgents/ 为空、launchctl list 无 com.vvv.collector、data/launchd.*.log 不存在，即从未安装，机器重启后不自启；crontab 也为空，scripts/weekly_rerun.sh 同样没有调度器挂载。日…"
+    }
+  ],
+  "totalTokens": 787524,
+  "totalToolCalls": 277
+}
