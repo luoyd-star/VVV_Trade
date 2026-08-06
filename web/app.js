@@ -9,11 +9,22 @@ const SM = {
   squeeze:       { color: '#a87c05' },
   high_vol_chop: { color: '#5f35c9' },
 };
+// 配色经 OKLab ΔE + 色盲模拟量化校验（2026-08-07）。判据：**不同的量**两两 ΔE≥15
+// （正常视觉硬下限）且色盲下 ≥8；**同一量的不同平滑**（IV 与其 EMA）允许靠明度分级，
+// 因为还有线宽与图例做第二编码。旧配色实测有四对不合格，最糟的 amber/gold 只有 9.7
+// ——它俩本质是同一个橙的深浅。
 const COL = {
-  up: '#0a8a66', down: '#b91f31',
+  up: '#0a8a66', down: '#b91f31',   // 语义锁定：支撑/压力，不得挪作他用
   upDim: 'rgba(10,138,102,.45)', downDim: 'rgba(185,31,49,.4)',
-  blue: '#3861fb', amber: '#a87c05', azure: '#4a90d9',
-  gold: '#dd8500',   // 3d 持仓前端层专属（IV3 实线 / RV3 虚线同色配对）
+  blue: '#1d4ed8',    // IV 主线（旧 #3861fb，加深以拉开与锚线的距离）
+  amber: '#c2410c',   // RV 已实现（旧 #a87c05 土黄，与 gold 撞车 ΔE=9.7）
+  azure: '#0f766e',   // 指数锚（旧 #4a90d9 天蓝，与主线撞车 ΔE=13.7）
+  gold: '#a21caf',    // 3d 持仓前端层专属（IV3 实线 / RV3 虚线同色配对）
+  // IV 族的明度阶梯：EMA 是主线的不同平滑，同色系分级而非另起色相。
+  // **必须用实色，不许用不透明度做层级**——实测旧写法 EMA20 标称 #3861fb 配
+  // opacity 0.32，在白底上实际渲染成 #bfccfe（与白底 ΔE 仅 16.4，可见下限是 30），
+  // 等于画了一层雾。用户直接反馈"看不清"。
+  ema20: '#7ba3fa', ema60: '#5586f5', ema200: '#12308f',
   ink: '#171a20', muted: '#7c8595', sub: '#46505f',
   grid: '#edeff3', border: '#dfe3e9', tipBg: '#ffffff',
 };
@@ -987,19 +998,25 @@ function renderVolMetrics(metrics, host = $('dvolMetrics'), bands = null, ema = 
   host.replaceChildren(details);
 }
 
-function volMaSeries(ema, color = COL.blue) {
+// 层级靠**明度 + 线宽**，不靠不透明度。旧写法把 EMA20/60 压到 opacity 0.32/0.48，
+// 在白底上实际渲染成 #bfccfe / #9fb3fd（与白底 ΔE 16.4 / 24.6，均低于可见下限 30），
+// 用户直接反馈这两条看不清；EMA200 因为 opacity 0.78 侥幸可见，也印证了根因是透明度。
+// 线型仍分点/虚/实：颜色之外的第二编码，色觉障碍读者也能排序。
+function volMaSeries(ema, color = null) {
   if (!ema || typeof ema !== 'object') return [];
   const defs = [
-    ['ema20', 'EMA20', 0.8, 0.32, 'dotted'],
-    ['ema60', 'EMA60', 1.0, 0.48, 'dashed'],
-    ['ema200', 'EMA200', 1.5, 0.78, 'solid'],
+    ['ema20', 'EMA20', 1.6, COL.ema20, 'dotted'],
+    ['ema60', 'EMA60', 1.9, COL.ema60, 'dashed'],
+    ['ema200', 'EMA200', 2.2, COL.ema200, 'solid'],
   ];
-  return defs.flatMap(([key, name, width, opacity, type]) => {
+  return defs.flatMap(([key, name, width, defColor, type]) => {
     const data = ema[key];
     if (!Array.isArray(data) || !data.length) return [];
     return [{
       name, type: 'line', data, symbol: 'none', showSymbol: false, silent: true, z: 2,
-      lineStyle: { color, width, opacity, type },
+      // color 参数保留给主线非 IV 的卡（如无 DVOL 的加密卡主线是 RV30）：
+      // 那种情况下 EMA 属于 RV 族，跟随主线色而不是 IV 蓝。
+      lineStyle: { color: color || defColor, width, type },
     }];
   });
 }
@@ -1096,7 +1113,11 @@ function volBandLayer(lower, upper, level, color, opacity) {
   ];
 }
 
-function volOverlaySeries(ema, bands, color = COL.blue) {
+// color 是**带的填充色**（带属于主线，跟随主线）；emaFamily 是 EMA 线的族色。
+// 两者必须分开：EMA 若跟着主线取同一个色，三条 EMA 与主线会全是同一个蓝
+// ——实测就发生过，用户反馈"看不清"。emaFamily 传 null 时用 COL.ema20/60/200
+// 的明度阶梯（IV 族）；主线不是 IV 的卡（无 DVOL 的加密卡主线是 RV30）传该族色。
+function volOverlaySeries(ema, bands, color = COL.blue, emaFamily = null) {
   const bandSeries = bands && typeof bands === 'object' ? [
     // 外层先画、内层后叠；±1σ 更深，读图无需轨道线和标签。
     ...volBandLayer(bands.l2, bands.u2, 2, color, 0.07),
@@ -1107,7 +1128,7 @@ function volOverlaySeries(ema, bands, color = COL.blue) {
     && bands && Array.isArray(bands.center) && bands.center.length
     ? { ...source, ema200: bands.center }
     : source;
-  return [...bandSeries, ...volMaSeries(effectiveEma, color)];
+  return [...bandSeries, ...volMaSeries(effectiveEma, emaFamily)];
 }
 
 function volLegend(chartSeries) {
@@ -1155,19 +1176,23 @@ function renderDvol() {
   renderIv3({ ...d, iv_txt: xTxt });
   if (!c) return;
   const zs = vol30ZoomStart([d.iv, d.rv], d.view_points);
+  // 主线是 RV30 的卡（无 DVOL 的加密品种），EMA 属于 RV 族、跟随橙色；
+  // 主线是 DVOL 的卡走 IV 族的蓝色明度阶梯（emaFamily=null）。
   const overlaySeries = volOverlaySeries(
-    ema, bands, mainKind === 'rv30' ? COL.amber : COL.blue,
+    ema, bands,
+    mainKind === 'rv30' ? COL.amber : COL.blue,
+    mainKind === 'rv30' ? COL.amber : null,
   );
   const chartSeries = [
     ...(d.iv && d.iv.length ? [{
       name: 'DVOL 隐含', type: 'line', data: d.iv, symbol: 'none', z: 4,
-      lineStyle: { color: COL.blue, width: 2.4 },
+      lineStyle: { color: COL.blue, width: 2.6 },
       endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 },
     }] : []),
     ...overlaySeries,
     ...(d.rv && d.rv.length ? [{
       name: 'RV30 已实现', type: 'line', data: d.rv, symbol: 'none', z: 3,
-      lineStyle: { color: COL.amber, width: mainKind === 'rv30' ? 2.4 : 2 },
+      lineStyle: { color: COL.amber, width: mainKind === 'rv30' ? 2.6 : 2.4 },
       endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 },
     }] : []),
   ];
@@ -1247,11 +1272,11 @@ function renderIv3(o) {
     // 线段在窗内仍偏细；攒够后自动退回纯线
     ...(o.iv3 && o.iv3.length ? [{ name: '3d 隐含', type: 'line', data: o.iv3,
       symbol: 'circle', symbolSize: 4.5, showSymbol: o.iv3.length < 60, z: 4,
-      lineStyle: { color: COL.blue, width: 2 },
+      lineStyle: { color: COL.gold, width: 2.6 },
       endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
-    ...volOverlaySeries(iv3Ema, iv3Bands, COL.blue),
+    ...volOverlaySeries(iv3Ema, iv3Bands, COL.gold, COL.gold),
     ...(o.rv3 && o.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: o.rv3,
-      symbol: 'none', z: 3, lineStyle: { color: COL.amber, width: 1.5 },
+      symbol: 'none', z: 3, lineStyle: { color: COL.amber, width: 2.2 },
       endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
   ];
   c.setOption({
@@ -1306,24 +1331,26 @@ function renderUsvol(uv, meta, c) {
   // 作为时间戳统一作用于三条线，不能拿某条线的点数索引分别切出三段不同历史。
   const zs = vol30ZoomStart([iv && iv.series, uv.series, uv.rv], uv.view_points);
   const overlaySeries = iv && iv.series && iv.series.length
-    ? volOverlaySeries(ema, bands, COL.blue) : [];
+    ? volOverlaySeries(ema, bands, COL.blue, null) : [];
   const chartSeries = [
     // 主 IV 始终最粗最实；EMA200 带只跟主线，避免指数锚或 RV 被误读成基准。
     ...(iv && iv.series && iv.series.length ? [{
       name: '个股IV', type: 'line', data: iv.series, symbol: 'none', z: 4,
-      lineStyle: { color: COL.blue, width: 2.4 },
+      lineStyle: { color: COL.blue, width: 2.8 },
       endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 },
     }] : []),
     ...overlaySeries,
     ...(uv.rv && uv.rv.length ? [{
       name: 'RV30 已实现', type: 'line', data: uv.rv, symbol: 'none', z: 3,
-      lineStyle: { color: COL.amber, width: 2 },
+      lineStyle: { color: COL.amber, width: 2.4 },
       endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 },
     }] : []),
     // 商品无指数锚（uv.index 为空即不画）。
     ...(uv.index && uv.series && uv.series.length ? [{
+      // 锚是**跨标的**的参照（VXN/VIX），不是本品种的量——用独立色相 + 虚线双重区分，
+      // 而不是靠调淡。旧写法 muted 配 opacity 0.55、1px，与 EMA20/60 同样看不清。
       name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none', z: 2,
-      lineStyle: { color: COL.muted, width: 1, type: 'dashed', opacity: 0.55 },
+      lineStyle: { color: COL.azure, width: 2, type: 'dashed' },
     }] : []),
   ];
   c.setOption({
