@@ -874,6 +874,201 @@ function vol30ZoomStart(seriesList, viewPoints) {
   return null;
 }
 
+// 指标值/口径都来自 payload；前端只负责排版与显式标注，不在这里重算任何分位。
+// 这张卡会随每分钟刷新重画，保留 details 的开合状态，避免读表时被自动折回。
+function volMetricValueText(metric) {
+  if (metric.value == null) return '—';
+  const value = typeof metric.value === 'number' && Number.isFinite(metric.value)
+    ? metric.value.toFixed(Number.isInteger(metric.digits)
+      ? Math.max(0, Math.min(6, metric.digits))
+      : String(metric.label ?? '').startsWith('期限 ') ? 2 : 1)
+    : String(metric.value);
+  return value + (metric.unit == null ? '' : String(metric.unit));
+}
+
+function volMetricRankText(metric) {
+  if (metric.rank == null || !Number.isFinite(Number(metric.rank))) return '—';
+  const kinds = {
+    cond: '条件分位', raw: '原始分位', preview: '预览分位', anchor: '锚分位',
+  };
+  const prefix = kinds[metric.rank_kind] || '分位';
+  return `${prefix} ${fmtN(Number(metric.rank), 2)}`;
+}
+
+function volMetricNoteText(metric) {
+  const notes = [];
+  const label = String(metric.label ?? '');
+  if (metric.settled === false && !label.includes('未结算')) notes.push('未结算');
+  if (metric.chg != null && Number.isFinite(Number(metric.chg))) {
+    notes.push(`${fmtN(Number(metric.chg), 1, true)}`
+      + (metric.chg_pct == null || !Number.isFinite(Number(metric.chg_pct))
+        ? '' : ` / ${fmtN(Number(metric.chg_pct), 1, true)}%`));
+  }
+  if (metric.rank_note != null) notes.push(String(metric.rank_note));
+  if (metric.raw_rank != null && Number.isFinite(Number(metric.raw_rank))) {
+    notes.push(`原始分位 ${fmtN(Number(metric.raw_rank), 2)}`);
+  }
+  if (metric.note != null) notes.push(String(metric.note));
+  return notes.length ? notes.join(' · ') : '—';
+}
+
+function renderVolMetrics(metrics, host = $('dvolMetrics')) {
+  if (!host) return;
+  const rows = Array.isArray(metrics) ? metrics.filter((m) => m && typeof m === 'object') : [];
+  if (!rows.length) {
+    host.replaceChildren();
+    return;
+  }
+
+  const details = document.createElement('details');
+  details.className = 'vol-metrics';
+  const previous = host.children && host.children[0];
+  details.open = Boolean(previous && previous.open);
+
+  const summary = document.createElement('summary');
+  const key = rows.find((m) => m.settled === true && /结算IV|DVOL/.test(String(m.label ?? '')))
+    || rows.find((m) => m.settled === true) || rows[0];
+  summary.textContent = `${String(key.label ?? '关键指标')} ${volMetricValueText(key)}`
+    + (key.rank == null ? '' : ` · ${volMetricRankText(key)}`)
+    + '（展开指标表）';
+  details.appendChild(summary);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'tablewrap';
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  ['指标', '值', '分位', '备注'].forEach((label) => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach((metric) => {
+    const tr = document.createElement('tr');
+    const cells = [
+      String(metric.label ?? '—'),
+      volMetricValueText(metric),
+      volMetricRankText(metric),
+      volMetricNoteText(metric),
+    ];
+    cells.forEach((value, index) => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      if (index === 2 && metric.rank != null && Number.isFinite(Number(metric.rank))) {
+        const rank = Number(metric.rank);
+        // 起步值，待校准：仅做中性色提示，不改变或替代 payload 的分位口径。
+        if (rank >= 0.85) td.className = 'rank-high';
+        else if (rank <= 0.15) td.className = 'rank-low';
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  details.appendChild(wrap);
+  host.replaceChildren(details);
+}
+
+function volMaSeries(ma, color = COL.blue) {
+  if (!ma || typeof ma !== 'object') return [];
+  const defs = [
+    ['ma20', 'MA20', 0.8, 0.32, 'dotted'],
+    ['ma60', 'MA60', 1.0, 0.48, 'dashed'],
+    ['ma200', 'MA200', 1.3, 0.68, 'solid'],
+  ];
+  return defs.flatMap(([key, name, width, opacity, type]) => {
+    const data = ma[key];
+    if (!Array.isArray(data) || !data.length) return [];
+    return [{
+      name, type: 'line', data, symbol: 'none', showSymbol: false, silent: true, z: 2,
+      lineStyle: { color, width, opacity, type },
+    }];
+  });
+}
+
+function volPctText(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return fmtN(Math.abs(n) <= 1 ? n * 100 : n, 1);
+}
+
+function volBandBasisText(bands) {
+  if (!bands) return '';
+  const basis = bands.basis === 'raw' ? '原始(raw)'
+    : bands.basis === 'cond' ? '条件(cond)' : String(bands.basis ?? '未注明');
+  return `σ基准 ${basis}·窗${bands.win ?? '—'}·n=${bands.n ?? '—'}`;
+}
+
+function volBandDecorations(bands) {
+  if (!bands || !Array.isArray(bands.levels)) return {};
+  const levels = bands.levels.filter((level) => level
+    && Number.isFinite(Number(level.k))
+    && Number.isFinite(Number(level.lo))
+    && Number.isFinite(Number(level.hi)));
+  if (!levels.length) return {};
+  const opacity = { 1: 0.060, 2: 0.038, 3: 0.022 };
+  const lineOpacity = { 1: 0.48, 2: 0.34, 3: 0.22 };
+  const basisText = volBandBasisText(bands);
+  const markArea = {
+    silent: true,
+    data: [...levels].sort((a, b) => Number(b.k) - Number(a.k)).map((level) => [
+      {
+        yAxis: Number(level.lo),
+        itemStyle: { color: `rgba(56,97,251,${opacity[level.k] ?? 0.022})` },
+      },
+      { yAxis: Number(level.hi) },
+    ]),
+  };
+  const lines = [];
+  [...levels].sort((a, b) => Number(a.k) - Number(b.k)).forEach((level) => {
+    const k = Number(level.k);
+    const coverage = volPctText(level.coverage);
+    const hiPct = volPctText(level.hi_pct);
+    const empirical = [
+      hiPct == null ? null : `实测 P${hiPct}`,
+      coverage == null ? null : `±覆盖${coverage}%`,
+    ].filter(Boolean).join(' · ') || '实测覆盖样本不足';
+    const common = {
+      color: COL.blue, type: 'dashed', width: 1, opacity: lineOpacity[k] ?? 0.22,
+    };
+    lines.push({
+      yAxis: Number(level.lo),
+      lineStyle: common,
+      label: {
+        show: true, position: 'insideEndBottom', color: COL.muted, fontSize: 9.5,
+        formatter: `−${k}σ ${fmtN(Number(level.lo), 1)}`,
+      },
+    });
+    lines.push({
+      yAxis: Number(level.hi),
+      lineStyle: common,
+      label: {
+        show: true, position: 'insideEndTop', color: COL.sub, fontSize: 9.5,
+        formatter: `+${k}σ ${fmtN(Number(level.hi), 1)}（${empirical}）`,
+      },
+    });
+  });
+  if (Number.isFinite(Number(bands.mean))) {
+    lines.push({
+      yAxis: Number(bands.mean),
+      lineStyle: { color: COL.blue, type: 'solid', width: 1, opacity: 0.28 },
+      label: {
+        show: true, position: 'insideStartTop', color: COL.sub, fontSize: 9.5,
+        formatter: `μ ${fmtN(Number(bands.mean), 1)} · ${basisText}`,
+      },
+    });
+  }
+  return {
+    markArea,
+    markLine: { silent: true, symbol: 'none', data: lines },
+  };
+}
+
 function renderDvol() {
   const d = S.data.dvol;
   const uv = S.data.usvol;
@@ -882,6 +1077,7 @@ function renderDvol() {
   if (uv) { renderUsvol(uv, meta, c); return; }
   if (!d) {
     meta.textContent = '该品种无期权 IV 数据';
+    renderVolMetrics([]);
     if (c) c.clear();
     renderIv3({});   // 同步清空 3d 卡
     return;
@@ -890,31 +1086,43 @@ function renderDvol() {
   const x = d.xopt;
   const xTxt = !x ? null
     : `近端IV ${fmtN(x.iv, 1)}（~${fmtN(x.tenor_days, 1)}d·${x.method === 'nearest' ? '单点' : '插值'}${x.n_expiries != null ? '·' + x.n_expiries + '到期' : ''}）`;
-  meta.textContent = [
-    // 初始视窗虽与分位窗对齐，用户拉动滑块后会分离；必须保留分位窗文字，避免拿
-    // 三年目测去质疑一年窗算出的数字。与美股卡的「·252日」同惯例。
-    d.iv_last == null ? null
-      : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 3)}`
-        + `${d.iv_rank_win ? '·' + d.iv_rank_win + '日' : ''}）`,
-    `RV30 ${fmtN(d.rv_last, 1)}`,
-    d.spread == null ? null : `IV−RV ${fmtN(d.spread, 1, true)}pt`,
-  ].filter(Boolean).join(' · ');
+  const bands = d.bands === undefined ? null : d.bands;
+  const mainKind = d.main_kind || (d.iv && d.iv.length ? 'dvol' : 'rv30');
+  meta.textContent = bands ? `${mainKind === 'rv30' ? 'RV30' : 'DVOL'} · ${volBandBasisText(bands)}` : '';
+  renderVolMetrics(d.metrics);
   // 3d 持仓前端独立成卡（RV3 尖峰与 30d 序列不同量级，同轴互相压平）
   renderIv3({ iv3: d.iv3, rv3: d.rv3, iv_txt: xTxt,
               rv3_last: d.rv3_last, spread3: d.spread3 });
   if (!c) return;
   const zs = vol30ZoomStart([d.iv, d.rv], d.view_points);
+  const maSeries = volMaSeries(d.ma, mainKind === 'rv30' ? COL.amber : COL.blue);
+  const chartSeries = [
+    ...(d.iv && d.iv.length ? [{
+      name: 'DVOL 隐含', type: 'line', data: d.iv, symbol: 'none', z: 4,
+      lineStyle: { color: COL.blue, width: 2.4 },
+      endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 },
+      ...volBandDecorations(mainKind === 'dvol' ? bands : null),
+    }] : []),
+    ...maSeries,
+    ...(d.rv && d.rv.length ? [{
+      name: 'RV30 已实现', type: 'line', data: d.rv, symbol: 'none', z: 3,
+      lineStyle: { color: COL.amber, width: mainKind === 'rv30' ? 2.4 : 2 },
+      endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 },
+      ...volBandDecorations(mainKind === 'rv30' ? bands : null),
+    }] : []),
+  ];
   c.setOption({
     animation: false,
     useUTC: true,
-    color: [COL.blue, COL.amber],
     tooltip: {
       trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
       textStyle: { color: COL.ink, fontSize: 11.5 },
       valueFormatter: (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`),
     },
-    legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
-      itemWidth: 12, itemHeight: 3, icon: 'rect' },
+    // ECharts 图例原生可点击；scroll 保留三条均线各自开关，又不挤掉 IV/RV 项。
+    legend: { type: 'scroll', top: 0, left: 38, right: 40,
+      data: chartSeries.map((series) => series.name),
+      textStyle: { color: COL.sub, fontSize: 10.5 }, itemWidth: 12, itemHeight: 3, icon: 'rect' },
     grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
       axisLabel: { color: COL.muted, fontSize: 9.5 } },
@@ -927,14 +1135,7 @@ function renderDvol() {
         fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
         textStyle: { color: COL.muted, fontSize: 9 } },
     ],
-    series: [
-      { name: 'DVOL 隐含', type: 'line', data: d.iv, symbol: 'none',
-        lineStyle: { width: 2 },
-        endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 } },
-      { name: 'RV30 已实现', type: 'line', data: d.rv, symbol: 'none',
-        lineStyle: { width: 2 },
-        endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 } },
-    ],
+    series: chartSeries,
   }, true);
 }
 
@@ -1017,58 +1218,10 @@ function renderIv3(o) {
 // + 本品种 RV30。升级前 29/31 个品种拿 VXN 当自己的 IV，剪刀差因此是口径错配的假象。
 function renderUsvol(uv, meta, c) {
   const iv = uv.iv;
-  // 分位已按「未来30天内有无财报」条件化（同状态比同状态）——实测把富集从 1.92×
-  // 压到 0.94×。与原始分位差距大时两个都显示，让读者看到修正幅度。
-  const rDiff = iv && iv.rank != null && iv.rank_raw != null
-    && Math.abs(iv.rank - iv.rank_raw) >= 0.1;
-  const rankKindTxt = iv && iv.rank_kind === 'cond'
-    ? '条件分位' : '原始分位';
-  const rankTxt = iv && iv.rank != null
-    ? `${rankKindTxt} ${fmtN(iv.rank, 2)}`
-      + (iv.rank_kind === 'cond' ? '·同财报状态·504日' : '·252日')
-      + `${rDiff ? `（原始 ${fmtN(iv.rank_raw, 2)}）` : ''}`
-      + (iv.rank_kind === 'cond' && iv.earn_in30 ? '·财报窗内' : '')
-    : `样本 ${iv ? iv.n : 0}d·分位不足`;
-  // 财报邻近度：分位在财报窗内是日程驱动而非市场压力，必须标出来
-  const ed = iv && iv.earnings_days;
-  const earnTxt = ed == null ? ''
-    : ed > 0 ? ` ⚑财报还有${ed}日` : ed < 0 ? ` ⚑财报已过${-ed}日` : ' ⚑今日财报';
-  // VRP=IV−HV 同源同口径，把"贵"与"波动大"分开；期限结构双速分别给，
-  // 因为快端抓急性冲击、慢端抓制度切换，合成单一读数会丢掉这个区分
-  const t = uv.term || {};
-  const inv = t.both_inverted ? '（全曲线倒挂）'
-    : t.fast && t.fast.inverted ? '（快端倒挂）'
-    : t.slow && t.slow.inverted ? '（慢端倒挂）' : '';
-  // 盘中实时值：与结算值分列展示。分位只在结算序列上算，实时值给的是**预览分位**，
-  // 必须显式标注"实时"——同"预览(未收线)"的既有约定
-  const lv = iv && iv.live;
-  const liveTxt = !lv ? '' :
-    `实时(未结算) ${fmtN(lv.iv, 1)}`
-    + (lv.chg == null ? '' : `（${fmtN(lv.chg, 1, true)} / ${fmtN(lv.chg_pct, 1, true)}%）`)
-    + (lv.rank_preview == null ? '' : `·预览分位 ${fmtN(lv.rank_preview, 2)}`);
-  // 商品（XAU/XAG）：iv 来自代理标的（GLD/SLV），必须标注；xopt 是币安期权近端 IV
-  //（24/7 更新但期限仅 1-3 天，与 30 天口径不是同一个量，期限随值展示）
-  const ivLabel = uv.proxy ? `结算IV(代理${uv.proxy})` : '结算IV';
-  const bits = [
-    lv ? liveTxt : null,
-    iv ? `${ivLabel}${iv.stale ? `⚠${fmtN(iv.age_days, 0)}天前` : ''} ${fmtN(iv.last, 1)}（${rankTxt}）${earnTxt}` : '个股IV 未回填',
-    iv && iv.vrp != null
-      ? `VRP ${fmtN(iv.vrp, 1, true)}pt（分位 ${fmtN(iv.vrp_rank, 2)}）` : null,
-    `RV30 ${fmtN(uv.rv_last, 1)}`,
-    uv.spread == null ? null
-      : `${uv.spread_src === 'stock' ? '个股' : '指数'}IV−RV ${fmtN(uv.spread, 1, true)}pt`,
-    uv.index == null ? null
-      : `${uv.index}${uv.index_settled === false ? '°' : ''} ${fmtN(uv.index_last, 1)}（锚·分位 ${fmtN(uv.index_rank, 2)}）`,
-    t.fast && t.slow
-      ? `期限${t.fast.settled === false ? '°' : ''} 9D/30D ${fmtN(t.fast.ratio, 2)}·${fmtN(t.fast.rank, 2)} / 30D/3M `
-        + `${fmtN(t.slow.ratio, 2)}·${fmtN(t.slow.rank, 2)}${inv}`
-      : (uv.ts_ratio == null ? null : `9D/3M ${fmtN(uv.ts_ratio, 2)}`),
-    // 个股期限曲线（3d/9d/30d ATM）：持仓前端层——3d 是"这笔 1-3 天仓"的直接定价
-    uv.term_stock == null ? null
-      : `个股期限 ${fmtN(uv.term_stock.iv3, 1)}/${fmtN(uv.term_stock.iv9, 1)}/${fmtN(uv.term_stock.iv30, 1)}`
-        + `（3d/9d/30d${uv.term_stock.inverted ? '·倒挂' : ''}）`,
-  ];
-  meta.textContent = bits.filter(Boolean).join(' · ');
+  const ma = uv.ma;
+  const bands = uv.bands;
+  meta.textContent = volBandBasisText(bands);
+  renderVolMetrics(uv.metrics);
   // 3d 持仓前端独立成卡：美股 IV3 来自期限曲线自攒，商品来自币安近端 IV
   const ts3 = uv.term_stock;
   renderIv3({
@@ -1082,17 +1235,38 @@ function renderUsvol(uv, meta, c) {
   // 个股 IV/指数 IV 是交易日、RV30 是含周末的永续日线；边界来自首条足够长的锚序列，
   // 作为时间戳统一作用于三条线，不能拿某条线的点数索引分别切出三段不同历史。
   const zs = vol30ZoomStart([iv && iv.series, uv.series, uv.rv], uv.view_points);
+  const maSeries = iv && iv.series && iv.series.length ? volMaSeries(ma) : [];
+  const chartSeries = [
+    // 主 IV 始终最粗最实；σ 装饰只挂主线，避免指数锚或 RV 被误读成带的基准。
+    ...(iv && iv.series && iv.series.length ? [{
+      name: '个股IV', type: 'line', data: iv.series, symbol: 'none', z: 4,
+      lineStyle: { color: COL.blue, width: 2.4 },
+      endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 },
+      ...volBandDecorations(bands),
+    }] : []),
+    ...maSeries,
+    ...(uv.rv && uv.rv.length ? [{
+      name: 'RV30 已实现', type: 'line', data: uv.rv, symbol: 'none', z: 3,
+      lineStyle: { color: COL.amber, width: 2 },
+      endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 },
+    }] : []),
+    // 商品无指数锚（uv.index 为空即不画）。
+    ...(uv.index && uv.series && uv.series.length ? [{
+      name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none', z: 2,
+      lineStyle: { color: COL.muted, width: 1, type: 'dashed', opacity: 0.55 },
+    }] : []),
+  ];
   c.setOption({
     animation: false,
     useUTC: true,
-    color: [COL.blue, COL.amber, COL.muted],
     tooltip: {
       trigger: 'axis', backgroundColor: COL.tipBg, borderColor: COL.border,
       textStyle: { color: COL.ink, fontSize: 11.5 },
       valueFormatter: (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`),
     },
-    legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
-      itemWidth: 12, itemHeight: 3, icon: 'rect' },
+    legend: { type: 'scroll', top: 0, left: 38, right: 40,
+      data: chartSeries.map((series) => series.name),
+      textStyle: { color: COL.sub, fontSize: 10.5 }, itemWidth: 12, itemHeight: 3, icon: 'rect' },
     grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
       axisLabel: { color: COL.muted, fontSize: 9.5 } },
@@ -1105,18 +1279,7 @@ function renderUsvol(uv, meta, c) {
         fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
         textStyle: { color: COL.muted, fontSize: 9 } },
     ],
-    series: [
-      // 个股 IV 与 RV30 是同一标的的同口径对照，实线；指数是跨标的的锚，虚线弱化
-      ...(iv ? [{ name: '个股IV', type: 'line', data: iv.series, symbol: 'none',
-        lineStyle: { width: 2 },
-        endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 } }] : []),
-      { name: 'RV30 已实现', type: 'line', data: uv.rv, symbol: 'none',
-        lineStyle: { width: 2 },
-        endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 } },
-      // 商品无指数锚（uv.index 为空即不画）
-      ...(uv.index ? [{ name: `${uv.index} 锚`, type: 'line', data: uv.series, symbol: 'none',
-        lineStyle: { width: 1, type: 'dashed', opacity: 0.55 } }] : []),
-    ],
+    series: chartSeries,
   }, true);
 }
 

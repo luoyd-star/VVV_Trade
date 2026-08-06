@@ -64,6 +64,9 @@ DVOL_RANK_WIN = 365                 # 起步值，待校准；加密 IV30 历史
 DVOL_RANK_MIN = 120                 # 起步值，待校准；不足样本不输出历史分位
 IV_RANK_WIN = 252                   # 交易日≈1 年，与指数分位同窗
 IV_RANK_MIN = 120                   # 少于此不给分位——新股样本短，宁可空着也不给假分位
+# 30d 主波动率线的均线只认这三个完整窗口；不足时留空，不能拿短窗冒充长均线。
+VOL_MA_WINDOWS = (20, 60, 200)      # 起步值，待校准；用户裁决的短/中/长观察窗
+VOL_BAND_MIN = 120                  # 起步值，待校准；更短样本不输出易漂移的 σ 带
 # 30d 波动率卡送往前端的**数据窗**（≠默认视窗，也≠库里存量）。三年数据让滑块能回看
 # 两个额外周期；默认视窗由 payload 按各品种分位窗另行指定，避免旧尖峰压扁当前区间。
 # DVOL/个股IV/指数IV/RV30 共用此常数——同图各自截不同长度会造成"同图不同期"的假对比。
@@ -81,6 +84,179 @@ def _tail_days(pairs: list, days: int = VOL_DATA_DAYS) -> list:
         return []
     cutoff = int(pairs[-1][0]) - days * 86_400_000
     return [p for p in pairs if int(p[0]) >= cutoff]
+
+
+def _vol_moving_averages(pairs: list) -> dict:
+    """30d 主线的完整窗滚动均值；每条线的时间戳取该窗口最后一个样本。"""
+    clean = [(int(t), float(v)) for t, v in pairs
+             if v is not None and math.isfinite(float(v))]
+    values = pd.Series([v for _, v in clean], dtype=float)
+    out = {}
+    for win in VOL_MA_WINDOWS:
+        key = f"ma{win}"
+        if len(values) < win:
+            # 静默缩短窗口会让读者误以为看到的是 MA200，故整条明确返回空数组。
+            out[key] = []
+            continue
+        rolled = values.rolling(win, min_periods=win).mean()
+        out[key] = _tail_days([
+            [clean[i][0], round(float(rolled.iloc[i]), 2)]
+            for i in range(win - 1, len(clean))
+        ])
+    return out
+
+
+def _vol_bands(values, win: int):
+    """按卡片原始分位窗计算静态 σ 带，并附该品种的经验覆盖率/CDF。"""
+    s = pd.Series(values, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
+    ref = s.tail(win)
+    n = int(len(ref))
+    if n < VOL_BAND_MIN:
+        return None
+    mean = float(ref.mean())
+    # pandas 默认样本标准差与监工实证口径一致；n 已过下限，不存在单点自由度问题。
+    sd = float(ref.std(ddof=1))
+    levels = []
+    for k in (1, 2, 3):
+        lo, hi = mean - k * sd, mean + k * sd
+        levels.append({
+            "k": k,
+            "lo": round(lo, 2),
+            "hi": round(hi, 2),
+            "coverage": round(float(((ref >= lo) & (ref <= hi)).mean()), 3),
+            # 这是经验 CDF，不套正态概率；<= 对应文案“不超过上轨”的样本占比。
+            "hi_pct": round(float((ref <= hi).mean()), 3),
+        })
+    return {
+        "mean": round(mean, 2),
+        "sd": round(sd, 2),
+        "win": int(win),
+        "basis": "raw",
+        "n": n,
+        "levels": levels,
+    }
+
+
+def _metric(label: str, value, *, unit: str = "", rank=None, rank_kind=None,
+            rank_note=None, raw_rank=None, note=None, settled=None, **extra) -> dict:
+    """波动率副文本的稳定行结构；公共空字段保留，前端无需按行猜 schema。"""
+    row = {
+        "label": label,
+        "value": value,
+        "unit": unit,
+        "rank": rank,
+        "rank_kind": rank_kind,
+        "rank_note": rank_note,
+        "raw_rank": raw_rank,
+        "note": note,
+        "settled": settled,
+    }
+    row.update(extra)
+    return row
+
+
+def _dvol_metrics(payload: dict) -> list:
+    """把加密卡现有读数逐项结构化；旧字段继续原样保留给过渡期消费者。"""
+    rows = []
+    if payload.get("iv_last") is not None:
+        rows.append(_metric(
+            "DVOL", payload["iv_last"], rank=payload.get("iv_rank"),
+            rank_kind="raw", rank_note=f"{DVOL_RANK_WIN}日",
+            note="日结算·30d", settled=True,
+        ))
+    if payload.get("rv_last") is not None:
+        rows.append(_metric("RV30", payload["rv_last"], settled=True))
+    if payload.get("spread") is not None:
+        rows.append(_metric("IV−RV", payload["spread"], unit="pt", settled=True))
+    xopt = payload.get("xopt") or {}
+    if xopt.get("iv") is not None:
+        method = "插值" if xopt.get("method") == "interp" else "单点"
+        rows.append(_metric(
+            "近端IV", xopt["iv"], note=f"约{xopt.get('tenor_days')}d·{method}",
+            settled=False, tenor_days=xopt.get("tenor_days"), method=xopt.get("method"),
+            n_expiries=xopt.get("n_expiries"), age_min=xopt.get("age_min"),
+        ))
+    return rows
+
+
+def _usvol_metrics(payload: dict) -> list:
+    """把美股/商品 30d 卡的旧副文本完整拆成表格行，不改变任何既有分位。"""
+    rows = []
+    iv = payload.get("iv")
+    live = (iv or {}).get("live") or {}
+    if live.get("iv") is not None:
+        rows.append(_metric(
+            "实时IV", live["iv"], rank=live.get("rank_preview"),
+            rank_kind="preview", rank_note="预览分位", settled=False,
+            chg=live.get("chg"), chg_pct=live.get("chg_pct"),
+        ))
+    if iv:
+        rank_note = (f"同财报状态·{EARN_COND_WIN}日" if iv.get("rank_kind") == "cond"
+                     else f"{IV_RANK_WIN}日")
+        notes = []
+        if payload.get("proxy"):
+            notes.append(f"代理{payload['proxy']}")
+        if iv.get("stale") and iv.get("age_days") is not None:
+            notes.append(f"{iv['age_days']:.0f}天前")
+        ed = iv.get("earnings_days")
+        if ed is not None:
+            notes.append("今日财报" if ed == 0 else f"财报{'还有' if ed > 0 else '已过'}{abs(ed)}日")
+        if iv.get("rank_kind") == "cond" and iv.get("earn_in30"):
+            notes.append("财报窗内")
+        rows.append(_metric(
+            "结算IV", iv.get("last"), rank=iv.get("rank"),
+            rank_kind=iv.get("rank_kind"), rank_note=rank_note,
+            raw_rank=iv.get("rank_raw"), note="·".join(notes) or None,
+            settled=True, asof=iv.get("asof"), age_days=iv.get("age_days"),
+            stale=iv.get("stale"), n=iv.get("n"),
+        ))
+        if iv.get("vrp") is not None:
+            rows.append(_metric(
+                "VRP", iv["vrp"], unit="pt", rank=iv.get("vrp_rank"),
+                rank_kind="raw", rank_note=f"{IV_RANK_WIN}日", settled=True,
+            ))
+    else:
+        rows.append(_metric("结算IV", None, note="未回填", settled=True))
+    if payload.get("rv_last") is not None:
+        rows.append(_metric("RV30", payload["rv_last"], settled=True))
+    if payload.get("spread") is not None:
+        label = "个股IV−RV" if payload.get("spread_src") == "stock" else "指数IV−RV"
+        rows.append(_metric(label, payload["spread"], unit="pt", settled=True))
+    if payload.get("index") is not None:
+        rows.append(_metric(
+            payload["index"], payload.get("index_last"), rank=payload.get("index_rank"),
+            rank_kind="anchor", rank_note=f"{IV_RANK_WIN}日", note="锚",
+            settled=payload.get("index_settled"),
+        ))
+    term = payload.get("term") or {}
+    if term.get("fast") and term.get("slow"):
+        inversion = ("全曲线倒挂" if term.get("both_inverted") else
+                     "快端倒挂" if term["fast"].get("inverted") else
+                     "慢端倒挂" if term["slow"].get("inverted") else None)
+        for label, leg in (("期限 9D/30D", term["fast"]),
+                           ("期限 30D/3M", term["slow"])):
+            rows.append(_metric(
+                label, leg.get("ratio"), rank=leg.get("rank"), rank_kind="raw",
+                rank_note=(f"{leg.get('n')}日" if leg.get("n") is not None else None),
+                note=inversion, settled=leg.get("settled"),
+            ))
+    elif payload.get("ts_ratio") is not None:
+        rows.append(_metric("期限 9D/3M", payload["ts_ratio"], settled=None))
+    term_stock = payload.get("term_stock") or {}
+    for tenor in ("iv3", "iv9", "iv30"):
+        if term_stock.get(tenor) is not None:
+            rows.append(_metric(
+                f"个股期限 {tenor[2:]}d", term_stock[tenor],
+                note="倒挂" if term_stock.get("inverted") else None, settled=False,
+            ))
+    xopt = payload.get("xopt") or {}
+    if xopt.get("iv") is not None:
+        rows.append(_metric(
+            "近端IV", xopt["iv"], note="24/7·与30天口径不可比", settled=False,
+            tenor_days=xopt.get("tenor_days"), method=xopt.get("method"),
+            n_expiries=xopt.get("n_expiries"), age_min=xopt.get("age_min"),
+        ))
+    return rows
 POLICY_SIGNAL_TF = "4h"
 POLICY_RESONANCE_TFS = ("4h", "1d", "1h")
 POLICY_SIGNAL_OHLCV_LIMIT = 400     # 起步值，待校准；覆盖 cRSI 自适应带观察窗
@@ -355,8 +531,6 @@ def _dvol_payload(conn, symbol: str):
     xopt = _xopt_block(conn, symbol)
     dv = (storage.get_dvol(conn, base, limit=VOL_DATA_FETCH_LIMIT)
           if base in ("BTC", "ETH") else [])
-    if not len(dv) and xopt is None:
-        return None
     iv_pairs, iv_last, iv_rank = [], None, None
     if len(dv):
         iv_pairs = [
@@ -375,6 +549,12 @@ def _dvol_payload(conn, symbol: str):
             if math.isfinite(float(v))
         ]
         rv_last = float(rv.dropna().iloc[-1]) if rv.notna().any() else None
+    # 无 DVOL 的币种把 RV30 当 30d 主线；即使近端期权快照暂时过期也不应整卡消失。
+    if not iv_pairs and not rv_pairs and xopt is None:
+        return None
+    main_pairs = iv_pairs if iv_pairs else rv_pairs
+    moving_averages = _vol_moving_averages(main_pairs)
+    bands = _vol_bands([v for _, v in main_pairs], DVOL_RANK_WIN)
     # 3d 对照层：近端 IV 历史（30 分钟一点，自 2026-08-05 自攒）+ RV3（72×1h）。
     # 历史序列独立于 xopt 的 2h 新鲜度闸——采集停了历史照画，只是最新点消失
     xh = storage.get_opt_iv_near(conn, symbol, limit=4800)
@@ -382,13 +562,17 @@ def _dvol_payload(conn, symbol: str):
                   for t, v in zip(xh["ts"], xh["iv"]) if v == v]
                  if len(xh) else [])
     rv3_pairs, rv3_last = _rv3_pairs(conn, symbol)
-    return {
+    payload = {
         "iv": _tail_days(iv_pairs),
         "rv": _tail_days(rv_pairs),
+        "main_kind": "dvol" if iv_pairs else "rv30",
         "view_points": DVOL_RANK_WIN,
         # iv_rank_win 给卡片文字标注分位计算口径；view_points 只控制初始缩放，用户一拉
         # 滑块两者就不再相等，故即使当前同值也不能删成一个字段。
         "iv_rank_win": DVOL_RANK_WIN,
+        "band_win": DVOL_RANK_WIN,
+        "band_basis": "raw",
+        "bands": bands,
         "iv_last": round(iv_last, 1) if iv_last is not None else None,
         "iv_rank": iv_rank,
         "rv_last": round(rv_last, 1) if rv_last is not None else None,
@@ -402,6 +586,9 @@ def _dvol_payload(conn, symbol: str):
         "spread3": (round(xopt["iv"] - rv3_last, 1)
                     if xopt is not None and rv3_last is not None else None),
     }
+    payload["ma"] = moving_averages
+    payload["metrics"] = _dvol_metrics(payload)
+    return payload
 
 
 def _stock_iv_block(conn, symbol: str):
@@ -792,8 +979,16 @@ def _usvol_payload(conn, symbol: str):
     front3 = (term_stock["iv3"] if term_stock else None) if is_us \
         else (xopt["iv"] if xopt else None)
     base_iv = iv["last"] if iv else idx_last
-    return {
+    # σ 带不做财报条件化：严格跟随原始 IV_RANK_WIN，并把 raw 口径显式下发。
+    # 个股 IV 缺失时不拿指数锚冒充主线统计，三条均线留空、bands=None。
+    main_pairs = (iv.get("series") or []) if iv else []
+    moving_averages = _vol_moving_averages(main_pairs)
+    bands = _vol_bands([v for _, v in main_pairs], IV_RANK_WIN)
+    payload = {
         "view_points": IV_RANK_WIN,
+        "band_win": IV_RANK_WIN,
+        "band_basis": "raw",
+        "bands": bands,
         "index": idx,
         "index_last": round(idx_last, 2) if idx_last is not None else None,
         "index_rank": idx_rank,
@@ -820,6 +1015,9 @@ def _usvol_payload(conn, symbol: str):
         "ts_ratio": ts_ratio,
         "term": term,
     }
+    payload["ma"] = moving_averages
+    payload["metrics"] = _usvol_metrics(payload)
+    return payload
 
 
 def _hourly(col_df):

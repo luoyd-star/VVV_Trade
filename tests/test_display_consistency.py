@@ -446,7 +446,9 @@ def test_legend_and_frontend_copy_keep_display_contracts_explicit():
 
     app = (ROOT / "web/app.js").read_text(encoding="utf-8")
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
-    assert "fmtN(d.iv_rank, 3)" in app
+    # 30d 副文本已改成 payload metrics 表；分位精度由统一表格 formatter 消费，
+    # 不再要求旧长字符串里的 d.iv_rank 直接插值仍存在。
+    assert "renderVolMetrics(d.metrics" in app
     assert "条件分位" in app
     assert ".filter((f) => f.tf !== '1h')" not in app
     assert "Hermes/API 可查全量" not in app + index
@@ -454,6 +456,18 @@ def test_legend_and_frontend_copy_keep_display_contracts_explicit():
     dashboard_src = (ROOT / "dashboard.py").read_text(encoding="utf-8")
     assert 'display_features["margin_basis"] = "raw"' in dashboard_src
     assert "原始树边界" in app
+
+    metrics_block = app.split("function renderVolMetrics", 1)[1].split(
+        "function volMaSeries", 1
+    )[0]
+    assert "document.createElement" in metrics_block
+    assert ".textContent" in metrics_block
+    assert "innerHTML" not in metrics_block
+
+    iv3_block = app.split("function renderIv3", 1)[1].split(
+        "function renderUsvol", 1
+    )[0]
+    assert "volMaSeries" not in iv3_block and "volBandDecorations" not in iv3_block
 
     sm_block = app.split("const SM = {", 1)[1].split("};", 1)[0]
     assert "label:" not in sm_block, "状态中文名不得在前端颜色表中保留第二份"

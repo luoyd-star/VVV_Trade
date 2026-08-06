@@ -24,6 +24,18 @@
   .policy-detail div { color: var(--sub); font-size: 12px; line-height: 1.55; }
   .policy-notes { margin: 0; padding-left: 17px; }
   .policy-degraded { padding-top: 8px; color: var(--muted); font-size: var(--fs-lbl); }
+  .vol-metrics { margin: 0 0 8px; border-top: 1px solid var(--grid); }
+  .vol-metrics summary { cursor: pointer; color: var(--sub); font-size: var(--fs-lbl);
+                         padding: 6px 0; user-select: none; }
+  .vol-metrics[open] summary { border-bottom: 1px solid var(--grid); }
+  .vol-metrics .tablewrap { max-height: 210px; overflow-y: auto; }
+  .vol-metrics table { white-space: normal; }
+  .vol-metrics th, .vol-metrics td { padding: 4px 6px; }
+  .vol-metrics th:nth-child(2), .vol-metrics td:nth-child(2),
+  .vol-metrics th:nth-child(3), .vol-metrics td:nth-child(3) { white-space: nowrap; }
+  .vol-metrics th:last-child, .vol-metrics td:last-child { text-align: left; }
+  .vol-metrics .rank-high { color: var(--accent); font-weight: 600; }
+  .vol-metrics .rank-low { color: var(--chop); font-weight: 600; }
   @media (max-width: 800px) { .policy-detail-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -117,6 +129,7 @@
     <div class="col span4">
       <div class="card">
         <div class="card-h"><h3>IV vs RV30 <span class="sub">制度层</span></h3><span class="sub" id="dvolMeta"></span></div>
+        <div id="dvolMetrics"></div>
         <div id="dvolChart" class="chart iv"></div>
       </div>
       <!-- 3d 持仓前端独立成卡：RV3 尖峰（崩盘日可到 90%+）与 30d 序列同轴会把后者压平 -->
