@@ -148,6 +148,153 @@ def test_unknown_funding_interval_is_visible_and_never_falls_back_to_8h():
     assert "未知周期" in app
 
 
+def test_vol_tail_uses_calendar_days_across_sampling_frequencies():
+    """同一时间边界应按日历天截，不能把稀疏交易日序列误切成最后 N 个点。"""
+    day_ms = 86_400_000
+    daily = [[i * day_ms, i] for i in range(8)]
+    trading_days = [[i * day_ms, i] for i in (0, 1, 4, 7)]
+
+    assert [p[0] for p in dashboard._tail_days(daily, days=3)] == [
+        i * day_ms for i in (4, 5, 6, 7)
+    ]
+    assert [p[0] for p in dashboard._tail_days(trading_days, days=3)] == [
+        i * day_ms for i in (4, 7)
+    ]
+
+
+def test_vol_tail_default_covers_shared_calendar_window():
+    """默认参数必须跟随三年数据窗，不能静默退回旧的较短窗口。"""
+    day_ms = 86_400_000
+    last_day = dashboard.VOL_DATA_DAYS + 5
+    pairs = [[i * day_ms, i] for i in range(last_day + 1)]
+
+    tail = dashboard._tail_days(pairs)
+    cutoff = pairs[-1][0] - dashboard.VOL_DATA_DAYS * day_ms
+
+    assert tail[-1][0] - tail[0][0] <= dashboard.VOL_DATA_DAYS * day_ms
+    assert tail[0][0] >= cutoff
+    assert tail[0][0] == cutoff
+
+
+def test_vol_payload_view_points_and_fetch_limits_follow_shared_constants(monkeypatch):
+    """两类 payload 的默认窗跟随各自分位窗，日频上游须覆盖完整数据窗。"""
+    ts = pd.date_range("2026-01-01", periods=70, freq="D", tz="UTC")
+    d1 = pd.DataFrame({"ts": ts, "close": [100.0 + i for i in range(len(ts))]})
+    calls = {}
+
+    monkeypatch.setattr(dashboard.instruments, "get", lambda symbol: {"class": "crypto"})
+    monkeypatch.setattr(dashboard, "_xopt_block", lambda conn, symbol: None)
+    monkeypatch.setattr(dashboard, "_rv3_pairs", lambda conn, symbol: ([], None))
+    monkeypatch.setattr(
+        dashboard.storage, "get_dvol",
+        lambda conn, base, limit: (
+            calls.__setitem__("dvol", limit)
+            or pd.DataFrame({"ts": ts, "dvol": [30.0 + i / 10 for i in range(len(ts))]})
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_ohlcv",
+        lambda conn, symbol, tf, limit: calls.__setitem__("crypto_ohlcv", limit) or d1,
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_opt_iv_near",
+        lambda conn, symbol, limit: pd.DataFrame(),
+    )
+
+    crypto_view_points = 41
+    monkeypatch.setattr(dashboard, "DVOL_RANK_WIN", crypto_view_points)
+    crypto = dashboard._dvol_payload(None, "BTC-USDT")
+    assert crypto["view_points"] == crypto_view_points
+    assert crypto["iv_rank_win"] == crypto_view_points
+    assert dashboard.VOL_DATA_FETCH_LIMIT > dashboard.VOL_DATA_DAYS
+    assert calls["dvol"] == dashboard.VOL_DATA_FETCH_LIMIT
+    assert calls["crypto_ohlcv"] == dashboard.VOL_DATA_FETCH_LIMIT
+
+    us_ts = [int(t.timestamp() * 1000) for t in ts]
+    monkeypatch.setattr(
+        dashboard.instruments, "get",
+        lambda symbol: {"class": "us_stock_perp", "vol_index": "VIX"},
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_usvol",
+        lambda conn, idx, limit: (
+            calls.__setitem__("usvol", limit)
+            or pd.DataFrame({"ts": us_ts, "close": [18.0 + i / 10 for i in range(len(ts))]})
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard.storage, "get_ohlcv",
+        lambda conn, symbol, tf, limit: calls.__setitem__("us_ohlcv", limit) or d1,
+    )
+    monkeypatch.setattr(dashboard.storage, "get_meta", lambda *args, **kwargs: us_ts[-1])
+    monkeypatch.setattr(dashboard.storage, "get_deriv", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(
+        dashboard.storage, "get_stock_iv_term", lambda *args, **kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(dashboard, "_stock_iv_block", lambda conn, symbol: None)
+    monkeypatch.setattr(dashboard, "_term_structure", lambda conn: (None, None))
+
+    us_view_points = 37
+    monkeypatch.setattr(dashboard, "IV_RANK_WIN", us_view_points)
+    us = dashboard._usvol_payload(None, "NVDA-USDT")
+    assert us["view_points"] == us_view_points
+    # usvol 的 limit 是交易日行数；用日历天数多取是安全方向，且须至少覆盖三年交易日。
+    assert calls["usvol"] == dashboard.VOL_DATA_FETCH_LIMIT
+    # 美股永续 RV30 含周末，仍按日历天数据窗取数。
+    assert calls["us_ohlcv"] == dashboard.VOL_DATA_FETCH_LIMIT
+
+
+def test_stock_iv_fetch_limit_covers_three_trading_years(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        dashboard.storage, "get_stock_vol",
+        lambda conn, symbol, source, limit: calls.__setitem__("stock_iv", limit)
+        or pd.DataFrame(),
+    )
+
+    assert dashboard._stock_iv_block(None, "NVDA-USDT") is None
+    assert calls["stock_iv"] >= 3 * dashboard.IV_RANK_WIN
+
+
+def test_vol30_frontend_uses_primary_iv_timestamp_for_shared_zoom():
+    app = (ROOT / "web/app.js").read_text(encoding="utf-8")
+    helper = app.split("function vol30ZoomStart", 1)[1].split("function renderDvol", 1)[0]
+    dvol = app.split("function renderDvol", 1)[1].split("const IV3_WIN_MIN_MS", 1)[0]
+    usvol = app.split("function renderUsvol", 1)[1].split("function renderDeriv", 1)[0]
+
+    assert "series.length >= viewPoints" in helper
+    assert "series[series.length - viewPoints][0]" in helper
+    assert "vol30ZoomStart([d.iv, d.rv], d.view_points)" in dvol
+    assert "vol30ZoomStart([iv && iv.series, uv.series, uv.rv], uv.view_points)" in usvol
+    for block in (dvol, usvol):
+        assert "bottom: zs == null ? 20 : 32" in block
+        assert "dataZoom: zs == null ? []" in block
+        assert "type: 'inside'" in block and "type: 'slider'" in block
+
+
+def test_all_volatility_zoom_controls_apply_start_value():
+    """inside 与 slider 都必须消费起始时间戳，否则默认窗只算了却没有生效。"""
+    app = (ROOT / "web/app.js").read_text(encoding="utf-8")
+    blocks = {
+        "30d 加密卡": app.split("function renderDvol", 1)[1].split(
+            "const IV3_WIN_MIN_MS", 1
+        )[0],
+        "3d 持仓卡": app.split("function renderIv3", 1)[1].split(
+            "function renderUsvol", 1
+        )[0],
+        "30d 美股卡": app.split("function renderUsvol", 1)[1].split(
+            "function renderDeriv", 1
+        )[0],
+    }
+
+    for name, block in blocks.items():
+        zoom = block.split("dataZoom:", 1)[1].split("series:", 1)[0]
+        inside = next(line for line in zoom.splitlines() if "type: 'inside'" in line)
+        slider = next(line for line in zoom.splitlines() if "type: 'slider'" in line)
+        assert "startValue: zs" in inside, f"{name} 的 inside 未应用默认窗"
+        assert "startValue: zs" in slider, f"{name} 的 slider 未应用默认窗"
+
+
 def test_stock_iv_freshness_and_unsettled_marks_reach_context():
     asof = int(datetime(2026, 7, 20, tzinfo=timezone.utc).timestamp() * 1000)
     text = render_context(_base_payload(usvol={

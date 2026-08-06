@@ -857,6 +857,23 @@ function renderVolRank() {
   }, true);
 }
 
+// 30d 默认窗不能直接等于数据窗：实测 BTC DVOL 的 365d/548d/730d y 轴范围同为
+// 33.8~82.6，最高峰已在 365 天内，放宽只把像素密度从 0.66px/点砍到 0.33px/点；
+// NVDA 个股 IV 的 365d 窗为 35.9~58.9、最近 90 天占 y 轴 59.0%，730d 拉进 96.7
+// 的旧尖峰后只剩 22.3%。默认优先取主 IV 的分位窗，避免旧尖峰压扁当前区间。
+// 主 IV 缺失或不足一窗时若直接取消缩放，仍在画的 RV 会重新铺满三年；因此按调用方给定
+// 的 IV→RV 顺序退化。RV 是含周末日线，同样点数的日历跨度可能与交易日 IV 不同；此时
+// 本来就没有对应分位数字需要对齐，优先保证图的当前区间可读。
+function vol30ZoomStart(seriesList, viewPoints) {
+  if (!seriesList || !viewPoints) return null;
+  for (const series of seriesList) {
+    if (series && series.length >= viewPoints) {
+      return series[series.length - viewPoints][0];
+    }
+  }
+  return null;
+}
+
 function renderDvol() {
   const d = S.data.dvol;
   const uv = S.data.usvol;
@@ -874,8 +891,8 @@ function renderDvol() {
   const xTxt = !x ? null
     : `近端IV ${fmtN(x.iv, 1)}（~${fmtN(x.tenor_days, 1)}d·${x.method === 'nearest' ? '单点' : '插值'}${x.n_expiries != null ? '·' + x.n_expiries + '到期' : ''}）`;
   meta.textContent = [
-    // 图的显示窗（730 天）比分位窗长，分位窗必须写出来——否则读者会拿两年的目测
-    // 去质疑一年窗算出的分位。与美股卡的「·252日」同惯例。
+    // 初始视窗虽与分位窗对齐，用户拉动滑块后会分离；必须保留分位窗文字，避免拿
+    // 三年目测去质疑一年窗算出的数字。与美股卡的「·252日」同惯例。
     d.iv_last == null ? null
       : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 3)}`
         + `${d.iv_rank_win ? '·' + d.iv_rank_win + '日' : ''}）`,
@@ -886,6 +903,7 @@ function renderDvol() {
   renderIv3({ iv3: d.iv3, rv3: d.rv3, iv_txt: xTxt,
               rv3_last: d.rv3_last, spread3: d.spread3 });
   if (!c) return;
+  const zs = vol30ZoomStart([d.iv, d.rv], d.view_points);
   c.setOption({
     animation: false,
     useUTC: true,
@@ -897,11 +915,18 @@ function renderDvol() {
     },
     legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
       itemWidth: 12, itemHeight: 3, icon: 'rect' },
-    grid: { left: 38, right: 44, top: 22, bottom: 20 },
+    grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
       axisLabel: { color: COL.muted, fontSize: 9.5 } },
     yAxis: { scale: true, splitLine: { lineStyle: { color: COL.grid } },
       axisLabel: { color: COL.muted, fontSize: 9.5, formatter: '{value}%' } },
+    dataZoom: zs == null ? [] : [
+      { type: 'inside', xAxisIndex: 0, startValue: zs },
+      { type: 'slider', xAxisIndex: 0, startValue: zs, bottom: 2, height: 12,
+        borderColor: COL.border, backgroundColor: 'rgba(23,26,32,.03)',
+        fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
+        textStyle: { color: COL.muted, fontSize: 9 } },
+    ],
     series: [
       { name: 'DVOL 隐含', type: 'line', data: d.iv, symbol: 'none',
         lineStyle: { width: 2 },
@@ -1054,6 +1079,9 @@ function renderUsvol(uv, meta, c) {
         ? `币安近端IV ${fmtN(uv.xopt.iv, 1)}（~${fmtN(uv.xopt.tenor_days, 1)}d·${uv.xopt.n_expiries === 1 ? '单到期' : (uv.xopt.method === 'interp' ? '插值' : '近邻')}·${fmtN(uv.xopt.age_min, 0)}分前）` : null),
   });
   if (!c) return;
+  // 个股 IV/指数 IV 是交易日、RV30 是含周末的永续日线；边界来自首条足够长的锚序列，
+  // 作为时间戳统一作用于三条线，不能拿某条线的点数索引分别切出三段不同历史。
+  const zs = vol30ZoomStart([iv && iv.series, uv.series, uv.rv], uv.view_points);
   c.setOption({
     animation: false,
     useUTC: true,
@@ -1065,11 +1093,18 @@ function renderUsvol(uv, meta, c) {
     },
     legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
       itemWidth: 12, itemHeight: 3, icon: 'rect' },
-    grid: { left: 38, right: 44, top: 22, bottom: 20 },
+    grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
       axisLabel: { color: COL.muted, fontSize: 9.5 } },
     yAxis: { scale: true, splitLine: { lineStyle: { color: COL.grid } },
       axisLabel: { color: COL.muted, fontSize: 9.5, formatter: '{value}%' } },
+    dataZoom: zs == null ? [] : [
+      { type: 'inside', xAxisIndex: 0, startValue: zs },
+      { type: 'slider', xAxisIndex: 0, startValue: zs, bottom: 2, height: 12,
+        borderColor: COL.border, backgroundColor: 'rgba(23,26,32,.03)',
+        fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
+        textStyle: { color: COL.muted, fontSize: 9 } },
+    ],
     series: [
       // 个股 IV 与 RV30 是同一标的的同口径对照，实线；指数是跨标的的锚，虚线弱化
       ...(iv ? [{ name: '个股IV', type: 'line', data: iv.series, symbol: 'none',

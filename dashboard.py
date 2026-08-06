@@ -60,17 +60,21 @@ OVERVIEW_TERM_FRESH_SEC = 2 * 3600  # 起步值，待校准；期限曲线超过
 # 详情页原先硬编码 365，与此常数是两处同值来源，改一处不改另一处就会静默漂移。
 DVOL_RANK_WIN = 365                 # 起步值，待校准；加密 IV30 历史分位观察窗
 DVOL_RANK_MIN = 120                 # 起步值，待校准；不足样本不输出历史分位
-# 30d 波动率卡的**显示窗**（≠分位窗，也≠库里存量）。取两倍分位窗：能看到两轮周期，
-# 又不至于让读者拿三年的目测去质疑一年窗算出的分位。DVOL/个股IV/指数IV/RV30 共用
-# 此常数——四条线画在同一张卡上，各自截不同长度会造成"同图不同期"的假对比。
+IV_RANK_WIN = 252                   # 交易日≈1 年，与指数分位同窗
+IV_RANK_MIN = 120                   # 少于此不给分位——新股样本短，宁可空着也不给假分位
+# 30d 波动率卡送往前端的**数据窗**（≠默认视窗，也≠库里存量）。三年数据让滑块能回看
+# 两个额外周期；默认视窗由 payload 按各品种分位窗另行指定，避免旧尖峰压扁当前区间。
+# DVOL/个股IV/指数IV/RV30 共用此常数——同图各自截不同长度会造成"同图不同期"的假对比。
 # **口径是日历天，不是点数**：加密日线 365 点/年、美股 252 点/年，按点数截会让
-# 同一个 730 在加密上是 2.0 年、在美股上是 2.9 年（实测 NVDA 1063 天），
-# 两张卡的"两年"含义不同，也让上面那句"两倍分位窗"只对加密成立。
-VOL_HIST_DAYS = 730
+# 同一份"三年数据"在加密上是 3.0 年、在美股上约 4.3 年；实测 NVDA 仅 730 个
+# 交易日点已经横跨 1063 个日历天，两张卡的"三年"含义会因此不同。
+VOL_DATA_DAYS = 3 * 365
+# 起步值，待校准；额外 60 行是给 RV30 的 30 根滚动窗留余量，截取仍只认上面的日历天数据窗。
+VOL_DATA_FETCH_LIMIT = VOL_DATA_DAYS + 60
 
 
-def _tail_days(pairs: list, days: int = VOL_HIST_DAYS) -> list:
-    """按**日历天**截取 [ts, value] 序列的尾段（见 VOL_HIST_DAYS 注释）。"""
+def _tail_days(pairs: list, days: int = VOL_DATA_DAYS) -> list:
+    """按**日历天**截取 [ts, value] 序列的尾段（见 VOL_DATA_DAYS 注释）。"""
     if not pairs:
         return []
     cutoff = int(pairs[-1][0]) - days * 86_400_000
@@ -347,7 +351,7 @@ def _dvol_payload(conn, symbol: str):
     if instruments.get(symbol).get("class") != "crypto":
         return None
     xopt = _xopt_block(conn, symbol)
-    dv = (storage.get_dvol(conn, base, limit=VOL_HIST_DAYS + 60)
+    dv = (storage.get_dvol(conn, base, limit=VOL_DATA_FETCH_LIMIT)
           if base in ("BTC", "ETH") else [])
     if not len(dv) and xopt is None:
         return None
@@ -359,7 +363,7 @@ def _dvol_payload(conn, symbol: str):
         ]
         iv_last = float(dv["dvol"].iloc[-1])
         iv_rank = round(pct_rank(dv["dvol"], DVOL_RANK_WIN), 3)
-    d1 = storage.get_ohlcv(conn, symbol, "1d", limit=VOL_HIST_DAYS + 60)
+    d1 = storage.get_ohlcv(conn, symbol, "1d", limit=VOL_DATA_FETCH_LIMIT)
     rv_pairs, rv_last = [], None
     if len(d1) >= 40:
         rv = realized_vol(d1["close"], 30, 365) * 100
@@ -379,7 +383,10 @@ def _dvol_payload(conn, symbol: str):
     return {
         "iv": _tail_days(iv_pairs),
         "rv": _tail_days(rv_pairs),
-        "iv_rank_win": DVOL_RANK_WIN,  # 显示窗≠分位窗，前端必须标出后者
+        "view_points": DVOL_RANK_WIN,
+        # iv_rank_win 给卡片文字标注分位计算口径；view_points 只控制初始缩放，用户一拉
+        # 滑块两者就不再相等，故即使当前同值也不能删成一个字段。
+        "iv_rank_win": DVOL_RANK_WIN,
         "iv_last": round(iv_last, 1) if iv_last is not None else None,
         "iv_rank": iv_rank,
         "rv_last": round(rv_last, 1) if rv_last is not None else None,
@@ -393,10 +400,6 @@ def _dvol_payload(conn, symbol: str):
         "spread3": (round(xopt["iv"] - rv3_last, 1)
                     if xopt is not None and rv3_last is not None else None),
     }
-
-
-IV_RANK_WIN = 252   # 交易日≈1 年，与指数分位同窗
-IV_RANK_MIN = 120   # 少于此不给分位——新股样本短，宁可空着也不给假分位
 
 
 def _stock_iv_block(conn, symbol: str):
@@ -702,7 +705,7 @@ def _usvol_payload(conn, symbol: str):
     idx_settled = None
     series = []
     if idx:
-        dfv = storage.get_usvol(conn, idx, limit=VOL_HIST_DAYS + 60)
+        dfv = storage.get_usvol(conn, idx, limit=VOL_DATA_FETCH_LIMIT)
         if len(dfv):
             idx_last = float(dfv["close"].iloc[-1])
             # 当日行可能是未经 CSV 确权的延迟报价（usvol 两级权威）。显示值用最新
@@ -711,7 +714,7 @@ def _usvol_payload(conn, symbol: str):
             csv_max = int(storage.get_meta(conn, f"usvol_csv_max_{idx}", 0) or 0)
             idx_settled = bool(csv_max) and int(dfv["ts"].iloc[-1]) <= csv_max
             ref_df = dfv[dfv["ts"] <= csv_max] if csv_max else dfv
-            tail = ref_df["close"].tail(252)
+            tail = ref_df["close"].tail(IV_RANK_WIN)
             if len(tail) >= 60:
                 idx_rank = round(float((tail < idx_last).mean()), 3)
             series = _tail_days([[int(t), round(float(c), 2)]
@@ -721,7 +724,7 @@ def _usvol_payload(conn, symbol: str):
 
     # RV30 与加密 DVOL 卡同口径（1d 收盘年化），同图对照 IV-RV 剪刀差
     rv_pairs, rv_last = [], None
-    d1 = storage.get_ohlcv(conn, symbol, "1d", limit=VOL_HIST_DAYS + 60)
+    d1 = storage.get_ohlcv(conn, symbol, "1d", limit=VOL_DATA_FETCH_LIMIT)
     if len(d1) >= 40:
         rv = realized_vol(d1["close"], 30, 365) * 100
         rv_pairs = _tail_days([
@@ -788,6 +791,7 @@ def _usvol_payload(conn, symbol: str):
         else (xopt["iv"] if xopt else None)
     base_iv = iv["last"] if iv else idx_last
     return {
+        "view_points": IV_RANK_WIN,
         "index": idx,
         "index_last": round(idx_last, 2) if idx_last is not None else None,
         "index_rank": idx_rank,
