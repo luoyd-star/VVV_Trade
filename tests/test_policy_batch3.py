@@ -28,7 +28,13 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
         "volume": [10.0, 10.0, 10.0],
     })
     zone = _zone()
-    monkeypatch.setattr(dashboard.storage, "get_ohlcv", lambda *args, **kwargs: df)
+    df_1d = pd.concat([df.iloc[[0]]] * 100, ignore_index=True)
+    df_1d["ts"] = pd.date_range("2026-04-20", periods=100, freq="1d", tz="UTC")
+
+    def get_ohlcv(conn, symbol, tf, limit):
+        return df_1d if tf == "1d" else df
+
+    monkeypatch.setattr(dashboard.storage, "get_ohlcv", get_ohlcv)
     monkeypatch.setattr(
         dashboard.storage, "ts_to_ms",
         lambda values: np.array([int(pd.Timestamp(value).timestamp() * 1000) for value in values]),
@@ -61,8 +67,8 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
     )
     assert set(policy) == {
         "versions", "tf", "regime_4h", "regime_1d", "price", "atr", "location", "crsi",
-        "signal_ok", "signal_tf", "play", "zones", "vol_notes", "stop_check",
-        "vol_meta", "degraded",
+        "crsi_by_tf", "signal_ok", "signal_tf", "resonance", "regime_conflict",
+        "play", "zones", "vol_notes", "stop_check", "vol_meta", "degraded",
     }
     assert policy["versions"] == {
         "levels": "lv1", "location": "loc1", "stopcheck": "stop1", "volnote": "vol1",
@@ -70,7 +76,13 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
     assert policy["location"]["at"] == "at_support"
     assert policy["location"]["approach"] == "from_above"
     assert policy["signal_ok"] is True
-    assert policy["signal_tf"] == "1h"
+    assert policy["signal_tf"] == "4h"
+    assert policy["resonance"]["grade"] == "强"
+    assert policy["resonance"]["score"] == 2
+    assert policy["regime_conflict"] == {
+        "note": "4h 趋势上行 vs 1d 震荡：周期状态冲突，仅作背景警示",
+        "severity": "warn",
+    }
     assert policy["play"] == "S4 趋势回踩做多"
     assert policy["zones"] == [{
         **zone, "established_ts": None, "overlap_count": None,
@@ -119,8 +131,8 @@ def test_overview_context_renders_cross_section_without_listing_wait_rows():
     }
     text = render_overview_context(payload)
     assert text.startswith("当前时刻:")
-    assert "位置+信号共振 1 个 · 等待信号 1 个 · 接近 2 个" in text
-    assert "BTC-USDT" in text and "位置+信号共振" in text
+    assert "4h主票共振 1 个 · 等待4h主票 1 个 · 接近 2 个" in text
+    assert "BTC-USDT" in text and "4h主票共振" in text
     assert "S4 趋势回踩做多" in text and "3日预期波动" in text
     assert "stop_check=verdict=ok,ratio=1.2,note=宽度充足" in text
     assert "ETH-USDT" in text and "warmup=true" in text

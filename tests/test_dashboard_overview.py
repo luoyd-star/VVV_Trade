@@ -39,8 +39,19 @@ def _item(symbol: str, *, dist=0.2, tradeable=True, at="at_support",
         "zone": zone,
         "dist_atr": None if at == "middle_zone" else dist,
         "crsi": {"crsi": 20.0, "pos": -2.0, "zone": "超卖区"},
+        "crsi_by_tf": {
+            "4h": {"crsi": 20.0, "pos": -2.0, "zone": "超卖区"},
+            "1d": {"crsi": 50.0, "pos": 50.0, "zone": "带内"},
+            "1h": {"crsi": 50.0, "pos": 50.0, "zone": "带内"},
+        },
         "signal_ok": signal_ok if at in {"at_support", "at_resistance"} else None,
-        "signal_tf": "1h",
+        "signal_tf": "4h",
+        "resonance": {
+            "main_tf": "4h", "main_zone": "超卖区",
+            "main_ok": signal_ok if at in {"at_support", "at_resistance"} else None,
+            "aux": {"1d": 0, "1h": 0}, "score": 0,
+            "grade": "中" if signal_ok is True else None, "conflicts": [],
+        },
         "play": "S4 趋势回踩做多" if tradeable else None,
         "vol_note": "；".join(notes or []) or None,
         "vol_notes": list(notes or []),
@@ -139,7 +150,7 @@ def test_overview_partition_splits_armed_and_wait_signal_and_risk_can_overlap():
     assert [row["symbol"] for row in result["risk"]] == ["CLOSE", "MID"]
     assert result["near"][0]["crsi"] == {"zone": "超卖区"}
     assert result["near"][0]["stop_check"]["verdict"] == "ok"
-    assert result["near"][0]["signal_tf"] == "1h"
+    assert result["near"][0]["signal_tf"] == "4h"
     assert result["unavailable"] == [{"symbol": "MISS", "reason": "crsi_unavailable"}]
 
 
@@ -177,7 +188,7 @@ def test_overview_payload_uses_60_second_cache(monkeypatch):
     assert [row["symbol"] for row in third["armed"]] == ["B", "A"]
 
 
-def test_signal_uses_only_closed_1h_bars_at_4h_asof_and_never_falls_back(monkeypatch):
+def test_resonance_uses_only_closed_bars_at_4h_asof(monkeypatch):
     frame = pd.DataFrame({
         "ts": pd.date_range("2026-08-06T08:00:00Z", periods=5, freq="1h"),
         "close": [1, 2, 3, 4, 5],
@@ -194,18 +205,26 @@ def test_signal_uses_only_closed_1h_bars_at_4h_asof_and_never_falls_back(monkeyp
     result = dashboard._policy_signal_snapshot(None, "TEST", "at_support", asof)
 
     assert seen["last_ts"] == pd.Timestamp("2026-08-06T11:00:00Z")
-    assert result["signal_tf"] == "1h"
+    assert result["signal_tf"] == "4h"
     assert result["signal_ok"] is True
-    assert result["degraded"] == []
+    assert result["resonance"] == {
+        "main_tf": "4h", "main_zone": "超卖区", "main_ok": True,
+        "aux": {"1d": None, "1h": 1}, "score": 1, "grade": "强",
+        "conflicts": [],
+    }
+    assert result["degraded"] == ["crsi_1d_history_insufficient"]
 
     monkeypatch.setattr(
         dashboard.storage, "get_ohlcv", lambda *args, **kwargs: pd.DataFrame(),
     )
     missing = dashboard._policy_signal_snapshot(None, "TEST", "at_support", asof)
-    assert missing["signal_tf"] == "1h"
+    assert missing["signal_tf"] == "4h"
     assert missing["signal_ok"] is None
     assert missing["crsi"] == {"crsi": None, "pos": None, "zone": None}
-    assert missing["degraded"] == ["crsi_1h_missing"]
+    assert missing["resonance"]["aux"] == {"1d": None, "1h": None}
+    assert missing["degraded"] == [
+        "crsi_4h_missing", "crsi_1d_missing", "crsi_1h_missing",
+    ]
 
 
 def test_overview_stale_gate_preserves_bar_timing(monkeypatch):
@@ -303,7 +322,8 @@ def test_scan_propagates_stop_signal_timing_and_warmup(monkeypatch):
 
     result = dashboard._scan_overview_symbol(None, "TEST")
     item = result["item"]
-    assert item["signal_tf"] == "1h" and item["signal_ok"] is True
+    assert item["signal_tf"] == "4h" and item["signal_ok"] is True
+    assert item["resonance"]["main_tf"] == "4h"
     assert item["warmup"] is True
     assert item["bar_close_ts"] == asof * 1000 and item["age_sec"] == 60
     assert item["stop_check"]["verdict"] == "too_tight"

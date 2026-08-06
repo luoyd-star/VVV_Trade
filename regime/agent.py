@@ -81,9 +81,13 @@ age 是最后落库年龄（OpenD 为网关探活、无落库年龄）；采集�
 时间语义：<panel> 首行是**当前时刻**，面板数据均为此刻快照；历史对话每条开头的
 [MM-DD HH:MM UTC·距今] 前缀是**该消息的发生时刻**——历史回答里引用的读数只在其时点有效，
 与当前 <panel> 数字冲突时以 <panel> 为准，引用历史结论必须显式说明其时点。
+Policy 共振以 4h cRSI 为必要主票：支撑需 4h 超卖、压力需 4h 超买；1d/1h cRSI
+只作辅助票，同向 +1、反向 -1、带内 0、缺失 None（不计票），grade 强/中/弱只用于排序和警示，
+不否决 4h。signal_ok 是 main_ok 的兼容副本。regime_conflict 表示 4h/1d 状态不同且至少一方为
+趋势态，只作 S13 逆势背景警示，不修改 play、不影响 armed。
 总览 scope 的 <panel> 是 4h 决策/1d 底座的横截面：counts 将位置候选拆为
-armed（位置+信号共振）与 wait_signal（位置成立、等待信号），另含接近/风险/观望/不可用数量；
-armed/wait_signal 逐条含 symbol、regime、位置、1h cRSI、剧本、止损宽度校验和波动率提示；risk 只列风险标注，
+armed（4h 主票共振）与 wait_signal（位置成立、等待 4h 主票），另含接近/风险/观望/不可用数量；
+armed/wait_signal 逐条含 symbol、regime、位置、4h 主票、1d/1h 辅助票、共振分级、剧本、止损宽度校验和波动率提示；risk 只列风险标注，
 middle（观望）只给数量，不应把 WAIT 误读成数据缺失。
 </panel_legend>"""
 
@@ -151,6 +155,20 @@ def _pathgeom_str(
             basis = f"；margin 相对原始态 {raw_state} 而非当前确认态 {confirmed_state}"
         parts.append(f"margin={mg['margin']}({mg.get('nearest')}){warn}{basis}")
     return " ".join(parts) if parts else "路径几何=暂无(历史<120根)"
+
+
+def _resonance_str(value: dict | None) -> str:
+    """把共振块无损压成 Hermes 可读的一行；None 票不伪装为 0。"""
+    resonance = value or {}
+    aux = resonance.get("aux") or {}
+    conflicts = resonance.get("conflicts") or []
+    return (
+        f"main_tf={resonance.get('main_tf')} main_zone={resonance.get('main_zone')} "
+        f"main_ok={resonance.get('main_ok')} | "
+        f"aux(1d={aux.get('1d')},1h={aux.get('1h')}) "
+        f"score={resonance.get('score')} grade={resonance.get('grade')} | "
+        f"conflicts={'；'.join(map(str, conflicts)) or '无'}"
+    )
 
 
 def render_context(p: dict) -> str:
@@ -246,6 +264,15 @@ def render_context(p: dict) -> str:
             f"approach={location.get('approach')} | "
             f"signal_ok={policy.get('signal_ok')} signal_tf={policy.get('signal_tf')} | "
             f"play={policy.get('play')}"
+        )
+        lines.append("Policy resonance: " + _resonance_str(policy.get("resonance")))
+        regime_conflict = policy.get("regime_conflict")
+        lines.append(
+            "Policy regime_conflict: "
+            + (
+                f"severity={regime_conflict.get('severity')} note={regime_conflict.get('note')}"
+                if isinstance(regime_conflict, dict) else "无"
+            )
         )
         stop = policy.get("stop_check") or {}
         lines.append(
@@ -439,8 +466,8 @@ def render_overview_context(ov: dict) -> str:
         "——下方全部数据为此刻横截面快照",
         f"总览口径: {ov.get('tf') or '不可用'} 决策 · 1d 底座",
         "分层统计: "
-        f"位置+信号共振 {count_text('armed')} · "
-        f"等待信号 {count_text('wait_signal')} · "
+        f"4h主票共振 {count_text('armed')} · "
+        f"等待4h主票 {count_text('wait_signal')} · "
         f"接近 {count_text('near')} · "
         f"风险 {count_text('risk')} · "
         f"观望 {count_text('middle')} · "
@@ -478,9 +505,9 @@ def render_overview_context(ov: dict) -> str:
         for item in candidates:
             crsi = item.get("crsi") or {}
             signal = (
-                "位置+信号共振" if item.get("signal_ok") is True
-                else "信号未共振" if item.get("signal_ok") is False
-                else "信号不可判定"
+                "4h主票共振" if item.get("signal_ok") is True
+                else "4h主票未共振" if item.get("signal_ok") is False
+                else "4h主票不可判定"
             )
             distance = item.get("dist_atr")
             dist_text = f"{distance:.2f}ATR" if isinstance(distance, (int, float)) else "不可用"
@@ -491,6 +518,15 @@ def render_overview_context(ov: dict) -> str:
                 f"信号={item.get('signal_tf')} cRSI {crsi.get('zone')}"
                 f"({crsi.get('crsi')})/{signal} | "
                 f"剧本={item.get('play') or '无匹配剧本'}"
+            )
+            line += " | resonance=" + _resonance_str(item.get("resonance"))
+            regime_conflict = item.get("regime_conflict")
+            line += (
+                " | regime_conflict="
+                + (
+                    f"severity={regime_conflict.get('severity')},note={regime_conflict.get('note')}"
+                    if isinstance(regime_conflict, dict) else "无"
+                )
             )
             stop = item.get("stop_check") or {}
             line += (
@@ -507,8 +543,8 @@ def render_overview_context(ov: dict) -> str:
                 line += f" | degraded={'；'.join(map(str, degraded))}"
             lines.append(line)
 
-    append_candidates("armed", "位置+信号共振")
-    append_candidates("wait_signal", "位置候选（等待信号）")
+    append_candidates("armed", "4h主票共振")
+    append_candidates("wait_signal", "位置候选（等待4h主票）")
 
     near = ov.get("near") or []
     if near:
@@ -520,7 +556,9 @@ def render_overview_context(ov: dict) -> str:
             lines.append(
                 f"- {item.get('symbol')} | 4h={item.get('regime_4h')} | "
                 f"位置={item.get('at')}({item.get('meaning')},距{dist_text}) | "
-                f"cRSI={crsi.get('zone')}"
+                f"cRSI={crsi.get('zone')} | "
+                f"resonance={_resonance_str(item.get('resonance'))} | "
+                f"regime_conflict={(item.get('regime_conflict') or {}).get('note') or '无'}"
             )
     else:
         lines.append(f"接近关键位: {count_text('near')}")

@@ -58,8 +58,12 @@ OVERVIEW_VOL1H_HOURS = 260          # 起步值，待校准；覆盖 POC 的 240
 OVERVIEW_TERM_FRESH_SEC = 2 * 3600  # 起步值，待校准；期限曲线超过两小时不作当前标注
 OVERVIEW_DVOL_RANK_WIN = 365        # 起步值，待校准；加密 IV30 历史分位观察窗
 OVERVIEW_DVOL_RANK_MIN = 120        # 起步值，待校准；不足样本不输出历史分位
-POLICY_SIGNAL_TF = "1h"
+POLICY_SIGNAL_TF = "4h"
+POLICY_RESONANCE_TFS = ("4h", "1d", "1h")
 POLICY_SIGNAL_OHLCV_LIMIT = 400     # 起步值，待校准；覆盖 cRSI 自适应带观察窗
+POLICY_1D_MIN_BARS = 90             # 起步值，待校准；与详情页既有 1d 可用性门槛一致
+RESONANCE_STRONG_MIN = 1            # 起步值，待校准；用户裁决：辅助净分至少 +1 为强
+RESONANCE_WEAK_MAX = -1             # 起步值，待校准；用户裁决：辅助净分至多 -1 为弱
 STALE_TF_MULTIPLIER = 1.5           # 起步值，待校准；超过 1.5 个周期视为陈旧
 EARNINGS_BEFORE_CUTOFF_MIN_ET = 570  # 起步值，待校准；BEFORE 财报在 ET 09:30 后视为已发生
 EARNINGS_AFTER_CUTOFF_MIN_ET = 960   # 起步值，待校准；AFTER 财报在 ET 16:00 后视为已发生
@@ -1109,7 +1113,7 @@ def _latest_state_snapshot(conn, symbol: str, tf: str) -> dict:
 
 
 def _signal_ok(at, crsi_zone):
-    """cRSI 极值区是否与当前位置所需方向一致；不可判定时返回 None。"""
+    """兼容入口：主导 cRSI 极值区是否与关键位方向一致。"""
     if crsi_zone is None:
         return None
     if at == "at_support":
@@ -1119,46 +1123,139 @@ def _signal_ok(at, crsi_zone):
     return None
 
 
-def _policy_signal_snapshot(conn, symbol: str, at, asof_ms) -> dict:
-    """只用截至当前 4h 收线时刻的 1h 已收线 cRSI，不回退 4h。"""
-    result = {
-        "signal_tf": POLICY_SIGNAL_TF,
-        "crsi": {"crsi": None, "pos": None, "zone": None},
-        "signal_ok": None,
-        "degraded": [],
+def _resonance(at: str, z4: str | None, z1d: str | None,
+               z1h: str | None) -> dict:
+    """4h 主导 + 1d/1h 分级辅助；辅助冲突只降级，不否决主票。
+
+    实证依据（监工实测）：4h cRSI 超卖→超买循环中位 6.0 天、1h 1.4 天，
+    用户持仓 1-3 天；4h 极值仅 15/71 品种，若硬要求辅助同向只剩 2 个，
+    因此 armed 只看 4h 主票，辅助只形成强/中/弱分级。
+    """
+    main_ok = _signal_ok(at, z4)
+    expected = {
+        "at_support": "超卖区",
+        "at_resistance": "超买区",
+    }.get(at)
+    opposite = {"超卖区": "超买区", "超买区": "超卖区"}.get(expected)
+
+    aux = {}
+    conflicts = []
+    for tf, zone in (("1d", z1d), ("1h", z1h)):
+        if zone is None or expected is None:
+            vote = None
+        elif zone == expected:
+            vote = 1
+        elif zone == opposite:
+            vote = -1
+            if main_ok is True:
+                conflicts.append(f"{tf} {zone}与 4h {z4}反向")
+        else:
+            vote = 0
+        aux[tf] = vote
+
+    score = sum(vote for vote in aux.values() if vote is not None)
+    grade = None
+    if main_ok is True:
+        if score >= RESONANCE_STRONG_MIN:
+            grade = "强"
+        elif score <= RESONANCE_WEAK_MAX:
+            grade = "弱"
+        else:
+            grade = "中"
+    return {
+        "main_tf": "4h",
+        "main_zone": z4,
+        "main_ok": main_ok,
+        "aux": aux,
+        "score": score,
+        "grade": grade,
+        "conflicts": conflicts,
     }
+
+
+def _regime_conflict(regime_4h: str | None,
+                     regime_1d: str | None) -> dict | None:
+    """不同周期且至少一方为趋势态时只输出警示，不修改 4h play。"""
+    if regime_4h is None or regime_1d is None or regime_4h == regime_1d:
+        return None
+    trends = {"trend_up", "trend_down"}
+    if regime_4h not in trends and regime_1d not in trends:
+        return None
+    labels = {
+        "trend_up": "趋势上行", "trend_down": "趋势下行", "range": "震荡",
+        "squeeze": "低波动挤压", "high_vol_chop": "高波动非趋势",
+    }
+    pair = f"4h {labels.get(regime_4h, regime_4h)} vs 1d {labels.get(regime_1d, regime_1d)}"
+    if regime_4h == "trend_up" and regime_1d == "trend_down":
+        note = f"{pair}：这是逆大势的反弹单"
+    elif regime_4h == "trend_down" and regime_1d == "trend_up":
+        note = f"{pair}：这是逆大势的回落单"
+    else:
+        note = f"{pair}：周期状态冲突，仅作背景警示"
+    return {"note": note, "severity": "warn"}
+
+
+def _crsi_snapshot(conn, symbol: str, tf: str, asof_ms) -> dict:
+    """取指定周期截至 4h 决策时点的最后已收线 cRSI；缺失保持 None。"""
+    empty = {"crsi": None, "pos": None, "zone": None}
     if asof_ms is None:
-        result["degraded"].append("signal_asof_unavailable")
-        return result
+        return {"crsi": empty, "degraded": ["signal_asof_unavailable"]}
     frame = storage.get_ohlcv(
-        conn, symbol, POLICY_SIGNAL_TF, limit=POLICY_SIGNAL_OHLCV_LIMIT,
+        conn, symbol, tf, limit=POLICY_SIGNAL_OHLCV_LIMIT,
     )
     if not len(frame):
-        result["degraded"].append("crsi_1h_missing")
-        return result
+        return {"crsi": empty, "degraded": [f"crsi_{tf}_missing"]}
+    if tf == "1d" and len(frame) < POLICY_1D_MIN_BARS:
+        return {
+            "crsi": empty,
+            "degraded": ["crsi_1d_history_insufficient"],
+        }
     try:
         ts_ms = storage.ts_to_ms(frame["ts"])
-        # ohlcv.ts 是开盘时刻；只有收线时间不晚于 4h asof 的 1h bar 才能进入信号。
-        closed = np.asarray(ts_ms, dtype="int64") + TF_SEC[POLICY_SIGNAL_TF] * 1000 <= int(asof_ms)
+        # ohlcv.ts 是开盘时刻；各周期都只消费收线时间不晚于 4h asof 的 bar。
+        closed = np.asarray(ts_ms, dtype="int64") + TF_SEC[tf] * 1000 <= int(asof_ms)
         frame = frame.loc[closed].reset_index(drop=True)
     except (KeyError, TypeError, ValueError, OverflowError):
-        result["degraded"].append("crsi_1h_unavailable")
-        return result
+        return {"crsi": empty, "degraded": [f"crsi_{tf}_unavailable"]}
     if not len(frame):
-        result["degraded"].append("crsi_1h_missing_at_asof")
-        return result
-
+        return {"crsi": empty, "degraded": [f"crsi_{tf}_missing_at_asof"]}
     try:
         crsi_last = crsi_features(frame).get("last") or {}
-    except Exception as exc:  # noqa: BLE001  信号缺失只降级，不回退 4h 或拖垮位置测量
-        result["degraded"].append(f"crsi_1h_unavailable:{type(exc).__name__}")
-        return result
-    result["crsi"] = {key: crsi_last.get(key) for key in ("crsi", "pos", "zone")}
-    if any(result["crsi"][key] is None for key in ("crsi", "pos", "zone")):
-        result["degraded"].append("crsi_1h_unavailable")
-        return result
-    result["signal_ok"] = _signal_ok(at, result["crsi"]["zone"])
-    return result
+    except Exception as exc:  # noqa: BLE001  单周期缺失只降级，不拖垮位置测量
+        return {
+            "crsi": empty,
+            "degraded": [f"crsi_{tf}_unavailable:{type(exc).__name__}"],
+        }
+    value = {key: crsi_last.get(key) for key in ("crsi", "pos", "zone")}
+    if any(value[key] is None for key in ("crsi", "pos", "zone")):
+        return {"crsi": empty, "degraded": [f"crsi_{tf}_unavailable"]}
+    return {"crsi": value, "degraded": []}
+
+
+def _policy_signal_snapshot(conn, symbol: str, at, asof_ms) -> dict:
+    """装配 4h 主票和 1d/1h 辅助票，全部对齐同一 4h 收线时点。"""
+    snapshots = {
+        tf: _crsi_snapshot(conn, symbol, tf, asof_ms)
+        for tf in POLICY_RESONANCE_TFS
+    }
+    by_tf = {tf: snapshots[tf]["crsi"] for tf in POLICY_RESONANCE_TFS}
+    resonance = _resonance(
+        at,
+        by_tf["4h"].get("zone"),
+        by_tf["1d"].get("zone"),
+        by_tf["1h"].get("zone"),
+    )
+    degraded = []
+    for tf in POLICY_RESONANCE_TFS:
+        degraded.extend(snapshots[tf]["degraded"])
+    return {
+        "signal_tf": POLICY_SIGNAL_TF,
+        "crsi": by_tf["4h"],
+        "crsi_by_tf": by_tf,
+        "signal_ok": resonance["main_ok"],
+        "resonance": resonance,
+        "degraded": list(dict.fromkeys(degraded)),
+    }
 
 
 def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None,
@@ -1254,8 +1351,14 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
         "atr": None,
         "location": None,
         "crsi": {"crsi": None, "pos": None, "zone": None},
+        "crsi_by_tf": {
+            tf: {"crsi": None, "pos": None, "zone": None}
+            for tf in POLICY_RESONANCE_TFS
+        },
         "signal_ok": None,
         "signal_tf": POLICY_SIGNAL_TF,
+        "resonance": _resonance(None, None, None, None),
+        "regime_conflict": _regime_conflict(regime_4h, regime_1d),
         "play": None,
         "zones": [],
         "vol_notes": [],
@@ -1328,8 +1431,10 @@ def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
         conn, symbol, location.get("at"), last_close_ms,
     )
     base["crsi"] = signal["crsi"]
+    base["crsi_by_tf"] = signal["crsi_by_tf"]
     base["signal_ok"] = signal["signal_ok"]
     base["signal_tf"] = signal["signal_tf"]
+    base["resonance"] = signal["resonance"]
     degraded.extend(signal["degraded"])
     base["play"] = _policy_play(
         regime_4h, location.get("at"), signal["signal_ok"],
@@ -1538,7 +1643,13 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
 
     state_4h = _latest_state_snapshot(conn, symbol, "4h")
     regime_4h = state_4h["state"]
-    regime_1d = _latest_state(conn, symbol, "1d")
+    frame_1d = storage.get_ohlcv(
+        conn, symbol, "1d", limit=POLICY_1D_MIN_BARS,
+    )
+    regime_1d = (
+        _latest_state(conn, symbol, "1d")
+        if len(frame_1d) >= POLICY_1D_MIN_BARS else None
+    )
     if regime_4h is None:
         return {"symbol": symbol, "reason": "regime_4h_missing", **timing}
     # 1d 是**底座（背景）不是前提**：用户裁决「4h 决策 + 1d 底座」——决策周期是 4h，
@@ -1574,6 +1685,8 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
         }
 
     degraded = list(levels.get("degraded") or [])
+    if regime_1d is None:
+        degraded.append("regime_1d_missing")
     degraded.extend(location.get("degraded") or [])
     signal = _policy_signal_snapshot(conn, symbol, location["at"], bar_close_ts)
     degraded.extend(signal["degraded"])
@@ -1631,8 +1744,11 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
         "zone": zone,
         "dist_atr": location.get("dist_atr"),
         "crsi": signal["crsi"],
+        "crsi_by_tf": signal["crsi_by_tf"],
         "signal_ok": signal["signal_ok"],
         "signal_tf": signal["signal_tf"],
+        "resonance": signal["resonance"],
+        "regime_conflict": _regime_conflict(regime_4h, regime_1d),
         "play": _policy_play(
             regime_4h, location["at"], signal["signal_ok"],
             role_flipped=location.get("role_flipped"), zone=zone,
@@ -1658,7 +1774,8 @@ def _scan_overview_symbol(conn, symbol: str) -> dict:
 _OVERVIEW_FULL_KEYS = (
     "symbol", "display", "regime_4h", "regime_1d", "price", "atr",
     "at", "role", "meaning", "tradeable", "approach", "role_flipped",
-    "zone", "dist_atr", "crsi", "signal_ok", "signal_tf", "play",
+    "zone", "dist_atr", "crsi", "crsi_by_tf", "signal_ok", "signal_tf",
+    "resonance", "regime_conflict", "play",
     "vol_note", "vol_notes", "vol_meta", "stop_check", "degraded", "warmup",
     "bar_close_ts", "age_sec",
 )
@@ -1673,8 +1790,11 @@ def _overview_lite(item: dict) -> dict:
         "meaning": item["meaning"],
         "dist_atr": item["dist_atr"],
         "crsi": {"zone": item["crsi"]["zone"]},
+        "crsi_by_tf": item.get("crsi_by_tf"),
         "signal_ok": item.get("signal_ok"),
         "signal_tf": item.get("signal_tf"),
+        "resonance": item.get("resonance"),
+        "regime_conflict": item.get("regime_conflict"),
         "stop_check": item.get("stop_check"),
         "warmup": item.get("warmup"),
         "bar_close_ts": item.get("bar_close_ts"),
@@ -1719,8 +1839,9 @@ def _partition_overview(scans: list[dict]) -> dict:
         else:
             unavailable.append({"symbol": item["symbol"], "reason": "location_unavailable"})
 
+    grade_rank = {"强": 0, "中": 1, "弱": 2}
     candidate_key = lambda row: (
-        0 if row.get("signal_ok") is True else 1,
+        grade_rank.get((row.get("resonance") or {}).get("grade"), 3),
         float("inf") if row.get("dist_atr") is None else row["dist_atr"],
         row["symbol"],
     )

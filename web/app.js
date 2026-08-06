@@ -424,6 +424,47 @@ function policyZoneMatches(zone, hit) {
     && Number.isFinite(Number(hit[key])) && Math.abs(Number(zone[key]) - Number(hit[key])) < 1e-9);
 }
 
+function policyZoneSourceLabel(kinds) {
+  const labels = {
+    pivot_high: '前高', pivot_low: '前低',
+    ema21: 'EMA21', ema55: 'EMA55', ema100: 'EMA100', ema200: 'EMA200',
+    range_hi: '区上沿', range_lo: '区下沿', poc: 'POC',
+    prev_day_hi: '昨高', prev_day_lo: '昨低',
+    prev_week_hi: '上周高', prev_week_lo: '上周低',
+  };
+  return (kinds || []).map((kind) => labels[kind] || String(kind)).join('·') || '关键位';
+}
+
+function policyZoneMarkAreas(tf, zones, hit) {
+  // zone 固定由 4h 计算；切到 1d/1h 时返回空数组，避免被误认成当前周期关键位。
+  if (tf !== '4h') return [];
+  return (zones || []).filter((zone) => zone && zone.eligible === true
+    && ['support', 'resistance'].includes(zone.role_now)
+    && Number.isFinite(Number(zone.lo)) && Number.isFinite(Number(zone.hi)))
+    .map((zone) => {
+      const support = zone.role_now === 'support';
+      const matched = policyZoneMatches(zone, hit);
+      const color = support ? COL.up : COL.down;
+      const fill = support ? 'rgba(10,138,102,.055)' : 'rgba(185,31,49,.05)';
+      const touches = zone.touches == null ? '触碰—' : `触碰${zone.touches}`;
+      const label = `${policyZoneSourceLabel(zone.kinds)} · ${touches}${matched ? ' · 命中' : ''}`;
+      return [
+        {
+          name: label, yAxis: Number(zone.lo),
+          itemStyle: {
+            color: fill, borderColor: color,
+            borderWidth: matched ? 2.5 : 1.2, borderType: 'dashed',
+          },
+          label: {
+            show: true, formatter: label, position: 'insideTopLeft',
+            color, fontSize: 9, fontWeight: matched ? 700 : 500,
+          },
+        },
+        { yAxis: Number(zone.hi) },
+      ];
+    });
+}
+
 function renderPolicy() {
   const p = S.data.policy;
   const rowsHost = $('policyZoneRows');
@@ -458,13 +499,19 @@ function renderPolicy() {
     : `建议关注 · ${conclusion || '暂无匹配剧本'}`;
   $('policyConclusion').style.color = gatedReference ? COL.muted : '';
   const sig = $('policySignal');
+  const resonance = p.resonance || {};
+  const grade = resonance.grade ? ` · ${resonance.grade}（辅助 ${resonance.score >= 0 ? '+' : ''}${resonance.score}）` : '';
   if (p.signal_ok === true) {
-    sig.textContent = `${p.signal_tf || '信号周期不可用'} 位置 + 信号共振`; sig.className = 'badge ok';
+    sig.textContent = `${p.signal_tf || '信号周期不可用'} 主票共振${grade}`; sig.className = 'badge ok';
   } else if (p.signal_ok === false) {
-    sig.textContent = `${p.signal_tf || '信号周期不可用'} 位置已到 · 信号未共振`; sig.className = 'badge warn';
+    sig.textContent = `${p.signal_tf || '信号周期不可用'} 位置已到 · 主票未共振`; sig.className = 'badge warn';
   } else {
-    sig.textContent = `${p.signal_tf || '信号周期不可用'} 共振不可判定`; sig.className = 'badge';
+    sig.textContent = `${p.signal_tf || '信号周期不可用'} 主票不可判定`; sig.className = 'badge';
   }
+  const aux = resonance.aux || {};
+  sig.title = `1d 辅助票 ${aux['1d'] == null ? '缺失/不计票' : aux['1d']}`
+    + ` · 1h 辅助票 ${aux['1h'] == null ? '缺失/不计票' : aux['1h']}`
+    + `${(resonance.conflicts || []).length ? ` · ${resonance.conflicts.join('；')}` : ''}`;
 
   const hit = location.zone;
   const zones = p.zones || [];
@@ -514,7 +561,11 @@ function renderPolicy() {
     $('policyStop').textContent = '结构位或 IV/期限元数据缺失，止损宽度校验不可计算';
   }
   const degraded = p.degraded || [];
-  $('policyDegraded').textContent = degraded.length ? `降级标注：${degraded.join(' · ')}` : '';
+  const conflict = p.regime_conflict;
+  const warnings = [];
+  if (conflict && conflict.note) warnings.push(`周期冲突：${conflict.note}`);
+  if (degraded.length) warnings.push(`降级标注：${degraded.join(' · ')}`);
+  $('policyDegraded').textContent = warnings.join('；');
 }
 
 // 六条分位条：挤压侧 ATR<0.30 且 BBW<0.15；高波只由 ATR>0.85 判定。
@@ -606,8 +657,12 @@ function chart(id) {
 function renderPriceChart() {
   const t = S.data.tfs[S.tf];
   const disp = (S.data.instrument || {}).display;
+  const policy = S.data.policy || {};
+  const zoneMarkData = policyZoneMarkAreas(S.tf, policy.zones || [],
+    (policy.location || {}).zone);
   $('priceMeta').textContent =
-    `${S.symbol}${disp ? `（${disp}）` : ''} · ${S.tf} · ${t.candles.length} 根 · 源 ${t.source || '—'} · UTC`;
+    `${S.symbol}${disp ? `（${disp}）` : ''} · ${S.tf} · ${t.candles.length} 根 · 源 ${t.source || '—'} · UTC`
+    + (S.tf === '4h' ? '' : ' · 关键位按 4h 计算，本周期不显示');
   const legend = $('priceLegend');
   legend.innerHTML = Object.keys(SM).map((k) => {
     const m = stateMeta(k);
@@ -617,7 +672,10 @@ function renderPriceChart() {
   }).join('') + `<span class="li"><span class="sw" style="background:${COL.blue}"></span>EMA50 / cRSI</span>
     <span class="li"><span class="sw" style="background:${COL.azure}"></span>cRSI 自适应带</span>
     <span class="li"><span class="sw" style="background:${COL.muted}"></span>H/L 摆动点 · ●背离</span>
-    <span class="li"><span class="sw" style="background:${COL.ink}"></span>VWAP（币安量）/ 偏离</span>`;
+    <span class="li"><span class="sw" style="background:${COL.ink}"></span>VWAP（币安量）/ 偏离</span>`
+    + (S.tf === '4h' ? `
+    <span class="li"><span class="sw" style="height:0;background:transparent;border-top:2px dashed ${COL.up}"></span>绿虚线=支撑区</span>
+    <span class="li"><span class="sw" style="height:0;background:transparent;border-top:2px dashed ${COL.down}"></span>红虚线=压力区</span>` : '');
   const c = chart('priceChart');
   if (!c) return;
 
@@ -715,7 +773,7 @@ function renderPriceChart() {
     series: [
       { name: 'K线', type: 'candlestick', data: kdata, xAxisIndex: 0, yAxisIndex: 0,
         itemStyle: { color: COL.up, color0: COL.down, borderColor: COL.up, borderColor0: COL.down },
-        markArea: { silent: true, data: markData } },
+        markArea: { silent: true, data: [...markData, ...zoneMarkData] } },
       { name: 'EMA50', type: 'line', data: t.ema50, symbol: 'none', z: 3,
         lineStyle: { width: 2, color: COL.blue }, xAxisIndex: 0, yAxisIndex: 0 },
       { name: '摆动高', type: 'scatter', data: pivH, symbolSize: 6, z: 4,

@@ -60,6 +60,23 @@ function zoneLabel(item) {
   return item.at === 'at_support' ? '支撑区' : '压力区';
 }
 
+function resonanceLabel(item) {
+  const resonance = item.resonance || {};
+  if (resonance.main_ok === true) {
+    const score = Number(resonance.score);
+    const scoreText = Number.isFinite(score) ? `${score >= 0 ? '+' : ''}${score}` : '—';
+    return `4h 主票共振 · ${resonance.grade || '未分级'}（辅助 ${scoreText}）`;
+  }
+  if (resonance.main_ok === false) return '4h 主票未共振';
+  return '4h 主票不可判定';
+}
+
+function auxCrsiLabel(item, tf) {
+  const value = ((item.crsi_by_tf || {})[tf] || {}).zone;
+  const vote = ((item.resonance || {}).aux || {})[tf];
+  return `${tf} ${value || '缺失'}（${vote == null ? '不计票' : vote >= 0 ? `+${vote}` : vote}）`;
+}
+
 function makeLink(symbol, className) {
   const link = document.createElement('a');
   link.className = className;
@@ -93,6 +110,9 @@ function renderCandidates(hostId, items, emptyText) {
     appendText(top, 'opp-symbol', item.symbol);
     if (item.display) appendText(top, 'opp-display', item.display);
     if (item.warmup === true) appendText(top, 'warmup-badge', '预热');
+    if ((item.resonance || {}).grade) {
+      appendText(top, 'warmup-badge', `共振${item.resonance.grade}`);
+    }
     const regime = appendText(top, 'opp-regime', stateMeta(item.regime_4h).label);
     regime.style.color = stateMeta(item.regime_4h).color;
     card.appendChild(top);
@@ -101,18 +121,26 @@ function renderCandidates(hostId, items, emptyText) {
     appendText(card, 'opp-location',
       `${zoneLabel(item)} · 距 ${fmtNumber(item.dist_atr)}ATR${touches}`);
     appendText(card, 'opp-crsi',
-      `${item.signal_tf || '信号周期不可用'} cRSI ${item.crsi.zone || '不可用'}`
-      + `（${fmtNumber(item.crsi.crsi, 1)}） · 1d ${stateMeta(item.regime_1d).label}`);
+      `${resonanceLabel(item)} · 4h cRSI ${item.crsi.zone || '不可用'}`
+      + `（${fmtNumber(item.crsi.crsi, 1)}） · ${auxCrsiLabel(item, '1d')}`
+      + ` · ${auxCrsiLabel(item, '1h')} · 1d regime ${stateMeta(item.regime_1d).label}`);
 
     const play = appendText(card, `opp-play${item.signal_ok ? '' : ' waiting'}`,
       item.play ? `建议关注 · ${item.play}` : '建议关注 · 暂无匹配剧本');
-    play.title = '位置与信号共振后才满足 policy P06；仍需统一风控门槛';
+    play.title = '位置与 4h 主票共振后才满足 policy P06；1d/1h 只作强弱分级';
     if (item.stop_check) {
       appendText(card, 'opp-stop',
         `止损宽度 ${item.stop_check.verdict || '不可判定'} · 比值 ${fmtNumber(item.stop_check.ratio)}`
         + `${item.stop_check.note ? ` · ${item.stop_check.note}` : ''}`);
     }
     if (item.vol_note) appendText(card, 'opp-risk', `⚠ ${item.vol_note}`);
+    if ((item.resonance || {}).grade === '弱') {
+      const conflicts = (item.resonance.conflicts || []).join('；');
+      appendText(card, 'opp-risk', `⚠ 共振弱：${conflicts || '辅助票净分为负'}`);
+    }
+    if (item.regime_conflict && item.regime_conflict.note) {
+      appendText(card, 'opp-risk', `⚠ ${item.regime_conflict.note}`);
+    }
     host.appendChild(card);
   });
 }
@@ -127,9 +155,11 @@ function compactLink(item) {
   const state = appendText(row, '', stateMeta(item.regime_4h).label);
   state.style.color = stateMeta(item.regime_4h).color;
   appendText(row, 'compact-meaning', MEANING[item.meaning] || item.meaning || '位置语义不可用');
-  const signal = item.crsi && item.crsi.zone ? ` · cRSI ${item.crsi.zone}` : '';
+  const signal = item.crsi && item.crsi.zone ? ` · 4h cRSI ${item.crsi.zone}` : '';
+  const conflict = item.regime_conflict && item.regime_conflict.note
+    ? ` · ⚠ ${item.regime_conflict.note}` : '';
   appendText(row, 'compact-tail',
-    `${item.dist_atr == null ? '' : `距 ${fmtNumber(item.dist_atr)}ATR`}${signal}` || '—');
+    `${item.dist_atr == null ? '' : `距 ${fmtNumber(item.dist_atr)}ATR`}${signal}${conflict}` || '—');
   return row;
 }
 
@@ -211,7 +241,7 @@ function render(data) {
   $('unavailableCount').textContent = counts.unavailable ?? '—';
   renderCandidates(
     'armed', data.armed || [],
-    '当前没有“位置 + 信号”同时成立的候选——这是常态，不是故障',
+    '当前没有“位置 + 4h 主票”同时成立的候选——这是常态，不是故障',
   );
   renderCandidates(
     'waitSignal', data.wait_signal || [],
