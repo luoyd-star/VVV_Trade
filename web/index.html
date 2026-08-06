@@ -127,14 +127,10 @@
       <div id="priceChart" class="chart tall"></div>
     </div>
     <div class="col span4">
-      <div class="card">
-        <div class="card-h"><h3>IV vs RV30 <span class="sub">制度层</span></h3><span class="sub" id="dvolMeta"></span></div>
-        <div id="dvolMetrics"></div>
-        <div id="dvolChart" class="chart iv"></div>
-      </div>
       <!-- 3d 持仓前端独立成卡：RV3 尖峰（崩盘日可到 90%+）与 30d 序列同轴会把后者压平 -->
       <div class="card">
         <div class="card-h"><h3>IV vs RV3 <span class="sub">3d 持仓前端</span></h3><span class="sub" id="iv3Meta"></span></div>
+        <div id="iv3Metrics"></div>
         <div id="iv3Chart" class="chart iv"></div>
       </div>
       <div class="card">
@@ -142,6 +138,15 @@
         <div class="kv2" id="derivInfo"></div>
         <div id="derivChart" class="chart short"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- 30d 制度层同时承载主 IV、RV、指数锚、EMA 与动态带；整行宽度避免标签/曲线争抢窄画布。 -->
+  <section class="row">
+    <div class="card span12">
+      <div class="card-h"><h3>IV vs RV30 <span class="sub">制度层</span></h3><span class="sub" id="dvolMeta"></span></div>
+      <div id="dvolMetrics"></div>
+      <div id="dvolChart" class="chart iv"></div>
     </div>
   </section>
 

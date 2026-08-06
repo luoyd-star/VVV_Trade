@@ -64,9 +64,9 @@ DVOL_RANK_WIN = 365                 # 起步值，待校准；加密 IV30 历史
 DVOL_RANK_MIN = 120                 # 起步值，待校准；不足样本不输出历史分位
 IV_RANK_WIN = 252                   # 交易日≈1 年，与指数分位同窗
 IV_RANK_MIN = 120                   # 少于此不给分位——新股样本短，宁可空着也不给假分位
-# 30d 主波动率线的均线只认这三个完整窗口；不足时留空，不能拿短窗冒充长均线。
-VOL_MA_WINDOWS = (20, 60, 200)      # 起步值，待校准；用户裁决的短/中/长观察窗
-VOL_BAND_MIN = 120                  # 起步值，待校准；更短样本不输出易漂移的 σ 带
+# 波动率主线的 EMA 只认这三个完整窗口；不足时留空，不能拿短窗冒充长均线。
+VOL_EMA_WINDOWS = (20, 60, 200)     # 起步值，待校准；用户裁决的短/中/长观察窗
+VOL_BAND_WIN = 200                  # 起步值，待校准；EMA 中轴与滚动标准差共用点数窗
 # 30d 波动率卡送往前端的**数据窗**（≠默认视窗，也≠库里存量）。三年数据让滑块能回看
 # 两个额外周期；默认视窗由 payload 按各品种分位窗另行指定，避免旧尖峰压扁当前区间。
 # DVOL/个股IV/指数IV/RV30 共用此常数——同图各自截不同长度会造成"同图不同期"的假对比。
@@ -87,18 +87,18 @@ def _tail_days(pairs: list, days: int = VOL_DATA_DAYS) -> list:
 
 
 def _vol_moving_averages(pairs: list) -> dict:
-    """30d 主线的完整窗滚动均值；每条线的时间戳取该窗口最后一个样本。"""
+    """波动率主线的完整窗 EMA；每条线从满足其窗口的首个样本开始。"""
     clean = [(int(t), float(v)) for t, v in pairs
              if v is not None and math.isfinite(float(v))]
     values = pd.Series([v for _, v in clean], dtype=float)
     out = {}
-    for win in VOL_MA_WINDOWS:
-        key = f"ma{win}"
+    for win in VOL_EMA_WINDOWS:
+        key = f"ema{win}"
         if len(values) < win:
-            # 静默缩短窗口会让读者误以为看到的是 MA200，故整条明确返回空数组。
+            # EMA 能算不代表能用，前段受初值支配；沿用完整窗门槛才不会把预热值冒充成 EMA。
             out[key] = []
             continue
-        rolled = values.rolling(win, min_periods=win).mean()
+        rolled = ema(values, win)
         out[key] = _tail_days([
             [clean[i][0], round(float(rolled.iloc[i]), 2)]
             for i in range(win - 1, len(clean))
@@ -106,34 +106,88 @@ def _vol_moving_averages(pairs: list) -> dict:
     return out
 
 
-def _vol_bands(values, win: int):
-    """按卡片原始分位窗计算静态 σ 带，并附该品种的经验覆盖率/CDF。"""
-    s = pd.Series(values, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
-    ref = s.tail(win)
-    n = int(len(ref))
-    if n < VOL_BAND_MIN:
+def _vol_bands(pairs: list, win: int = VOL_BAND_WIN):
+    """EMA 中轴的滚动 σ 带；覆盖率逐点使用每个时刻当时可见的带复算。"""
+    clean = [(int(t), float(v)) for t, v in pairs
+             if v is not None and math.isfinite(float(v))]
+    if len(clean) < win:
         return None
-    mean = float(ref.mean())
-    # pandas 默认样本标准差与监工实证口径一致；n 已过下限，不存在单点自由度问题。
-    sd = float(ref.std(ddof=1))
-    levels = []
-    for k in (1, 2, 3):
-        lo, hi = mean - k * sd, mean + k * sd
-        levels.append({
-            "k": k,
-            "lo": round(lo, 2),
-            "hi": round(hi, 2),
-            "coverage": round(float(((ref >= lo) & (ref <= hi)).mean()), 3),
-            # 这是经验 CDF，不套正态概率；<= 对应文案“不超过上轨”的样本占比。
-            "hi_pct": round(float((ref <= hi).mean()), 3),
-        })
+    values = pd.Series([v for _, v in clean], dtype=float)
+    centers = ema(values, win)
+    # 样本标准差与旧实测口径一致；窗口与 EMA 同为 200 点，避免两套带宽时钟。
+    widths = values.rolling(win, min_periods=win).std(ddof=1)
+    eligible = range(win - 1, len(clean))
+
+    def _series(multiplier: float) -> list:
+        return _tail_days([
+            [clean[i][0], round(float(centers.iloc[i] + multiplier * widths.iloc[i]), 2)]
+            for i in eligible
+        ])
+
+    center = _tail_days([
+        [clean[i][0], round(float(centers.iloc[i]), 2)] for i in eligible
+    ])
+    u1, l1 = _series(1.0), _series(-1.0)
+    u2, l2 = _series(2.0), _series(-2.0)
+    inside1 = inside2 = 0
+    for i in eligible:
+        value = float(values.iloc[i])
+        center_i = float(centers.iloc[i])
+        width_i = float(widths.iloc[i])
+        inside1 += int(center_i - width_i <= value <= center_i + width_i)
+        inside2 += int(center_i - 2 * width_i <= value <= center_i + 2 * width_i)
+
+    last_i = len(clean) - 1
+    value_now = float(values.iloc[last_i])
+    center_now = float(centers.iloc[last_i])
+    sd_now = float(widths.iloc[last_i])
+    if value_now > center_now + 2 * sd_now:
+        pos = "above_u2"
+    elif value_now > center_now + sd_now:
+        pos = "between_u1_u2"
+    elif value_now >= center_now - sd_now:
+        pos = "in_1"
+    elif value_now >= center_now - 2 * sd_now:
+        pos = "between_l2_l1"
+    else:
+        pos = "below_l2"
+    n = len(clean) - win + 1
     return {
-        "mean": round(mean, 2),
-        "sd": round(sd, 2),
+        "center": center,
+        "u1": u1,
+        "l1": l1,
+        "u2": u2,
+        "l2": l2,
         "win": int(win),
-        "basis": "raw",
+        "basis": f"ema{win}_rolling_sd",
         "n": n,
-        "levels": levels,
+        "coverage1": round(inside1 / n, 3),
+        "coverage2": round(inside2 / n, 3),
+        "now": {
+            "value": round(value_now, 2),
+            "z": round((value_now - center_now) / sd_now, 3) if sd_now > 0 else None,
+            "pos": pos,
+        },
+    }
+
+
+def _vol_window_span_desc(pairs: list, win: int = VOL_BAND_WIN):
+    """把点数窗换算成实际时间跨度；采样频率不同，不能把 3d 层的 200 点叫 200 天。"""
+    timestamps = [int(t) for t, v in pairs
+                  if v is not None and math.isfinite(float(v))]
+    if len(timestamps) < 2 or timestamps[-1] <= timestamps[0]:
+        return None
+    average_gap_ms = (timestamps[-1] - timestamps[0]) / (len(timestamps) - 1)
+    span_days = average_gap_ms * win / 86_400_000
+    return f"{win} 点 ≈ {span_days:.1f} 天"
+
+
+def _vol_overlay(pairs: list) -> dict:
+    """30d/3d 共用的 EMA 与带口径；调用方只决定把 overlay 挂到哪条主线上。"""
+    return {
+        "ema": _vol_moving_averages(pairs),
+        "bands": _vol_bands(pairs, VOL_BAND_WIN),
+        "window_span_desc": _vol_window_span_desc(pairs, VOL_BAND_WIN),
     }
 
 
@@ -153,6 +207,44 @@ def _metric(label: str, value, *, unit: str = "", rank=None, rank_kind=None,
     }
     row.update(extra)
     return row
+
+
+def _vol_band_metrics(bands, *, prefix: str = "", span_desc=None) -> list:
+    """把经验覆盖率放进指标表；242px 画布不再承担长数字标签。"""
+    if not bands:
+        return []
+    now = bands.get("now") or {}
+    position_labels = {
+        "above_u2": "+2σ 上方",
+        "between_u1_u2": "+1σ～+2σ",
+        "in_1": "±1σ 内",
+        "between_l2_l1": "−2σ～−1σ",
+        "below_l2": "−2σ 下方",
+    }
+    notes = []
+    if now.get("z") is not None:
+        notes.append(f"z={now['z']:+.2f}")
+    if now.get("value") is not None:
+        notes.append(f"当前 {now['value']:.1f}")
+    if span_desc:
+        notes.append(span_desc)
+    common_note = f"滚动{bands.get('win')}点·n={bands.get('n')}"
+    return [
+        _metric(
+            f"{prefix}EMA200 带位置", position_labels.get(now.get("pos"), now.get("pos")),
+            note=" · ".join(notes) or None, pos=now.get("pos"), z=now.get("z"),
+        ),
+        _metric(
+            f"{prefix}±1σ 实测覆盖",
+            round(float(bands["coverage1"]) * 100, 1), unit="%", digits=1,
+            note=common_note, coverage=bands["coverage1"],
+        ),
+        _metric(
+            f"{prefix}±2σ 实测覆盖",
+            round(float(bands["coverage2"]) * 100, 1), unit="%", digits=1,
+            note=common_note, coverage=bands["coverage2"],
+        ),
+    ]
 
 
 def _dvol_metrics(payload: dict) -> list:
@@ -176,6 +268,11 @@ def _dvol_metrics(payload: dict) -> list:
             settled=False, tenor_days=xopt.get("tenor_days"), method=xopt.get("method"),
             n_expiries=xopt.get("n_expiries"), age_min=xopt.get("age_min"),
         ))
+    rows.extend(_vol_band_metrics(payload.get("bands")))
+    rows.extend(_vol_band_metrics(
+        payload.get("iv3_bands"), prefix="3d ",
+        span_desc=payload.get("window_span_desc"),
+    ))
     return rows
 
 
@@ -256,6 +353,11 @@ def _usvol_metrics(payload: dict) -> list:
             tenor_days=xopt.get("tenor_days"), method=xopt.get("method"),
             n_expiries=xopt.get("n_expiries"), age_min=xopt.get("age_min"),
         ))
+    rows.extend(_vol_band_metrics(payload.get("bands")))
+    rows.extend(_vol_band_metrics(
+        payload.get("iv3_bands"), prefix="3d ",
+        span_desc=payload.get("window_span_desc"),
+    ))
     return rows
 POLICY_SIGNAL_TF = "4h"
 POLICY_RESONANCE_TFS = ("4h", "1d", "1h")
@@ -553,8 +655,7 @@ def _dvol_payload(conn, symbol: str):
     if not iv_pairs and not rv_pairs and xopt is None:
         return None
     main_pairs = iv_pairs if iv_pairs else rv_pairs
-    moving_averages = _vol_moving_averages(main_pairs)
-    bands = _vol_bands([v for _, v in main_pairs], DVOL_RANK_WIN)
+    overlay = _vol_overlay(main_pairs)
     # 3d 对照层：近端 IV 历史（30 分钟一点，自 2026-08-05 自攒）+ RV3（72×1h）。
     # 历史序列独立于 xopt 的 2h 新鲜度闸——采集停了历史照画，只是最新点消失
     xh = storage.get_opt_iv_near(conn, symbol, limit=4800)
@@ -562,6 +663,12 @@ def _dvol_payload(conn, symbol: str):
                   for t, v in zip(xh["ts"], xh["iv"]) if v == v]
                  if len(xh) else [])
     rv3_pairs, rv3_last = _rv3_pairs(conn, symbol)
+    # 3d 剪刀差 = 近端 IV − RV3：同期限对照，"这笔 1-3 天仓的保险贵不贵"
+    spread3 = (round(xopt["iv"] - rv3_last, 1)
+               if xopt is not None and rv3_last is not None else None)
+    iv3_overlay = _vol_overlay(iv3_pairs)
+    window_span_desc = (iv3_overlay["window_span_desc"]
+                        if iv3_overlay["ema"].get("ema200") else None)
     payload = {
         "iv": _tail_days(iv_pairs),
         "rv": _tail_days(rv_pairs),
@@ -570,9 +677,7 @@ def _dvol_payload(conn, symbol: str):
         # iv_rank_win 给卡片文字标注分位计算口径；view_points 只控制初始缩放，用户一拉
         # 滑块两者就不再相等，故即使当前同值也不能删成一个字段。
         "iv_rank_win": DVOL_RANK_WIN,
-        "band_win": DVOL_RANK_WIN,
-        "band_basis": "raw",
-        "bands": bands,
+        "bands": overlay["bands"],
         "iv_last": round(iv_last, 1) if iv_last is not None else None,
         "iv_rank": iv_rank,
         "rv_last": round(rv_last, 1) if rv_last is not None else None,
@@ -580,13 +685,15 @@ def _dvol_payload(conn, symbol: str):
                    if iv_last is not None and rv_last is not None else None),
         "xopt": xopt,
         "iv3": iv3_pairs,
+        "iv3_ema": iv3_overlay["ema"],
+        "iv3_bands": iv3_overlay["bands"],
+        # 3d 层的 200 是点数而不是天数；未过门槛时留空，前端不留均线/带痕迹。
+        "window_span_desc": window_span_desc,
         "rv3": rv3_pairs,
         "rv3_last": rv3_last,
-        # 3d 剪刀差 = 近端 IV − RV3：同期限对照，"这笔 1-3 天仓的保险贵不贵"
-        "spread3": (round(xopt["iv"] - rv3_last, 1)
-                    if xopt is not None and rv3_last is not None else None),
+        "spread3": spread3,
     }
-    payload["ma"] = moving_averages
+    payload["ema"] = overlay["ema"]
     payload["metrics"] = _dvol_metrics(payload)
     return payload
 
@@ -979,16 +1086,17 @@ def _usvol_payload(conn, symbol: str):
     front3 = (term_stock["iv3"] if term_stock else None) if is_us \
         else (xopt["iv"] if xopt else None)
     base_iv = iv["last"] if iv else idx_last
-    # σ 带不做财报条件化：严格跟随原始 IV_RANK_WIN，并把 raw 口径显式下发。
-    # 个股 IV 缺失时不拿指数锚冒充主线统计，三条均线留空、bands=None。
+    # EMA/σ 带不做财报条件化；个股 IV 缺失时不拿指数锚冒充主线统计。
     main_pairs = (iv.get("series") or []) if iv else []
-    moving_averages = _vol_moving_averages(main_pairs)
-    bands = _vol_bands([v for _, v in main_pairs], IV_RANK_WIN)
+    overlay = _vol_overlay(main_pairs)
+    spread3 = (round(front3 - rv3_last, 1)
+               if front3 is not None and rv3_last is not None else None)
+    iv3_overlay = _vol_overlay(iv3_hist)
+    window_span_desc = (iv3_overlay["window_span_desc"]
+                        if iv3_overlay["ema"].get("ema200") else None)
     payload = {
         "view_points": IV_RANK_WIN,
-        "band_win": IV_RANK_WIN,
-        "band_basis": "raw",
-        "bands": bands,
+        "bands": overlay["bands"],
         "index": idx,
         "index_last": round(idx_last, 2) if idx_last is not None else None,
         "index_rank": idx_rank,
@@ -1006,16 +1114,19 @@ def _usvol_payload(conn, symbol: str):
         "xopt": xopt,             # 币安期权近端 IV（24/7；期限 1-3 天，非 30 天口径）
         "term_stock": term_stock,  # 个股期限曲线 3d/9d/30d ATM（无历史，自采积累中）
         "iv3_hist": iv3_hist,     # 3d IV 历史序列（自 2026-08-05 自攒，初期很短）
+        "iv3_ema": iv3_overlay["ema"],
+        "iv3_bands": iv3_overlay["bands"],
+        # 同名 EMA200 在这里是 200 个 RTH/近端快照点，不冒充 200 天。
+        "window_span_desc": window_span_desc,
         "rv3": rv3_pairs,
         "rv3_last": rv3_last,
-        "spread3": (round(front3 - rv3_last, 1)
-                    if front3 is not None and rv3_last is not None else None),
+        "spread3": spread3,
         "iv30_last": iv30_last,   # CBOE 自采影子值：口径对比用，不算分位
         "iv30_days": iv30_days,
         "ts_ratio": ts_ratio,
         "term": term,
     }
-    payload["ma"] = moving_averages
+    payload["ema"] = overlay["ema"]
     payload["metrics"] = _usvol_metrics(payload)
     return payload
 

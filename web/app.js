@@ -912,9 +912,22 @@ function volMetricNoteText(metric) {
   return notes.length ? notes.join(' · ') : '—';
 }
 
-function renderVolMetrics(metrics, host = $('dvolMetrics')) {
+function renderVolMetrics(metrics, host = $('dvolMetrics'), bands = null, ema = null,
+                          layerPrefix = null) {
   if (!host) return;
-  const rows = Array.isArray(metrics) ? metrics.filter((m) => m && typeof m === 'object') : [];
+  let layerMetrics = metrics;
+  if (Array.isArray(metrics) && layerPrefix != null) {
+    layerMetrics = metrics
+      .filter((metric) => {
+        const label = String(metric && metric.label);
+        return layerPrefix ? label.startsWith(layerPrefix) : !label.startsWith('3d ');
+      })
+      .map((metric) => layerPrefix
+        ? { ...metric, label: String(metric.label).slice(layerPrefix.length) } : metric);
+  }
+  const sourceRows = bands ? volMetricsWithBands(layerMetrics, bands, ema) : layerMetrics;
+  const rows = Array.isArray(sourceRows)
+    ? sourceRows.filter((m) => m && typeof m === 'object') : [];
   if (!rows.length) {
     host.replaceChildren();
     return;
@@ -974,15 +987,15 @@ function renderVolMetrics(metrics, host = $('dvolMetrics')) {
   host.replaceChildren(details);
 }
 
-function volMaSeries(ma, color = COL.blue) {
-  if (!ma || typeof ma !== 'object') return [];
+function volMaSeries(ema, color = COL.blue) {
+  if (!ema || typeof ema !== 'object') return [];
   const defs = [
-    ['ma20', 'MA20', 0.8, 0.32, 'dotted'],
-    ['ma60', 'MA60', 1.0, 0.48, 'dashed'],
-    ['ma200', 'MA200', 1.3, 0.68, 'solid'],
+    ['ema20', 'EMA20', 0.8, 0.32, 'dotted'],
+    ['ema60', 'EMA60', 1.0, 0.48, 'dashed'],
+    ['ema200', 'EMA200', 1.5, 0.78, 'solid'],
   ];
   return defs.flatMap(([key, name, width, opacity, type]) => {
-    const data = ma[key];
+    const data = ema[key];
     if (!Array.isArray(data) || !data.length) return [];
     return [{
       name, type: 'line', data, symbol: 'none', showSymbol: false, silent: true, z: 2,
@@ -997,76 +1010,123 @@ function volPctText(value) {
   return fmtN(Math.abs(n) <= 1 ? n * 100 : n, 1);
 }
 
-function volBandBasisText(bands) {
-  if (!bands) return '';
-  const basis = bands.basis === 'raw' ? '原始(raw)'
-    : bands.basis === 'cond' ? '条件(cond)' : String(bands.basis ?? '未注明');
-  return `σ基准 ${basis}·窗${bands.win ?? '—'}·n=${bands.n ?? '—'}`;
+function volWindowSpanText(ema) {
+  const value = ema && ema.window_span_desc && ema.window_span_desc.ema200;
+  return value == null ? '' : String(value);
 }
 
-function volBandDecorations(bands) {
-  if (!bands || !Array.isArray(bands.levels)) return {};
-  const levels = bands.levels.filter((level) => level
-    && Number.isFinite(Number(level.k))
-    && Number.isFinite(Number(level.lo))
-    && Number.isFinite(Number(level.hi)));
-  if (!levels.length) return {};
-  const opacity = { 1: 0.060, 2: 0.038, 3: 0.022 };
-  const lineOpacity = { 1: 0.48, 2: 0.34, 3: 0.22 };
-  const basisText = volBandBasisText(bands);
-  const markArea = {
-    silent: true,
-    data: [...levels].sort((a, b) => Number(b.k) - Number(a.k)).map((level) => [
-      {
-        yAxis: Number(level.lo),
-        itemStyle: { color: `rgba(56,97,251,${opacity[level.k] ?? 0.022})` },
-      },
-      { yAxis: Number(level.hi) },
-    ]),
+function volBandPositionText(pos) {
+  const labels = {
+    below_2: '低于 −2σ', below_1: '−2σ 至 −1σ', in_1: '±1σ 内',
+    above_1: '+1σ 至 +2σ', above_2: '高于 +2σ', in_2: '±2σ 内',
+    above_u2: '+2σ 上方', between_u1_u2: '+1σ～+2σ',
+    between_l2_l1: '−2σ～−1σ', below_l2: '−2σ 下方',
   };
-  const lines = [];
-  [...levels].sort((a, b) => Number(a.k) - Number(b.k)).forEach((level) => {
-    const k = Number(level.k);
-    const coverage = volPctText(level.coverage);
-    const hiPct = volPctText(level.hi_pct);
-    const empirical = [
-      hiPct == null ? null : `实测 P${hiPct}`,
-      coverage == null ? null : `±覆盖${coverage}%`,
-    ].filter(Boolean).join(' · ') || '实测覆盖样本不足';
-    const common = {
-      color: COL.blue, type: 'dashed', width: 1, opacity: lineOpacity[k] ?? 0.22,
-    };
-    lines.push({
-      yAxis: Number(level.lo),
-      lineStyle: common,
-      label: {
-        show: true, position: 'insideEndBottom', color: COL.muted, fontSize: 9.5,
-        formatter: `−${k}σ ${fmtN(Number(level.lo), 1)}`,
-      },
-    });
-    lines.push({
-      yAxis: Number(level.hi),
-      lineStyle: common,
-      label: {
-        show: true, position: 'insideEndTop', color: COL.sub, fontSize: 9.5,
-        formatter: `+${k}σ ${fmtN(Number(level.hi), 1)}（${empirical}）`,
-      },
-    });
-  });
-  if (Number.isFinite(Number(bands.mean))) {
-    lines.push({
-      yAxis: Number(bands.mean),
-      lineStyle: { color: COL.blue, type: 'solid', width: 1, opacity: 0.28 },
-      label: {
-        show: true, position: 'insideStartTop', color: COL.sub, fontSize: 9.5,
-        formatter: `μ ${fmtN(Number(bands.mean), 1)} · ${basisText}`,
-      },
+  return pos == null ? '—' : (labels[pos] || String(pos));
+}
+
+// 覆盖率来自后端对真实样本的计数；只挪进表格，不把右偏 IV 误写成高斯概率。
+function volMetricsWithBands(metrics, bands, ema) {
+  const rows = Array.isArray(metrics) ? [...metrics] : [];
+  if (!bands || typeof bands !== 'object') return rows;
+  const additions = [];
+  const now = bands.now && typeof bands.now === 'object' ? bands.now : null;
+  if (now) {
+    const notes = [];
+    if (Number.isFinite(Number(now.value))) notes.push(`当前 ${fmtN(Number(now.value), 1)}%`);
+    if (Number.isFinite(Number(now.z))) notes.push(`z ${fmtN(Number(now.z), 2, true)}`);
+    additions.push({
+      label: 'EMA200 带位置', value: volBandPositionText(now.pos),
+      note: notes.length ? notes.join(' · ') : null,
     });
   }
+  [
+    ['coverage1', '±1σ 实测覆盖'],
+    ['coverage2', '±2σ 实测覆盖'],
+  ].forEach(([key, label]) => {
+    const coverage = volPctText(bands[key]);
+    if (coverage != null) additions.push({
+      label, value: Number(coverage), digits: 1, unit: '%',
+      note: '经验覆盖率，不套高斯概率',
+    });
+  });
+  if (bands.win != null) additions.push({
+    label: 'EMA200 带窗口', value: bands.win, digits: 0, unit: '点',
+    note: volWindowSpanText(ema) || '按采样点计数',
+  });
+
+  // 后端若已把同名结构化行放进 metrics，以 bands 这份单源契约替换，避免重复展示。
+  const labels = new Set(additions.map((row) => row.label));
+  return rows.filter((row) => !labels.has(String(row && row.label))).concat(additions);
+}
+
+function volBandRgba(color, opacity) {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(color));
+  if (!match) return `rgba(56,97,251,${opacity})`;
+  return `rgba(${parseInt(match[1], 16)},${parseInt(match[2], 16)},${parseInt(match[3], 16)},${opacity})`;
+}
+
+// 时间变化的上下轨不能用静态 markArea。透明下轨 + (上轨−下轨) 的堆叠面积
+// 才会让阴影逐点跟随 EMA200，同时彻底移除会挤占画布的 σ 数字标签。
+function volBandLayer(lower, upper, level, color, opacity) {
+  if (!Array.isArray(lower) || !lower.length || !Array.isArray(upper) || !upper.length) return [];
+  const upperByTs = new Map(upper.map((point) => [String(point && point[0]), point && point[1]]));
+  const base = [];
+  const width = [];
+  lower.forEach((point) => {
+    if (!Array.isArray(point) || point.length < 2) return;
+    const lo = Number(point[1]);
+    const hi = Number(upperByTs.get(String(point[0])));
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo) return;
+    base.push([point[0], lo]);
+    width.push([point[0], hi - lo]);
+  });
+  if (!base.length) return [];
+  const stack = `ema200-band-${level}`;
+  return [
+    {
+      name: `__${stack}-base`, type: 'line', data: base, stack, symbol: 'none',
+      silent: true, tooltip: { show: false }, lineStyle: { opacity: 0 }, z: 0,
+    },
+    {
+      name: `__${stack}-fill`, type: 'line', data: width, stack, symbol: 'none',
+      silent: true, tooltip: { show: false }, lineStyle: { opacity: 0 },
+      areaStyle: { color: volBandRgba(color, opacity) }, z: 0,
+    },
+  ];
+}
+
+function volOverlaySeries(ema, bands, color = COL.blue) {
+  const bandSeries = bands && typeof bands === 'object' ? [
+    // 外层先画、内层后叠；±1σ 更深，读图无需轨道线和标签。
+    ...volBandLayer(bands.l2, bands.u2, 2, color, 0.07),
+    ...volBandLayer(bands.l1, bands.u1, 1, color, 0.14),
+  ] : [];
+  const source = ema && typeof ema === 'object' ? ema : {};
+  const effectiveEma = (!Array.isArray(source.ema200) || !source.ema200.length)
+    && bands && Array.isArray(bands.center) && bands.center.length
+    ? { ...source, ema200: bands.center }
+    : source;
+  return [...bandSeries, ...volMaSeries(effectiveEma, color)];
+}
+
+function volLegend(chartSeries) {
+  const data = chartSeries
+    .map((series) => series.name)
+    .filter((name) => name && !name.startsWith('__'));
   return {
-    markArea,
-    markLine: { silent: true, symbol: 'none', data: lines },
+    data,
+    // EMA20/60 仍可按需点开；默认只留本轮关注的 EMA200，降低首屏曲线密度。
+    selected: Object.fromEntries(data.map((name) => [name, !['EMA20', 'EMA60'].includes(name)])),
   };
+}
+
+function volMetaText(bands, ema) {
+  const parts = [];
+  if (bands && typeof bands === 'object') parts.push('EMA200 带');
+  const span = volWindowSpanText(ema);
+  if (span) parts.push(`EMA200 ${span}`);
+  return parts.join(' · ');
 }
 
 function renderDvol() {
@@ -1087,28 +1147,28 @@ function renderDvol() {
   const xTxt = !x ? null
     : `近端IV ${fmtN(x.iv, 1)}（~${fmtN(x.tenor_days, 1)}d·${x.method === 'nearest' ? '单点' : '插值'}${x.n_expiries != null ? '·' + x.n_expiries + '到期' : ''}）`;
   const bands = d.bands === undefined ? null : d.bands;
+  const ema = d.ema;
   const mainKind = d.main_kind || (d.iv && d.iv.length ? 'dvol' : 'rv30');
-  meta.textContent = bands ? `${mainKind === 'rv30' ? 'RV30' : 'DVOL'} · ${volBandBasisText(bands)}` : '';
-  renderVolMetrics(d.metrics);
+  meta.textContent = volMetaText(bands, ema);
+  renderVolMetrics(d.metrics, undefined, bands, ema, '');
   // 3d 持仓前端独立成卡（RV3 尖峰与 30d 序列不同量级，同轴互相压平）
-  renderIv3({ iv3: d.iv3, rv3: d.rv3, iv_txt: xTxt,
-              rv3_last: d.rv3_last, spread3: d.spread3 });
+  renderIv3({ ...d, iv_txt: xTxt });
   if (!c) return;
   const zs = vol30ZoomStart([d.iv, d.rv], d.view_points);
-  const maSeries = volMaSeries(d.ma, mainKind === 'rv30' ? COL.amber : COL.blue);
+  const overlaySeries = volOverlaySeries(
+    ema, bands, mainKind === 'rv30' ? COL.amber : COL.blue,
+  );
   const chartSeries = [
     ...(d.iv && d.iv.length ? [{
       name: 'DVOL 隐含', type: 'line', data: d.iv, symbol: 'none', z: 4,
       lineStyle: { color: COL.blue, width: 2.4 },
       endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 },
-      ...volBandDecorations(mainKind === 'dvol' ? bands : null),
     }] : []),
-    ...maSeries,
+    ...overlaySeries,
     ...(d.rv && d.rv.length ? [{
       name: 'RV30 已实现', type: 'line', data: d.rv, symbol: 'none', z: 3,
       lineStyle: { color: COL.amber, width: mainKind === 'rv30' ? 2.4 : 2 },
       endLabel: { show: true, formatter: 'RV', color: COL.sub, fontSize: 9.5 },
-      ...volBandDecorations(mainKind === 'rv30' ? bands : null),
     }] : []),
   ];
   c.setOption({
@@ -1119,9 +1179,9 @@ function renderDvol() {
       textStyle: { color: COL.ink, fontSize: 11.5 },
       valueFormatter: (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`),
     },
-    // ECharts 图例原生可点击；scroll 保留三条均线各自开关，又不挤掉 IV/RV 项。
+    // ECharts 图例原生可点击；短均线默认关闭，需要时仍可单独打开。
     legend: { type: 'scroll', top: 0, left: 38, right: 40,
-      data: chartSeries.map((series) => series.name),
+      ...volLegend(chartSeries),
       textStyle: { color: COL.sub, fontSize: 10.5 }, itemWidth: 12, itemHeight: 3, icon: 'rect' },
     grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
@@ -1159,22 +1219,41 @@ function iv3ZoomStart(o) {
 
 function renderIv3(o) {
   const meta = $('iv3Meta');
+  const metrics = $('iv3Metrics');
   const c = chart('iv3Chart');
+  const iv3Ema = o.iv3_ema && typeof o.iv3_ema === 'object'
+    ? { ...o.iv3_ema, window_span_desc: { ema200: o.window_span_desc } } : o.iv3_ema;
+  const iv3Bands = o.iv3_bands;
   const has = (o.rv3 && o.rv3.length) || (o.iv3 && o.iv3.length);
   if (!meta) return;
   if (!has) {
     meta.textContent = '暂无 3d 数据';
+    renderVolMetrics([], metrics);
     if (c) c.clear();
     return;
   }
+  renderVolMetrics(o.metrics, metrics, iv3Bands, iv3Ema, '3d ');
   meta.textContent = [
     o.iv_txt,
     o.rv3_last == null ? null : `RV3 ${fmtN(o.rv3_last, 1)}`,
     // 3d 剪刀差：同期限对照，"这笔 1-3 天仓的保险贵不贵"
     o.spread3 == null ? null : `3dIV−RV3 ${fmtN(o.spread3, 1, true)}pt`,
+    o.window_span_desc ? `EMA200 ${String(o.window_span_desc)}` : null,
   ].filter(Boolean).join(' · ');
   if (!c) return;
   const zs = iv3ZoomStart(o);
+  const chartSeries = [
+    // IV3 序列 2026-08-05 清零自攒：稀疏期（<60 点）画出点标记，否则 30 分钟宽的
+    // 线段在窗内仍偏细；攒够后自动退回纯线
+    ...(o.iv3 && o.iv3.length ? [{ name: '3d 隐含', type: 'line', data: o.iv3,
+      symbol: 'circle', symbolSize: 4.5, showSymbol: o.iv3.length < 60, z: 4,
+      lineStyle: { color: COL.blue, width: 2 },
+      endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
+    ...volOverlaySeries(iv3Ema, iv3Bands, COL.blue),
+    ...(o.rv3 && o.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: o.rv3,
+      symbol: 'none', z: 3, lineStyle: { color: COL.amber, width: 1.5 },
+      endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
+  ];
   c.setOption({
     animation: false,
     useUTC: true,
@@ -1185,7 +1264,7 @@ function renderIv3(o) {
       valueFormatter: (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`),
     },
     legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
-      itemWidth: 12, itemHeight: 3, icon: 'rect' },
+      ...volLegend(chartSeries), itemWidth: 12, itemHeight: 3, icon: 'rect' },
     grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
       axisLabel: { color: COL.muted, fontSize: 9.5 } },
@@ -1200,17 +1279,7 @@ function renderIv3(o) {
         fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
         textStyle: { color: COL.muted, fontSize: 9 } },
     ],
-    series: [
-      // IV3 序列 2026-08-05 清零自攒：稀疏期（<60 点）画出点标记，否则 30 分钟宽的
-      // 线段在窗内仍偏细；攒够后自动退回纯线
-      ...(o.iv3 && o.iv3.length ? [{ name: '3d 隐含', type: 'line', data: o.iv3,
-        symbol: 'circle', symbolSize: 4.5, showSymbol: o.iv3.length < 60,
-        lineStyle: { width: 2 },
-        endLabel: { show: true, formatter: 'IV3', color: COL.sub, fontSize: 9.5 } }] : []),
-      ...(o.rv3 && o.rv3.length ? [{ name: 'RV3 已实现', type: 'line', data: o.rv3,
-        symbol: 'none', lineStyle: { width: 1.5 },
-        endLabel: { show: true, formatter: 'RV3', color: COL.sub, fontSize: 9.5 } }] : []),
-    ],
+    series: chartSeries,
   }, true);
 }
 
@@ -1218,14 +1287,15 @@ function renderIv3(o) {
 // + 本品种 RV30。升级前 29/31 个品种拿 VXN 当自己的 IV，剪刀差因此是口径错配的假象。
 function renderUsvol(uv, meta, c) {
   const iv = uv.iv;
-  const ma = uv.ma;
+  const ema = uv.ema;
   const bands = uv.bands;
-  meta.textContent = volBandBasisText(bands);
-  renderVolMetrics(uv.metrics);
+  meta.textContent = volMetaText(bands, ema);
+  renderVolMetrics(uv.metrics, undefined, bands, ema, '');
   // 3d 持仓前端独立成卡：美股 IV3 来自期限曲线自攒，商品来自币安近端 IV
   const ts3 = uv.term_stock;
   renderIv3({
-    iv3: uv.iv3_hist, rv3: uv.rv3, rv3_last: uv.rv3_last, spread3: uv.spread3,
+    ...uv,
+    iv3: uv.iv3_hist,
     iv_txt: ts3 && ts3.iv3 != null
       ? `IV3 ${fmtN(ts3.iv3, 1)}（期限曲线3d·RTH自攒）`
       : (uv.xopt
@@ -1235,16 +1305,16 @@ function renderUsvol(uv, meta, c) {
   // 个股 IV/指数 IV 是交易日、RV30 是含周末的永续日线；边界来自首条足够长的锚序列，
   // 作为时间戳统一作用于三条线，不能拿某条线的点数索引分别切出三段不同历史。
   const zs = vol30ZoomStart([iv && iv.series, uv.series, uv.rv], uv.view_points);
-  const maSeries = iv && iv.series && iv.series.length ? volMaSeries(ma) : [];
+  const overlaySeries = iv && iv.series && iv.series.length
+    ? volOverlaySeries(ema, bands, COL.blue) : [];
   const chartSeries = [
-    // 主 IV 始终最粗最实；σ 装饰只挂主线，避免指数锚或 RV 被误读成带的基准。
+    // 主 IV 始终最粗最实；EMA200 带只跟主线，避免指数锚或 RV 被误读成基准。
     ...(iv && iv.series && iv.series.length ? [{
       name: '个股IV', type: 'line', data: iv.series, symbol: 'none', z: 4,
       lineStyle: { color: COL.blue, width: 2.4 },
       endLabel: { show: true, formatter: 'IV', color: COL.sub, fontSize: 9.5 },
-      ...volBandDecorations(bands),
     }] : []),
-    ...maSeries,
+    ...overlaySeries,
     ...(uv.rv && uv.rv.length ? [{
       name: 'RV30 已实现', type: 'line', data: uv.rv, symbol: 'none', z: 3,
       lineStyle: { color: COL.amber, width: 2 },
@@ -1265,7 +1335,7 @@ function renderUsvol(uv, meta, c) {
       valueFormatter: (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`),
     },
     legend: { type: 'scroll', top: 0, left: 38, right: 40,
-      data: chartSeries.map((series) => series.name),
+      ...volLegend(chartSeries),
       textStyle: { color: COL.sub, fontSize: 10.5 }, itemWidth: 12, itemHeight: 3, icon: 'rect' },
     grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },

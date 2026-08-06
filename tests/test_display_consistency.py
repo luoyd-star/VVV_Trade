@@ -206,6 +206,11 @@ def test_vol_payload_view_points_and_fetch_limits_follow_shared_constants(monkey
     crypto = dashboard._dvol_payload(None, "BTC-USDT")
     assert crypto["view_points"] == crypto_view_points
     assert crypto["iv_rank_win"] == crypto_view_points
+    assert set(crypto["ema"]) == {"ema20", "ema60", "ema200"}
+    assert crypto["ema"]["ema20"] and crypto["ema"]["ema60"]
+    assert crypto["ema"]["ema200"] == [] and crypto["bands"] is None
+    assert "ma" not in crypto and "band_win" not in crypto and "band_basis" not in crypto
+    assert crypto["iv3_ema"]["ema200"] == [] and crypto["iv3_bands"] is None
     assert dashboard.VOL_DATA_FETCH_LIMIT > dashboard.VOL_DATA_DAYS
     assert calls["dvol"] == dashboard.VOL_DATA_FETCH_LIMIT
     assert calls["crypto_ohlcv"] == dashboard.VOL_DATA_FETCH_LIMIT
@@ -238,6 +243,10 @@ def test_vol_payload_view_points_and_fetch_limits_follow_shared_constants(monkey
     monkeypatch.setattr(dashboard, "IV_RANK_WIN", us_view_points)
     us = dashboard._usvol_payload(None, "NVDA-USDT")
     assert us["view_points"] == us_view_points
+    assert set(us["ema"]) == {"ema20", "ema60", "ema200"}
+    assert all(not line for line in us["ema"].values()) and us["bands"] is None
+    assert "ma" not in us and "band_win" not in us and "band_basis" not in us
+    assert us["iv3_ema"]["ema200"] == [] and us["iv3_bands"] is None
     # usvol 的 limit 是交易日行数；用日历天数多取是安全方向，且须至少覆盖三年交易日。
     assert calls["usvol"] == dashboard.VOL_DATA_FETCH_LIMIT
     # 美股永续 RV30 含周末，仍按日历天数据窗取数。
@@ -467,7 +476,11 @@ def test_legend_and_frontend_copy_keep_display_contracts_explicit():
     iv3_block = app.split("function renderIv3", 1)[1].split(
         "function renderUsvol", 1
     )[0]
-    assert "volMaSeries" not in iv3_block and "volBandDecorations" not in iv3_block
+    assert "o.iv3_ema" in iv3_block and "o.iv3_bands" in iv3_block
+    assert "o.window_span_desc" in iv3_block
+    # 后端位置枚举是 payload 契约；未知码直出会把 above_u2 暴露给用户。
+    for pos in ("above_u2", "between_u1_u2", "in_1", "between_l2_l1", "below_l2"):
+        assert f"{pos}:" in app
 
     sm_block = app.split("const SM = {", 1)[1].split("};", 1)[0]
     assert "label:" not in sm_block, "状态中文名不得在前端颜色表中保留第二份"
