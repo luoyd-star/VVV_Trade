@@ -913,6 +913,21 @@ function renderDvol() {
 // 3d 持仓前端卡：IV3（自攒序列，2026-08-05 起在图右缘生长）vs RV3（72×1h 年化，
 // 历史即刻可用）。与 30d 卡分图的原因：RV3 崩盘日尖峰可到 90%+，同轴会把 30d 序列压平。
 // 色彩沿用 30d 卡语义：蓝=隐含、琥珀=已实现，读图习惯直接迁移。
+const IV3_WIN_MIN_MS = 3 * 86400e3;    // 起步窗＝持仓周期上限，IV3 攒 1 天即占 1/3 宽
+const IV3_WIN_MAX_MS = 30 * 86400e3;   // 封顶：再宽就退回"看长期常态"，非本卡职责
+const IV3_WIN_SLACK = 1.4;             // 窗比 IV3 跨度略宽，左侧留一段 RV3 作参照
+
+// 默认可视窗：两条线跨度差两个数量级（实测 BTC IV3 25.4h vs RV3 2400h），
+// 不设窗时 IV3 只占 1.06% 宽度、肉眼就是"几个点"。窗随 IV3 生长，滚轮/滑块可拉回全史。
+function iv3ZoomStart(o) {
+  if (!o.iv3 || !o.iv3.length) return null;
+  const ivFirst = o.iv3[0][0], ivLast = o.iv3[o.iv3.length - 1][0];
+  const rvLast = o.rv3 && o.rv3.length ? o.rv3[o.rv3.length - 1][0] : ivLast;
+  const win = Math.min(IV3_WIN_MAX_MS,
+                       Math.max(IV3_WIN_MIN_MS, (ivLast - ivFirst) * IV3_WIN_SLACK));
+  return Math.max(ivLast, rvLast) - win;
+}
+
 function renderIv3(o) {
   const meta = $('iv3Meta');
   const c = chart('iv3Chart');
@@ -930,6 +945,7 @@ function renderIv3(o) {
     o.spread3 == null ? null : `3dIV−RV3 ${fmtN(o.spread3, 1, true)}pt`,
   ].filter(Boolean).join(' · ');
   if (!c) return;
+  const zs = iv3ZoomStart(o);
   c.setOption({
     animation: false,
     useUTC: true,
@@ -941,14 +957,23 @@ function renderIv3(o) {
     },
     legend: { top: 0, right: 40, textStyle: { color: COL.sub, fontSize: 10.5 },
       itemWidth: 12, itemHeight: 3, icon: 'rect' },
-    grid: { left: 38, right: 44, top: 22, bottom: 20 },
+    grid: { left: 38, right: 44, top: 22, bottom: zs == null ? 20 : 32 },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: COL.border } },
       axisLabel: { color: COL.muted, fontSize: 9.5 } },
     yAxis: { scale: true, splitLine: { lineStyle: { color: COL.grid } },
       axisLabel: { color: COL.muted, fontSize: 9.5, formatter: '{value}%' } },
+    // filterMode 默认 'filter'：窗外点被剔除，y 轴跟着窗重算——RV3 的百日尖峰
+    // 不再把当前区间压成一条平线。滑块保留，让"左边还有历史"这件事看得见。
+    dataZoom: zs == null ? [] : [
+      { type: 'inside', xAxisIndex: 0, startValue: zs },
+      { type: 'slider', xAxisIndex: 0, startValue: zs, bottom: 2, height: 12,
+        borderColor: COL.border, backgroundColor: 'rgba(23,26,32,.03)',
+        fillerColor: 'rgba(56,97,251,.10)', handleStyle: { color: '#b9c0cc' },
+        textStyle: { color: COL.muted, fontSize: 9 } },
+    ],
     series: [
       // IV3 序列 2026-08-05 清零自攒：稀疏期（<60 点）画出点标记，否则 30 分钟宽的
-      // 线段在 100 天轴上是亚像素、完全不可见；攒够后自动退回纯线
+      // 线段在窗内仍偏细；攒够后自动退回纯线
       ...(o.iv3 && o.iv3.length ? [{ name: '3d 隐含', type: 'line', data: o.iv3,
         symbol: 'circle', symbolSize: 4.5, showSymbol: o.iv3.length < 60,
         lineStyle: { width: 2 },
