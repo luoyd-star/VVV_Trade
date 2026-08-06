@@ -157,26 +157,50 @@ def fetch_deribit(symbol: str, timeframe: str, limit: int = 300) -> pd.DataFrame
     return df
 
 
-def fetch_dvol(currency: str, days: int = 365) -> pd.DataFrame:
-    """Deribit DVOL 隐含波动率指数（日线收盘），仅 BTC/ETH。返回 [ts, dvol]。"""
-    end = int(time.time() * 1000)
+DVOL_MAX_ROWS = 1000       # Deribit 单次响应硬上限（2026-08-06 实测：求 1500 天只回 1000 行）
+DVOL_HISTORY_DAYS = 730    # 常规同步深度：覆盖面板 VOL_HIST_DAYS 显示窗，一次请求内
+
+
+def _fetch_dvol_page(currency: str, start_ms: int, end_ms: int) -> list:
     r = requests.get(
         f"{DERIBIT_BASE}/api/v2/public/get_volatility_index_data",
         params={
             "currency": currency.upper(),
             "resolution": "1D",
-            "start_timestamp": end - days * 86_400_000,
-            "end_timestamp": end,
+            "start_timestamp": start_ms,
+            "end_timestamp": end_ms,
         },
         timeout=10,
     )
     r.raise_for_status()
-    data = (r.json().get("result") or {}).get("data") or []
-    if not data:
+    return (r.json().get("result") or {}).get("data") or []
+
+
+def fetch_dvol(currency: str, days: int = DVOL_HISTORY_DAYS) -> pd.DataFrame:
+    """Deribit DVOL 隐含波动率指数（日线收盘），仅 BTC/ETH。返回 [ts, dvol]。
+
+    **必须分页**：端点单次最多回 DVOL_MAX_ROWS 行，且超限时是**静默截断**——
+    直接请求 1500 天只拿到最近 1000 天，不报错、不提示，看起来像"历史就这么长"。
+    按 ≤MAX 天一段向前翻，每段以上一段最早点为新的 end 边界。
+    DVOL 指数自 2021-03-24 起有数（BTC/ETH 同）；翻到空段即停，不会空转。
+    """
+    end = int(time.time() * 1000)
+    day = 86_400_000
+    frames, cursor, remaining = [], end, max(int(days), 1)
+    while remaining > 0:
+        span = min(remaining, DVOL_MAX_ROWS)
+        page = _fetch_dvol_page(currency, cursor - span * day, cursor)
+        if not page:
+            break
+        frames.extend(page)
+        cursor = min(int(row[0]) for row in page) - day
+        remaining -= span
+    if not frames:
         raise RuntimeError("DVOL: 无数据")
-    df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "dvol"])
+    df = pd.DataFrame(frames, columns=["ts", "open", "high", "low", "dvol"])
     df["ts"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms", utc=True)
-    df = df[["ts", "dvol"]].sort_values("ts").reset_index(drop=True)
+    df = (df[["ts", "dvol"]].drop_duplicates(subset="ts")
+          .sort_values("ts").reset_index(drop=True))
     # 与 fetch_ohlcv 同口径丢掉未收线的当日：末行是形成中的值，同一天内会来回跳
     # （实测 20 轮内跳了 4 次），进分位与 IV−RV 剪刀差会引入假波动
     return df.iloc[:-1].reset_index(drop=True)

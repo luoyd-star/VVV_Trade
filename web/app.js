@@ -874,8 +874,11 @@ function renderDvol() {
   const xTxt = !x ? null
     : `近端IV ${fmtN(x.iv, 1)}（~${fmtN(x.tenor_days, 1)}d·${x.method === 'nearest' ? '单点' : '插值'}${x.n_expiries != null ? '·' + x.n_expiries + '到期' : ''}）`;
   meta.textContent = [
+    // 图的显示窗（730 天）比分位窗长，分位窗必须写出来——否则读者会拿两年的目测
+    // 去质疑一年窗算出的分位。与美股卡的「·252日」同惯例。
     d.iv_last == null ? null
-      : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 3)}）`,
+      : `DVOL(日结算·30d) ${fmtN(d.iv_last, 1)}（分位 ${fmtN(d.iv_rank, 3)}`
+        + `${d.iv_rank_win ? '·' + d.iv_rank_win + '日' : ''}）`,
     `RV30 ${fmtN(d.rv_last, 1)}`,
     d.spread == null ? null : `IV−RV ${fmtN(d.spread, 1, true)}pt`,
   ].filter(Boolean).join(' · ');
@@ -913,7 +916,7 @@ function renderDvol() {
 // 3d 持仓前端卡：IV3（自攒序列，2026-08-05 起在图右缘生长）vs RV3（72×1h 年化，
 // 历史即刻可用）。与 30d 卡分图的原因：RV3 崩盘日尖峰可到 90%+，同轴会把 30d 序列压平。
 // 色彩沿用 30d 卡语义：蓝=隐含、琥珀=已实现，读图习惯直接迁移。
-const IV3_WIN_MIN_MS = 3 * 86400e3;    // 起步窗＝持仓周期上限，IV3 攒 1 天即占 1/3 宽
+const IV3_WIN_MIN_MS = 7 * 86400e3;    // 起步窗＝一周（用户裁决 2026-08-06：3 天太短，读不出趋势）
 const IV3_WIN_MAX_MS = 30 * 86400e3;   // 封顶：再宽就退回"看长期常态"，非本卡职责
 const IV3_WIN_SLACK = 1.4;             // 窗比 IV3 跨度略宽，左侧留一段 RV3 作参照
 
