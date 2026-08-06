@@ -56,6 +56,8 @@ OVERVIEW_TTL_SEC = 60               # 起步值，待校准；与主页 60 秒�
 OVERVIEW_OHLCV_LIMIT = 400          # 起步值，待校准；覆盖 EMA200 与关键位观察窗
 OVERVIEW_VOL1H_HOURS = 260          # 起步值，待校准；覆盖 POC 的 240 小时窗口并留余量
 OVERVIEW_TERM_FRESH_SEC = 2 * 3600  # 起步值，待校准；期限曲线超过两小时不作当前标注
+MEMORY_SAVE_RAW_CHARS = 64 * 1024   # 起步值，待校准；限制单条草稿占用与解析成本
+MEMORY_SAVE_REQUEST_BYTES = 512 * 1024  # 起步值，待校准；容纳 JSON/UTF-8 转义开销
 # 加密 IV30(DVOL) 分位窗——总览与详情页**同一个数**。改名自 OVERVIEW_DVOL_RANK_WIN：
 # 详情页原先硬编码 365，与此常数是两处同值来源，改一处不改另一处就会静默漂移。
 DVOL_RANK_WIN = 365                 # 起步值，待校准；加密 IV30 历史分位观察窗
@@ -2163,6 +2165,55 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not self._same_origin_ok():
                 return self._json({"error": "跨站请求被拒绝"}, code=403)
+            if parsed.path == "/api/memory/save":
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > MEMORY_SAVE_REQUEST_BYTES:
+                    return self._json({"ok": False, "error": "请求体过大"}, code=413)
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return self._json({"ok": False, "error": "请求体不是合法 JSON"}, code=400)
+                raw = body.get("raw") if isinstance(body, dict) else None
+                if not isinstance(raw, str):
+                    return self._json({"ok": False, "error": "raw 必须是字符串"}, code=400)
+                if len(raw) > MEMORY_SAVE_RAW_CHARS:
+                    return self._json({"ok": False, "error": "raw 超过 65536 字符上限"}, code=413)
+                overwrite = body.get("overwrite", False)
+                if not isinstance(overwrite, bool):
+                    return self._json(
+                        {"ok": False, "error": "overwrite 必须是布尔值"}, code=400,
+                    )
+                result = memory.save_entry(raw, overwrite=overwrite)
+                if result.get("ok"):
+                    public_path = result.get("path")
+                    normalized_path = (
+                        os.path.normpath(public_path) if isinstance(public_path, str) else ""
+                    )
+                    if (
+                        not normalized_path
+                        or os.path.isabs(normalized_path)
+                        or normalized_path == os.pardir
+                        or normalized_path.startswith(os.pardir + os.sep)
+                    ):
+                        return self._json(
+                            {"ok": False, "error": "保存结果路径投影失败"}, code=500,
+                        )
+                    return self._json({
+                        "ok": True,
+                        "slug": result.get("slug"),
+                        "path": normalized_path,
+                    })
+                error = _memory_public_errors([{
+                    "path": memory.MEMORY_ROOT,
+                    "error": str(result.get("error") or "保存失败"),
+                }])[0]["error"]
+                if error.startswith(("原子写入失败", "落盘复读", "无法读取待覆盖")):
+                    code = 500
+                elif "已存在" in error or "全库重复" in error:
+                    code = 409
+                else:
+                    code = 400
+                return self._json({"ok": False, "error": error}, code=code)
             if parsed.path == "/api/agent/chat":
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > 512 * 1024:
@@ -2219,6 +2270,10 @@ class Handler(BaseHTTPRequestHandler):
                         # 非法值不能以 None 或原值穿过边界；只有白名单命中才扩展 agent 接口。
                         agent_kwargs["memory_slug"] = memory_slug
                     out = agent_chat(context_payload, msgs, **agent_kwargs)
+                    if isinstance(out.get("reply"), str):
+                        draft = memory.parse_draft(out["reply"])
+                        if draft is not None:
+                            out["draft"] = draft
                     if not out.get("error"):
                         _add_chat_message(conn, "user", text, scope)
                         _add_chat_message(conn, "assistant", out["reply"], scope)

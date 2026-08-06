@@ -427,6 +427,57 @@ function hermesAdd(cls, text) {
   return el;
 }
 
+// 聊天写入交互第 3/3 份副本：本轮保持三页隔离，避免把独立重构风险混入写入闭环。
+function hermesRenderDraft(draft, assistantEl) {
+  if (draft === undefined) return;
+  const panel = document.createElement('div');
+  if (!draft || draft.ok !== true) {
+    panel.className = 'sub';
+    panel.textContent = `草稿格式不合规：${draft && draft.error != null ? draft.error : '未知错误'}`;
+    assistantEl.appendChild(panel);
+    return;
+  }
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'hbtn primary';
+  button.textContent = `存入经验库 · ${draft.title}`;
+  const slug = document.createElement('span');
+  slug.className = 'sub';
+  slug.textContent = `slug：${draft.slug}`;
+  const status = document.createElement('span');
+  status.className = 'sub';
+  panel.append(button, document.createTextNode(' '), slug, document.createTextNode(' '), status);
+  assistantEl.appendChild(panel);
+
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/memory/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: draft.raw }),
+      });
+      const data = await response.json();
+      if (!response.ok || data.ok !== true) {
+        status.textContent = data.error != null ? String(data.error) : `HTTP ${response.status}`;
+        button.disabled = false;
+        return;
+      }
+      button.textContent = '已存入';
+      status.textContent = '';
+      const link = document.createElement('a');
+      link.className = 'sub';
+      link.href = '/memory';
+      link.textContent = '查看经验库';
+      panel.append(document.createTextNode(' '), link);
+    } catch (error) {
+      status.textContent = `请求失败：${error.message || error}`;
+      button.disabled = false;
+    }
+  };
+}
+
 function hermesRenderAll(messages) {
   $('hermesMsgs').replaceChildren();
   hermesAdd('bot', HERMES_INTRO);
@@ -496,6 +547,7 @@ async function hermesSend() {
   $('hermesSend').disabled = true;
   const busy = hermesAdd('bot busy', 'VVVhermes 思考中…（codex 后端通常需要 1-3 分钟）');
   let ok = false;
+  let hasDraft = false;
   try {
     const body = { scope: 'overview', message };
     if (memoryState.selectedSlug) body.memory_slug = memoryState.selectedSlug;
@@ -507,7 +559,9 @@ async function hermesSend() {
     const data = await response.json();
     busy.remove();
     if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-    hermesAdd('bot', data.reply);
+    const assistant = hermesAdd('bot', data.reply);
+    hermesRenderDraft(data.draft, assistant);
+    hasDraft = data.draft !== undefined;
     ok = true;
   } catch (error) {
     busy.remove();
@@ -518,7 +572,8 @@ async function hermesSend() {
     memoryState.hermes.busy = false;
     $('hermesSend').disabled = false;
     input.focus();
-    if (ok) hermesSync(true);
+    // history 不携带瞬时 draft；立即重建会把用户尚未确认的按钮或错误提示抹掉。
+    if (ok && !hasDraft) hermesSync(true);
   }
 }
 

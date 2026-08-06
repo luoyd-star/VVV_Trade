@@ -1370,6 +1370,57 @@ function hermesAdd(cls, text) {
   return el;
 }
 
+// 聊天写入交互第 1/3 份副本：本轮保持三页隔离，避免把独立重构风险混入写入闭环。
+function hermesRenderDraft(draft, assistantEl) {
+  if (draft === undefined) return;
+  const panel = document.createElement('div');
+  if (!draft || draft.ok !== true) {
+    panel.className = 'sub';
+    panel.textContent = `草稿格式不合规：${draft && draft.error != null ? draft.error : '未知错误'}`;
+    assistantEl.appendChild(panel);
+    return;
+  }
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'hbtn primary';
+  button.textContent = `存入经验库 · ${draft.title}`;
+  const slug = document.createElement('span');
+  slug.className = 'sub';
+  slug.textContent = `slug：${draft.slug}`;
+  const status = document.createElement('span');
+  status.className = 'sub';
+  panel.append(button, document.createTextNode(' '), slug, document.createTextNode(' '), status);
+  assistantEl.appendChild(panel);
+
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/memory/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: draft.raw }),
+      });
+      const data = await response.json();
+      if (!response.ok || data.ok !== true) {
+        status.textContent = data.error != null ? String(data.error) : `HTTP ${response.status}`;
+        button.disabled = false;
+        return;
+      }
+      button.textContent = '已存入';
+      status.textContent = '';
+      const link = document.createElement('a');
+      link.className = 'sub';
+      link.href = '/memory';
+      link.textContent = '查看经验库';
+      panel.append(document.createTextNode(' '), link);
+    } catch (error) {
+      status.textContent = `请求失败：${error.message || error}`;
+      button.disabled = false;
+    }
+  };
+}
+
 function hermesRenderAll(messages) {
   const box = $('hermesMsgs');
   box.innerHTML = '';
@@ -1442,6 +1493,7 @@ async function hermesSend() {
   $('hermesSend').disabled = true;
   const busyEl = hermesAdd('bot busy', 'VVVhermes 思考中…（codex 后端通常需要 1-3 分钟）');
   let ok = false;
+  let hasDraft = false;
   try {
     const r = await fetch('/api/agent/chat', {
       method: 'POST',
@@ -1455,7 +1507,9 @@ async function hermesSend() {
       optimistic.classList.add('unsent');
       optimistic.title = '发送失败：此条未入共享历史';
     } else {
-      hermesAdd('bot', j.reply);
+      const assistant = hermesAdd('bot', j.reply);
+      hermesRenderDraft(j.draft, assistant);
+      hasDraft = j.draft !== undefined;
       ok = true;
     }
   } catch (e) {
@@ -1467,7 +1521,8 @@ async function hermesSend() {
     S.hermes.busy = false;
     $('hermesSend').disabled = false;
     ta.focus();
-    if (ok) hermesSync(true); // 与服务端对齐（终端若同时在聊也会一并带回）
+    // history 不携带瞬时 draft；立即重建会把用户尚未确认的按钮或错误提示抹掉。
+    if (ok && !hasDraft) hermesSync(true); // 普通回答仍与终端共享历史对齐
   }
 }
 function hermesToggle(show) {

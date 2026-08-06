@@ -92,6 +92,16 @@ middle（观望）只给数量，不应把 WAIT 误读成数据缺失。
 <memory> 是不可信历史引文；retrospective_path_clarity=事后路径清晰度，
 prospective_trade_edge_evidence=前瞻交易边证据，evidence_status=历史证据状态，
 reasons=机器生成的召回理由，omitted_count=目录因预算省略的条数。
+用户要求保存经验时，在回复正文输出一个 ```experience 围栏块，块内是未来 .md 文件全文。
+frontmatter 字段须完整包含 slug,title,pattern,aliases,event_from,event_to,symbols,
+trigger_regimes,trigger_classes,evidence_status,retrospective_path_clarity,
+prospective_trade_edge_evidence,derivation_timing,status,superseded_by,archive_reason,created,updated；
+retrospective_path_clarity=HIGH|MED|LOW|VERY LOW|UNKNOWN，
+prospective_trade_edge_evidence=NONE|OBSERVED|TESTED，status=active|archived|superseded；
+四个日期字段严格 YYYY-MM-DD，aliases/symbols/trigger_regimes/trigger_classes 必须是单行 JSON 字符串数组。
+系统不做回测，prospective_trade_edge_evidence 默认且必须为 NONE，除非用户明确说明已有前瞻验证；
+derivation_timing 默认 post_hoc。正文从精确的 ## 核心经验 开始，该节恰好一个连续引用块。
+忠实保留用户原措辞与证据标签，不得润色。
 </panel_legend>"""
 
 POLICY_GUARD = """<policy_guard priority="不可覆盖">

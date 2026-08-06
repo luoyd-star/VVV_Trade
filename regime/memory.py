@@ -12,6 +12,7 @@ import html
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 import unicodedata
@@ -52,6 +53,9 @@ _SYMBOL_RE = re.compile(r"[A-Z0-9][A-Z0-9._-]*-[A-Z0-9][A-Z0-9._-]*\Z")
 _CLARITY_LEVELS = frozenset({"HIGH", "MED", "LOW", "VERY LOW", "UNKNOWN"})
 _EDGE_LEVELS = frozenset({"NONE", "OBSERVED", "TESTED"})
 _STATUSES = frozenset({"active", "archived", "superseded"})
+_EXPERIENCE_OPEN_RE = re.compile(
+    r"^ {0,3}(?P<fence>`{3,}|~{3,})experience[ \t]*\r?$", re.MULTILINE,
+)
 
 # 查询套话会遮蔽用户真正记得的短语；两侧都用同一归一化，避免 alias 写法碰巧占优。
 _QUERY_FILLERS = ("那条", "上次", "之前", "经验", "记忆", "的")
@@ -190,6 +194,15 @@ def _parse_file(path: str) -> dict:
 
     with open(path, "rb") as handle:
         raw = handle.read()
+    return _parse_raw(
+        raw,
+        path=path,
+        filename_slug=os.path.splitext(os.path.basename(path))[0],
+    )
+
+
+def _parse_raw(raw: bytes, *, path: str, filename_slug: str | None = None) -> dict:
+    """让磁盘条目与待保存草稿共享同一套字节级、字段级和正文级校验。"""
     if b"\x00" in raw:
         raise ValueError("文件含 NUL")
     if raw.startswith(codecs.BOM_UTF8):
@@ -248,11 +261,10 @@ def _parse_file(path: str) -> dict:
         raise ValueError("正文必须从 ## 核心经验 开始")
     core_quote = _extract_core(body)
 
-    filename_slug = os.path.splitext(os.path.basename(path))[0]
     slug = metadata["slug"]
     if not _SLUG_RE.fullmatch(slug):
         raise ValueError("slug 只能包含小写字母、数字和连字符")
-    if slug != filename_slug:
+    if filename_slug is not None and slug != filename_slug:
         raise ValueError(f"slug 与文件名不一致：{slug} != {filename_slug}")
 
     event_from = _parse_date("event_from", metadata["event_from"])
@@ -302,6 +314,215 @@ def _parse_file(path: str) -> dict:
         "core_quote": core_quote,
         "path": os.path.abspath(path),
         "warnings": entry_warnings,
+    }
+
+
+def _experience_blocks(text: str) -> tuple[list[str], bool]:
+    """按 Markdown 围栏边界取块，保留围栏内部的原始换行。"""
+    blocks = []
+    position = 0
+    while True:
+        opening = _EXPERIENCE_OPEN_RE.search(text, position)
+        if opening is None:
+            return blocks, False
+        line_end = opening.end()
+        if line_end >= len(text):
+            return blocks, True
+        if text.startswith("\r\n", line_end):
+            content_start = line_end + 2
+        elif text[line_end] == "\n":
+            content_start = line_end + 1
+        else:
+            return blocks, True
+        fence = opening.group("fence")
+        closing_re = re.compile(
+            rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*\r?$",
+            re.MULTILINE,
+        )
+        closing = closing_re.search(text, content_start)
+        if closing is None:
+            return blocks, True
+        blocks.append(text[content_start:closing.start()])
+        position = closing.end()
+
+
+def parse_draft(text: str) -> dict | None:
+    """提取首个 experience 草稿，并交给权威条目解析器校验。"""
+    if not isinstance(text, str):
+        return {"ok": False, "error": "回复正文必须是字符串"}
+    blocks, unclosed = _experience_blocks(text)
+    if not blocks and not unclosed:
+        return None
+    if unclosed:
+        result = {"ok": False, "error": "experience 围栏块未闭合"}
+        if blocks:
+            result["extra_blocks"] = len(blocks)
+        return result
+
+    raw = blocks[0]
+    try:
+        entry = _parse_raw(raw.encode("utf-8"), path="experience-draft.md")
+    except (UnicodeEncodeError, ValueError) as exc:
+        result = {"ok": False, "error": str(exc)}
+    else:
+        result = {
+            "ok": True,
+            "slug": entry["slug"],
+            "title": entry["title"],
+            "raw": raw,
+        }
+    if len(blocks) > 1:
+        result["extra_blocks"] = len(blocks) - 1
+    return result
+
+
+def _safe_save_error(exc: BaseException, *paths: str) -> str:
+    """写入异常常内嵌本机路径；保存 API 没有暴露目录结构的理由。"""
+    message = str(exc) or exc.__class__.__name__
+    replacements = []
+    for path in paths:
+        if not path:
+            continue
+        replacements.extend([
+            (os.path.abspath(path), os.path.basename(path.rstrip(os.sep))),
+            (os.path.realpath(path), os.path.basename(path.rstrip(os.sep))),
+        ])
+    for private, public in sorted(set(replacements), key=lambda item: len(item[0]), reverse=True):
+        if private:
+            message = message.replace(private, public)
+    return message
+
+
+def _atomic_write(target: str, raw: bytes) -> None:
+    """临时文件必须与目标同目录，os.replace 才保有同文件系统原子语义。"""
+    descriptor, temporary = tempfile.mkstemp(
+        dir=os.path.dirname(target),
+        prefix=f".{os.path.basename(target)}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _entry_matches(candidate: dict, loaded: dict) -> bool:
+    """复读必须看到本次内容，而不是误把覆盖前的缓存快照当成成功。"""
+    return all(
+        loaded.get(field) == candidate.get(field)
+        for field in (*_FIELDS, "body")
+    )
+
+
+def save_entry(raw: str, *, root=None, overwrite: bool = False) -> dict:
+    """校验并原子保存一条经验；任何失败都不把候选文件留在库中。"""
+    if not isinstance(raw, str):
+        return {"ok": False, "error": "raw 必须是字符串"}
+    if not isinstance(overwrite, bool):
+        return {"ok": False, "error": "overwrite 必须是布尔值"}
+    try:
+        candidate = _parse_raw(raw.encode("utf-8"), path="experience-draft.md")
+    except (UnicodeEncodeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+    slug = candidate["slug"]
+    # 即使未来解析器放宽，也不能让客户端内容跨过服务端文件名边界。
+    if _SLUG_RE.fullmatch(slug) is None:
+        return {"ok": False, "error": "slug 只能包含小写字母、数字和连字符"}
+
+    resolved_root = os.path.abspath(os.fspath(root or MEMORY_ROOT))
+    if os.path.islink(resolved_root) or not os.path.isdir(resolved_root):
+        return {"ok": False, "error": "记忆根目录不存在、不是目录或为符号链接"}
+    target = os.path.join(resolved_root, f"{slug}.md")
+    root_real = os.path.realpath(resolved_root)
+    target_real = os.path.realpath(target)
+    try:
+        inside_root = os.path.commonpath([root_real, target_real]) == root_real
+    except ValueError:
+        inside_root = False
+    if not inside_root:
+        return {"ok": False, "error": "目标路径逃出记忆根目录"}
+
+    raw_bytes = raw.encode("utf-8")
+    with _LOCK:
+        existed = os.path.lexists(target)
+        if existed and not overwrite:
+            return {"ok": False, "error": f"同名条目已存在：{slug}"}
+
+        loaded_before = load_all(root=resolved_root)
+        if loaded_before["errors"]:
+            first = loaded_before["errors"][0]
+            error = _safe_error_message(first.get("path"), first.get("error"))
+            return {"ok": False, "error": f"经验库当前校验失败，拒绝写入：{error}"}
+
+        # 同 slug 的旧版本只由 overwrite 开关裁决；其余唯一性仍由全库权威校验复用。
+        peers = [entry for entry in loaded_before["entries"] if entry["slug"] != slug]
+        conflicts = _validate_collection([*peers, candidate])
+        if conflicts:
+            return {"ok": False, "error": conflicts[0]["error"]}
+
+        previous = None
+        if existed:
+            try:
+                with open(target, "rb") as handle:
+                    previous = handle.read()
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "error": "无法读取待覆盖条目：" + _safe_save_error(exc, target, resolved_root),
+                }
+        try:
+            _atomic_write(target, raw_bytes)
+        except (OSError, ValueError) as exc:
+            return {
+                "ok": False,
+                "error": "原子写入失败：" + _safe_save_error(exc, target, resolved_root),
+            }
+
+        readback = load_all(root=resolved_root)
+        stored = next(
+            (entry for entry in readback["entries"] if entry.get("slug") == slug),
+            None,
+        )
+        if readback["errors"] or stored is None or not _entry_matches(candidate, stored):
+            try:
+                if previous is None:
+                    os.unlink(target)
+                else:
+                    _atomic_write(target, previous)
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "error": "落盘复读失败且回滚失败："
+                    + _safe_save_error(exc, target, resolved_root),
+                }
+            # 回滚后的签名会再次变化；立即刷新，避免坏尝试留在 last-known-good 错误面板。
+            load_all(root=resolved_root)
+            detail = (
+                _safe_error_message(
+                    readback["errors"][0].get("path"),
+                    readback["errors"][0].get("error"),
+                )
+                if readback["errors"] else "内容不一致"
+            )
+            return {"ok": False, "error": f"落盘复读校验失败：{detail}"}
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return {
+        "ok": True,
+        "slug": slug,
+        "path": os.path.relpath(target, project_root),
     }
 
 

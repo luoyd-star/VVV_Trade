@@ -120,6 +120,23 @@ def test_all_seven_memory_policy_paragraphs_reach_effective_prompt(monkeypatch):
         assert paragraph in system
 
 
+def test_effective_prompt_gives_hermes_the_closed_draft_contract(monkeypatch):
+    _install_visible_memory(monkeypatch)
+    system = _run_chat(monkeypatch)
+    for field in memory._FIELDS:
+        assert field in system
+    assert "```experience" in system
+    assert "HIGH|MED|LOW|VERY LOW|UNKNOWN" in system
+    assert "NONE|OBSERVED|TESTED" in system
+    assert "active|archived|superseded" in system
+    assert "YYYY-MM-DD" in system
+    assert "单行 JSON 字符串数组" in system
+    assert "prospective_trade_edge_evidence 默认且必须为 NONE" in system
+    assert "derivation_timing 默认 post_hoc" in system
+    assert "正文从精确的 ## 核心经验 开始，该节恰好一个连续引用块" in system
+    assert "忠实保留用户原措辞与证据标签，不得润色" in system
+
+
 def test_symbol_scope_passes_recent_window_set_not_current_state(monkeypatch):
     now_ms = 2_000_000_000_000
     cutoff = now_ms - memory.MEMORY_PATH_WINDOW_DAYS * agent._TFMS["1d"]

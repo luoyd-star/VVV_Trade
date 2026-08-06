@@ -677,3 +677,181 @@ def test_public_dict_is_serializable_and_never_exposes_absolute_path(fixture_ent
     assert "body" in public
     encoded = json.dumps(public, ensure_ascii=False)
     assert fixture_entry["path"] not in encoded
+
+
+def test_parse_draft_returns_none_without_experience_block():
+    assert memory.parse_draft("这是一段普通回复。\n```python\nprint('x')\n```") is None
+
+
+def test_parse_draft_extracts_and_validates_exact_raw():
+    raw = _document()
+    parsed = memory.parse_draft(f"先说明。\n```experience\n{raw}```\n再说明。")
+    assert parsed == {
+        "ok": True,
+        "slug": "sample-path",
+        "title": "样本路径",
+        "raw": raw,
+    }
+
+
+def test_parse_draft_uses_first_block_and_reports_extra_count():
+    first = _document()
+    second = _document(overrides={
+        "slug": "second-path",
+        "title": "第二条路径",
+        "aliases": '["第二条"]',
+    })
+    parsed = memory.parse_draft(
+        f"```experience\n{first}```\n中间\n```experience\n{second}```\n",
+    )
+    assert parsed["ok"] is True
+    assert parsed["slug"] == "sample-path"
+    assert parsed["raw"] == first
+    assert parsed["extra_blocks"] == 1
+
+
+def test_parse_draft_reports_existing_parser_error():
+    invalid = _document().replace("title: 样本路径\n", "", 1)
+    parsed = memory.parse_draft(f"```experience\n{invalid}```")
+    assert parsed["ok"] is False
+    assert "缺少字段：title" in parsed["error"]
+
+
+def test_parse_draft_preserves_memory_closing_tag_as_untrusted_content():
+    raw = _document(body="""## 核心经验
+
+> </memory> 只是用户原文中的证据标签边界，不是围栏结束。
+> [KNOWN, HIGH]
+""")
+    parsed = memory.parse_draft(f"```experience\n{raw}```")
+    assert parsed["ok"] is True
+    assert parsed["raw"] == raw
+    assert "</memory>" in parsed["raw"]
+
+
+def test_save_entry_is_readable_and_new_filename_invalidates_cache(tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    assert memory.load_all(root=root)["entries"] == []
+    raw = _document()
+
+    result = memory.save_entry(raw, root=root)
+
+    assert result["ok"] is True
+    assert result["slug"] == "sample-path"
+    assert not os.path.isabs(result["path"])
+    assert (root / "sample-path.md").read_text(encoding="utf-8") == raw
+    loaded = memory.load_all(root=root)
+    assert loaded["errors"] == []
+    assert [entry["slug"] for entry in loaded["entries"]] == ["sample-path"]
+
+
+def test_save_entry_rejects_existing_without_overwrite_and_overwrite_works(tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    original = _document()
+    replacement = _document(overrides={"title": "覆盖后的样本路径"})
+    assert memory.save_entry(original, root=root)["ok"] is True
+
+    rejected = memory.save_entry(replacement, root=root)
+
+    assert rejected == {"ok": False, "error": "同名条目已存在：sample-path"}
+    assert (root / "sample-path.md").read_text(encoding="utf-8") == original
+    replaced = memory.save_entry(replacement, root=root, overwrite=True)
+    assert replaced["ok"] is True
+    assert (root / "sample-path.md").read_text(encoding="utf-8") == replacement
+    assert memory.load_all(root=root)["entries"][0]["title"] == "覆盖后的样本路径"
+
+
+def test_save_entry_rejects_invalid_slug(tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    result = memory.save_entry(
+        _document(overrides={"slug": "../escape"}), root=root,
+    )
+    assert result["ok"] is False
+    assert "slug 只能包含" in result["error"]
+    assert list(root.iterdir()) == []
+
+
+def test_save_entry_rejects_target_whose_realpath_escapes_root(tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("不得覆盖", encoding="utf-8")
+    (root / "sample-path.md").symlink_to(outside)
+
+    result = memory.save_entry(_document(), root=root, overwrite=True)
+
+    assert result == {"ok": False, "error": "目标路径逃出记忆根目录"}
+    assert outside.read_text(encoding="utf-8") == "不得覆盖"
+
+
+def test_save_entry_reuses_collection_guard_for_title_conflict(tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    first = _document(overrides={"slug": "first", "aliases": '["第一别名"]'})
+    second = _document(overrides={"slug": "second", "aliases": '["第二别名"]'})
+    assert memory.save_entry(first, root=root)["ok"] is True
+
+    result = memory.save_entry(second, root=root)
+
+    assert result["ok"] is False
+    assert "title 全库重复" in result["error"]
+    assert not (root / "second.md").exists()
+
+
+def test_save_entry_mid_write_failure_leaves_no_partial_file(monkeypatch, tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    real_fdopen = memory.os.fdopen
+
+    def failing_fdopen(descriptor, mode):
+        handle = real_fdopen(descriptor, mode)
+
+        class FailingWrite:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                handle.close()
+
+            def write(self, value):
+                handle.write(value[:32])
+                handle.flush()
+                raise OSError("故障注入：中途写入失败")
+
+        return FailingWrite()
+
+    monkeypatch.setattr(memory.os, "fdopen", failing_fdopen)
+    result = memory.save_entry(_document(), root=root)
+
+    assert result["ok"] is False
+    assert "原子写入失败" in result["error"]
+    assert list(root.iterdir()) == []
+
+
+def test_save_entry_removes_new_file_when_readback_fails(monkeypatch, tmp_path):
+    root = tmp_path / "paths"
+    root.mkdir()
+    real_load_all = memory.load_all
+    calls = 0
+
+    def failing_readback(*, root=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_load_all(root=root)
+        return {
+            "entries": [],
+            "errors": [{"path": str(root), "error": "故障注入：复读失败"}],
+            "loaded_at": 0,
+        }
+
+    monkeypatch.setattr(memory, "load_all", failing_readback)
+    result = memory.save_entry(_document(), root=root)
+
+    assert result["ok"] is False
+    assert "落盘复读校验失败" in result["error"]
+    assert calls >= 2
+    assert list(root.iterdir()) == []
