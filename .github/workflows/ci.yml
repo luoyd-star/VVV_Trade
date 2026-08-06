@@ -15,5 +15,5 @@ jobs:
           # 与生产环境一致（macOS CommandLineTools 的 3.9）；升级解释器前先在这改
           python-version: "3.9"
       - run: pip install -r requirements.txt
-      # 截至 2026-08-06：23 个测试文件 / 302 个用例，全部离线，不碰网络与真库
+      # 测试全部离线，不碰网络与真库；数量由 pytest 收集，避免注释随新增用例漂移
       - run: python -m pytest tests/ -q

@@ -1,6 +1,6 @@
 # VVV_Trade 系统说明书
 
-> 快照：2026-08-06 00:33 UTC · 代码 16,991 行 Python + 2,586 行前端 · 数据库 230 MiB / 19 张业务表 · 302 个测试
+> 快照：2026-08-06 · 代码 19,663 行 Python + 3,389 行前端 · 数据库 230 MiB / 19 张业务表 · 417 个测试
 > 版本：`RULES_VERSION v3.1` · `AUDIT_VERSION a8` · `LEVELS lv1` / `LOCATION loc1` / `STOPCHECK stop1` / `VOLNOTE vol1`
 >
 > **本文是"这个系统是什么、怎么用、每部分为什么这么设计"**。
@@ -39,7 +39,8 @@ cd /Users/luoyingdong/Documents/VVV_Trade && nohup .venv/bin/python dashboard.py
 |---|---|
 | `http://127.0.0.1:8787/` | **总览**：74 个品种里，今天哪几个值得看 |
 | `http://127.0.0.1:8787/symbol?symbol=BTC-USDT` | **详情页**：这一个品种的完整判断链与全部依据 |
-| 两页右上角 `VVVhermes` | 助手：总览页问横截面，详情页问单品种 |
+| `http://127.0.0.1:8787/memory` | **经验路径**：保存和回顾经典市场路径 |
+| 三页右上角 `VVVhermes` | 助手：总览页问横截面，详情页问单品种，经验页回顾历史条目 |
 
 ### 一分钟自检
 
@@ -209,7 +210,69 @@ X2 扩容（38→74）的名额分配依据是实测的**张成盲区**——相
 
 ---
 
-## 5. 两个界面
+## 4.5 经验路径
+
+经验路径用来保存交易中值得复盘的经典状态序列，例如“4H 挤压后第一次释放失败，随后反向确认并展开趋势”。权威文件位于 `knowledge/experience_paths/*.md`，每条一个 UTF-8 Markdown 文件并由 git 版本化；`/memory` 页面只读展示，本轮不支持在页面新建或编辑。
+
+**最重要的边界：经验路径是观察记录，不改变任何判定。** Hermes 必须先用本轮面板与既有 policy 完成状态、位置、共振和风控判断，再把记忆放进独立的“历史对照”。记忆不能成为规则、信号、阈值或下单依据。
+
+### 怎样增加一条
+
+在 `knowledge/experience_paths/` 新建 `<slug>.md`。文件首行必须严格为 `---`，frontmatter 的字段必须全部出现，列表必须是单行 JSON 字符串数组；不要使用 YAML 注释、多行值、缩进续行或旧式逗号列表。最小结构如下：
+
+```markdown
+---
+slug: metals-squeeze-failed-release-reversal
+title: 贵金属挤压后的失败释放反转
+pattern: 4H挤压 → 1H单边冲击 → 4H拒绝跟随 → 1H反向确认
+aliases: ["贵金属那条", "失败释放"]
+event_from: 2026-08-03
+event_to: 2026-08-06
+symbols: ["XAU-USDT", "XAG-USDT"]
+trigger_regimes: ["squeeze", "high_vol_chop"]
+trigger_classes: ["commodity"]
+evidence_status: 观察性单事件，未完成历史回测
+retrospective_path_clarity: HIGH
+prospective_trade_edge_evidence: NONE
+derivation_timing: post_hoc
+status: active
+superseded_by:
+archive_reason:
+created: 2026-08-06
+updated: 2026-08-06
+---
+
+## 核心经验
+
+> 核心经验原文；这一节必须恰好有一个连续引用块。
+
+## 本次实际路径
+
+正文逐字保存事实、计算、推断与原有证据标签。
+```
+
+`slug` 只能含小写字母、数字和连字符，且必须等于文件名；日期严格用 `YYYY-MM-DD`。不限的列表写 `[]`，不能省略字段。`status` 为 `active / archived / superseded`；归档要填写 `archive_reason`，被继任要让 `superseded_by` 指向存在的 active 条目。regime 只能用系统既有五态，class 来自 `instruments.json`。历史品种即使已经不在当前采集名单也可以保存，但加载器会给警告。保存后运行：
+
+```bash
+.venv/bin/pytest -q tests/test_memory.py tests/test_memory_agent.py tests/test_memory_api.py tests/test_memory_web.py
+```
+
+### Hermes 怎样调用
+
+每轮对话都有一个有字符预算的紧凑目录，但自动展开条件很严格：单品种分析必须由条目的 `symbols` 精确命中当前品种，并且它的某个触发状态在该品种最近 30 天的 4h 状态历史中出现过；总览还要求该品种位于 `armed / wait_signal / near` 名单。只命中 class 不会自动展开。因此一条记忆有时不出现，通常是为避免把局部相似误当成路径复现，而不是加载失败。
+
+要回顾指定条目，可以直接说它的标题、slug 或 alias，例如“回顾贵金属那条”。在 `/memory` 打开详情后问“这条经验”，页面会提交经服务端白名单校验的 `memory_slug`。多条同时命中时 Hermes 只列候选，请用户确认后再展开。
+
+自动召回只看到**不含任何数字的决策视图**；明确回顾历史事件才会看到完整档案，并把“当次实测值”与“未验证候选阈值”分开。两轴应这样读：
+
+- `retrospective_path_clarity` 是**事后路径清晰度**；`HIGH` 只表示这次事件回头看形状清楚，**不等于这个模式能赚钱**，也不代表当前匹配可靠。
+- `prospective_trade_edge_evidence` 是**前瞻交易边证据**；`NONE` 表示尚无可评估交易边的证据，不是“也许有效”。只有 `OBSERVED / TESTED` 才表示已经积累对应层级的前瞻材料。
+
+完整设计、被评审推翻的方案及预算理由见 `docs/DESIGN_MEMORY_20260806.md`。
+
+---
+
+## 5. 三个界面
 
 ### 总览页 —— 今天该看哪几个
 

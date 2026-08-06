@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from regime import instruments, moomoo_iv, storage
+from regime import instruments, memory, moomoo_iv, storage
 from regime.agent import chat as agent_chat
 from regime.agent import load_config as agent_config
 from regime.agent import system_is_custom
@@ -2044,6 +2044,42 @@ def _add_chat_message(conn, role: str, content: str, scope: str) -> None:
     conn.commit()
 
 
+def _memory_entry(entries: list[dict], slug) -> dict | None:
+    """只接受加载器已经认可的 slug，避免详情接口把客户端值变成文件路径。"""
+    if not isinstance(slug, str):
+        return None
+    return next((entry for entry in entries if entry.get("slug") == slug), None)
+
+
+def _memory_list_item(entry: dict) -> dict:
+    """列表不携带正文，避免首屏接口退化成隐式的全库全文下载。"""
+    item = memory.public_dict(entry)
+    item.pop("body", None)
+    return item
+
+
+def _memory_public_errors(errors: list[dict]) -> list[dict]:
+    """API 只需要定位哪个条目坏了，没有暴露主机目录结构的理由。"""
+    projected = []
+    for item in errors:
+        raw_path = str(item.get("path") or "")
+        public_path = os.path.basename(raw_path.rstrip(os.sep))
+        error_text = str(item.get("error") or "")
+        replacements = [
+            (raw_path, public_path),
+            (os.path.dirname(raw_path), os.path.basename(os.path.dirname(raw_path))),
+        ]
+        for private, public in sorted(replacements, key=lambda pair: len(pair[0]), reverse=True):
+            if private:
+                error_text = error_text.replace(private, public)
+        projected.append({
+            "path": public_path,
+            # open/stat 失败时异常文本也可能内嵌绝对路径。
+            "error": error_text,
+        })
+    return projected
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
@@ -2061,6 +2097,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(overview_payload())
             if parsed.path == "/api/coupling":
                 return self._json(coupling_payload())
+            if parsed.path == "/api/memory":
+                loaded = memory.load_all()
+                return self._json({
+                    "entries": [_memory_list_item(entry) for entry in loaded["entries"]],
+                    "errors": _memory_public_errors(loaded["errors"]),
+                    "loaded_at": loaded["loaded_at"],
+                })
+            if parsed.path == "/api/memory/entry":
+                loaded = memory.load_all()
+                slug = (qs.get("slug") or [None])[0]
+                entry = _memory_entry(loaded["entries"], slug)
+                if entry is None:
+                    return self._json({"error": "经验路径不存在"}, code=404)
+                return self._json(memory.public_dict(entry))
             if parsed.path == "/api/agent/info":
                 cfg = agent_config()
                 return self._json(
@@ -2084,6 +2134,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file("overview.html")
             if parsed.path in ("/symbol", "/index.html"):
                 return self._file("index.html")
+            if parsed.path == "/memory":
+                # I4 可独立部署页面；缺件时明确 404，不能把服务端文件错误伪装成 API 500。
+                if not os.path.isfile(os.path.join(WEB_DIR, "memory.html")):
+                    return self.send_error(404)
+                return self._file("memory.html")
             name = os.path.basename(parsed.path)
             if name and os.path.exists(os.path.join(WEB_DIR, name)):
                 return self._file(name)
@@ -2139,6 +2194,12 @@ class Handler(BaseHTTPRequestHandler):
                     # agent 层送模前会截到 8000——与其静默截断（库里存全文、
                     # 模型只看一半还装作看完了），不如在边界如实拒绝
                     return self._json({"error": "消息超过 8000 字符上限"}, code=413)
+                memory_slug = None
+                requested_memory_slug = body.get("memory_slug")
+                if isinstance(requested_memory_slug, str):
+                    loaded = memory.load_all()
+                    if _memory_entry(loaded["entries"], requested_memory_slug) is not None:
+                        memory_slug = requested_memory_slug
                 conn = storage.connect_rw_nomigrate()
                 try:
                     _ensure_chat_scope(conn)
@@ -2153,7 +2214,11 @@ class Handler(BaseHTTPRequestHandler):
                     context_payload = (
                         overview_payload() if scope == "overview" else build_dashboard(symbol)
                     )
-                    out = agent_chat(context_payload, msgs, scope=scope)
+                    agent_kwargs = {"scope": scope}
+                    if memory_slug is not None:
+                        # 非法值不能以 None 或原值穿过边界；只有白名单命中才扩展 agent 接口。
+                        agent_kwargs["memory_slug"] = memory_slug
+                    out = agent_chat(context_payload, msgs, **agent_kwargs)
                     if not out.get("error"):
                         _add_chat_message(conn, "user", text, scope)
                         _add_chat_message(conn, "assistant", out["reply"], scope)

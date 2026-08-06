@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VVV · 经验路径</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .memory-main { width: min(1280px, 100%); min-width: 0; flex: 1; margin: 0 auto;
+                 padding: 20px 24px 32px; }
+  .memory-headnote { color: var(--muted); font-size: var(--fs-lbl); }
+  .memory-intro { display: flex; align-items: center; justify-content: space-between;
+                  gap: 14px; margin-bottom: 14px; }
+  .memory-intro h1 { font-size: var(--fs-num); }
+  .memory-caution { padding: 8px 12px; border: 1px solid rgba(168,124,5,.45);
+                    background: rgba(168,124,5,.08); color: var(--warn-fg);
+                    font-size: 12px; font-weight: 600; }
+  .memory-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+                  padding: 12px; background: var(--card); border: 1px solid var(--border); }
+  .memory-search { width: min(430px, 100%); padding: 7px 9px; border: 1px solid var(--border);
+                   background: var(--card); color: var(--ink); font: 12px inherit; }
+  .memory-search:focus { outline: none; border-color: var(--accent); }
+  .status-tabs { display: flex; border: 1px solid var(--border); }
+  .status-tabs button { border: 0; border-right: 1px solid var(--border); padding: 6px 12px;
+                        background: var(--card); color: var(--sub); cursor: pointer;
+                        font: 12px inherit; }
+  .status-tabs button:last-child { border-right: 0; }
+  .status-tabs button:hover { color: var(--accent); }
+  .status-tabs button.active { color: var(--accent); background: rgba(56,97,251,.09);
+                               font-weight: 600; }
+  .memory-count { margin-left: auto; color: var(--muted); font-size: var(--fs-lbl); }
+  .memory-error { margin: 0 0 14px; }
+  .memory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .memory-card { position: relative; min-width: 0; border-top: 3px solid var(--accent); }
+  .memory-card.archived { border-top-color: var(--muted); }
+  .memory-card.superseded { border-top-color: var(--squeeze); }
+  .memory-card-top { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 9px; }
+  .memory-title { padding: 0; border: 0; background: none; color: var(--ink); cursor: pointer;
+                  text-align: left; font: 650 var(--fs-num) inherit; line-height: 1.35; }
+  .memory-title:hover { color: var(--accent); }
+  .status-badge { margin-left: auto; flex: none; }
+  .memory-pattern { margin-bottom: 10px; color: var(--sub); font-size: 12.5px; line-height: 1.55; }
+  .memory-rule-note { margin-bottom: 11px; padding: 6px 9px;
+                      border: 1px solid rgba(168,124,5,.45);
+                      background: rgba(168,124,5,.08); color: var(--warn-fg);
+                      font-size: var(--fs-lbl); font-weight: 700; }
+  .memory-meta { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 10px;
+                 padding: 9px 0; border-top: 1px solid var(--grid); font-size: 12px; }
+  .memory-meta dt { color: var(--muted); }
+  .memory-meta dd { min-width: 0; color: var(--sub); overflow-wrap: anywhere; }
+  .axis-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+               margin-top: 9px; }
+  .axis { padding: 8px 9px; border: 1px solid var(--border); background: var(--card2);
+          color: var(--sub); font-size: var(--fs-lbl); line-height: 1.45; }
+  .axis b { display: block; margin-top: 2px; color: var(--ink); font: 600 12px var(--mono); }
+  .axis.edge-none { border-color: rgba(185,31,49,.4); background: rgba(185,31,49,.06); }
+  .axis.edge-none b, .axis.edge-none span { color: var(--bad-fg); }
+  .axis.edge-none span { display: block; margin-top: 3px; }
+  .successor { display: inline-block; margin-top: 9px; color: var(--accent); font-size: 12px; }
+  .memory-empty { grid-column: 1 / -1; padding: 22px; border: 1px dashed var(--border);
+                  background: var(--card); color: var(--sub); text-align: center; }
+
+  .memory-detail { background: var(--card); border: 1px solid var(--border); }
+  .memory-detail-head { padding: 16px; border-bottom: 1px solid var(--border); }
+  .memory-detail-nav { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .memory-detail-head h1 { margin-bottom: 8px; font-size: 22px; line-height: 1.35; }
+  .memory-detail-pattern { color: var(--sub); line-height: 1.6; }
+  .memory-detail .memory-meta { margin-top: 12px; }
+  .memory-body { max-width: 900px; padding: 20px 24px 28px; color: var(--ink);
+                 font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+  .memory-body h1 { margin: 24px 0 10px; font-size: 21px; }
+  .memory-body h2 { margin: 22px 0 9px; padding-bottom: 5px;
+                    border-bottom: 1px solid var(--grid); font-size: 16px; }
+  .memory-body h1:first-child, .memory-body h2:first-child { margin-top: 0; }
+  .memory-body p { margin: 8px 0; }
+  .memory-body blockquote { margin: 11px 0; padding: 10px 14px;
+                            border-left: 3px solid var(--accent); background: var(--card2);
+                            color: var(--sub); }
+  .memory-body ol, .memory-body ul { margin: 8px 0 8px 23px; }
+  .memory-body li { margin: 5px 0; padding-left: 2px; }
+  .memory-body li > p { margin: 7px 0; }
+  .memory-body li > ol, .memory-body li > ul { margin-top: 5px; margin-bottom: 7px; }
+  .memory-body code { padding: 1px 4px; background: var(--card2); border: 1px solid var(--grid);
+                      color: var(--bad-fg); font-family: var(--mono); font-size: 11.5px; }
+  .memory-body pre { margin: 11px 0; padding: 12px; overflow-x: auto;
+                     border: 1px solid var(--border); background: var(--card2); }
+  .memory-body pre code { padding: 0; border: 0; color: var(--sub); background: none; }
+  .memory-body strong { font-weight: 700; }
+
+  @media (max-width: 820px) {
+    header { align-items: flex-start; flex-wrap: wrap; gap: 8px 12px; }
+    .hgap { display: none; }
+    .hstat { width: 100%; justify-content: flex-end; }
+    .memory-main { padding: 14px 12px 28px; }
+    .memory-intro, .memory-tools { align-items: stretch; flex-direction: column; }
+    .memory-count { margin-left: 0; }
+    .memory-grid { grid-template-columns: 1fr; }
+    .axis-pair { grid-template-columns: 1fr; }
+    .memory-body { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <a class="hbtn" href="/">← 总览</a>
+  <div class="brand">VVV<span class="brand-sub">经验路径</span></div>
+  <span class="memory-headnote">本地版本化的历史观察 · 非规范记忆层</span>
+  <div class="hgap"></div>
+  <div class="hstat">
+    <span id="memoryUpdated" class="badge">加载中…</span>
+    <button id="hermesToggle" class="hbtn">VVVhermes</button>
+  </div>
+</header>
+
+<div class="layout">
+<main class="memory-main">
+  <section id="memoryBrowser" aria-labelledby="memoryPageTitle">
+    <div class="memory-intro">
+      <div>
+        <h1 id="memoryPageTitle">经验路径</h1>
+        <span class="sub">保存经典市场路径，供复盘与 Hermes 历史对照调用</span>
+      </div>
+      <div class="memory-caution">观察记录，不是系统规则或交易信号</div>
+    </div>
+    <div class="memory-tools">
+      <input id="memorySearch" class="memory-search" type="search"
+             placeholder="搜索标题、模式、品种或 regime…" autocomplete="off">
+      <div class="status-tabs" id="statusTabs" aria-label="条目状态">
+        <button type="button" data-status="active" class="active" aria-pressed="true">当前有效</button>
+        <button type="button" data-status="archived" aria-pressed="false">已归档</button>
+        <button type="button" data-status="superseded" aria-pressed="false">已被继任</button>
+      </div>
+      <span class="memory-count" id="memoryCount">0 条</span>
+    </div>
+    <div class="banner memory-error" id="memoryError" hidden></div>
+    <div class="memory-grid" id="memoryList"></div>
+  </section>
+
+  <article class="memory-detail" id="memoryDetail" hidden aria-labelledby="memoryDetailTitle">
+    <div class="memory-detail-head" id="memoryDetailHead">
+      <div class="memory-detail-nav">
+        <button class="hbtn" id="memoryBack" type="button">← 返回目录</button>
+        <span class="sub">完整历史档案 · 数值仅属于该次事件</span>
+      </div>
+      <h1 id="memoryDetailTitle">经验路径</h1>
+      <div class="memory-detail-pattern" id="memoryDetailPattern"></div>
+      <div id="memoryDetailMeta"></div>
+    </div>
+    <div class="memory-body" id="memoryBody"></div>
+  </article>
+</main>
+
+<aside id="hermes" class="hermes">
+  <div class="h-head">
+    <b>VVVhermes</b>
+    <span class="sub" id="hermesMeta">…</span>
+    <button id="hermesClear" class="hbtn" title="清空对话，开始新会话">清空</button>
+    <button id="hermesClose" class="hbtn" title="收起">×</button>
+  </div>
+  <div class="h-note" id="hermesNote">与总览、详情页和终端共享同一条对话；打开条目后会附带该条目的 slug</div>
+  <div class="h-chips" id="hermesChips">
+    <button class="chipbtn" type="button">这条经验的核心观察是什么？</button>
+    <button class="chipbtn" type="button">区分当次实测值和未验证候选阈值</button>
+    <button class="chipbtn" type="button">这条经验不能用来推出什么？</button>
+  </div>
+  <div class="h-msgs" id="hermesMsgs">
+    <div class="msg bot">你好，我是 VVVhermes。打开某条经验后提问，我会把它作为不可信历史档案进行回顾。</div>
+  </div>
+  <div class="h-input">
+    <textarea id="hermesText" rows="2" placeholder="问经验路径…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="hermesSend" class="hbtn primary">发送</button>
+  </div>
+</aside>
+</div>
+
+<footer>经验路径仅供历史复盘 · 系统只输出建议与理由 · 永不下单</footer>
+<script src="/memory.js"></script>
+</body>
+</html>
