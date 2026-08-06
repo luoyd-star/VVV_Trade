@@ -30,8 +30,8 @@ from regime.classify import (
     rolling_states_missing,
 )
 from regime.data import (
-    closed_ohlcv, fetch_binance_spot_daily, fetch_binance_vol1h, fetch_dvol,
-    fetch_ohlcv, fetch_yahoo_daily,
+    HEALTHY_BARS, closed_ohlcv, fetch_binance_spot_daily, fetch_binance_vol1h,
+    fetch_dvol, fetch_ohlcv, fetch_yahoo_daily,
 )
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
@@ -591,6 +591,7 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     sym, tf, sources=source_order, drop_unclosed=False
                 )
                 df = closed_ohlcv(df_full, tf)
+                fetched_bars = len(df)
                 has_live_bar = len(df_full) > len(df)
                 # 序列下限（公司行动/合约重定价断点治理）：源端服务的是未复权
                 # 原始历史，删掉的断点前段会被下一轮 fetch 重新灌回（CRWD 4:1
@@ -664,8 +665,10 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                 conn.commit()
                 now_state = confirmed[-1] if confirmed else "?"
                 log.info(
-                    "%s %s src=%s bars=%d states+%d 确认=%s%s%s",
-                    sym, tf, src, len(hist), len(new_states), now_state,
+                    "%s %s src=%s quality=%s fetched=%d bars=%d states+%d 确认=%s%s%s",
+                    sym, tf, src,
+                    "healthy" if fetched_bars >= HEALTHY_BARS else "short",
+                    fetched_bars, len(hist), len(new_states), now_state,
                     f" 原始={rows_all[-1]['raw_state']}" if rows_all and rows_all[-1]["raw_state"] != now_state else "",
                     f" 候选={cand['state']}({cand['count']}/{cand['need']})" if cand else "",
                 )

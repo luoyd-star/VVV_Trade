@@ -34,6 +34,9 @@ _QUOTES = ("USDT", "USDC", "USD")
 
 COLUMNS = ["ts", "open", "high", "low", "close", "volume"]
 
+# 这只是多源取数时的健康度偏好，不是入库门槛：短历史仍应留给较短窗口的消费方。
+HEALTHY_BARS = 90  # 起步值，待校准
+
 
 def _okx_symbol(symbol: str) -> str:
     inst = symbol.upper().replace("/", "-")
@@ -423,12 +426,16 @@ def fetch_ohlcv(
     未登记或未显式配置 sources 的加密品种才用 deribit -> okx -> binance 兜底链。
     返回 (df, 数据源名)。
 
+    已收盘根数达到 HEALTHY_BARS 的源按配置顺序优先；短序列是可入库的降级
+    候选，只有找不到健康源时才取其中最长者。零根、取数失败或带洞仍算失败。
+
     默认按理论收线时刻丢弃未收盘末根；drop_unclosed=False 时保留源返回值
     （collector 用它提取可能存在的 live bar——预览永不写入确认历史）。
     """
     if sources is None:
         sources = instruments.get(symbol)["sources"]
     errors = []
+    best_short = None
     for name in sources:
         fn = SOURCES.get(name)
         if fn is None:
@@ -440,15 +447,21 @@ def fetch_ohlcv(
             errors.append(f"{name}: {e}")
             continue
         closed = closed_ohlcv(df, timeframe, now_ms=now_ms)
-        if len(closed) < 90:  # 上市较新的美股永续（如 1d 仅 ~130 根）也放行，靠 warmup 标志提示质量
-            errors.append(f"{name}: 仅 {len(closed)} 根已收盘 K 线，不足 90")
+        if closed.empty:
+            errors.append(f"{name}: 无已收盘 K 线")
             continue
         try:
             assert_no_gaps(closed, timeframe, name)
         except RuntimeError as e:
             errors.append(str(e))
             continue  # 带洞的序列不如换一个源
-        return (closed if drop_unclosed else df), name
+        if len(closed) >= HEALTHY_BARS:
+            return (closed if drop_unclosed else df), name
+        # 短序列不能抢在后续健康源前返回；若最终都偏短，保留根数最多的源。
+        if best_short is None or len(closed) > best_short[0]:
+            best_short = (len(closed), closed if drop_unclosed else df, name)
+    if best_short is not None:
+        return best_short[1], best_short[2]
     raise RuntimeError("；".join(errors))
 
 
