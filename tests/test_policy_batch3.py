@@ -70,8 +70,12 @@ def test_policy_block_has_full_location_all_zones_and_stop_check(monkeypatch):
         "crsi_by_tf", "signal_ok", "signal_tf", "resonance", "regime_conflict",
         "play", "zones", "vol_notes", "stop_check", "vol_meta", "degraded",
     }
+    # assemble 是 policy 装配层由 dashboard 抽到 regime/policy 后新增的版本位：
+    # 判定逻辑与取数壳分离，collector 与 dashboard 共用同一份纯函数（口径单源），
+    # 版本随之进 payload。此处保持精确相等断言——多出或少掉任何版本位都该报警。
     assert policy["versions"] == {
         "levels": "lv1", "location": "loc1", "stopcheck": "stop1", "volnote": "vol1",
+        "assemble": "asm1",
     }
     assert policy["location"]["at"] == "at_support"
     assert policy["location"]["approach"] == "from_above"

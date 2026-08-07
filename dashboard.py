@@ -33,23 +33,19 @@ from regime.features.utils import pct_rank, rolling_pct_rank
 from regime.features.volatility import atr, bb_width, realized_vol
 from regime.features.vwap import WIN_HOURS as VWAP_WIN_HOURS
 from regime.features.vwap import rolling_vwap, vwap_payload
-from regime.policy.levels import LEVELS_VERSION, extract_levels
-from regime.policy.location import (
-    APPROACH_BARS, LOCATION_VERSION, _eligible, _zone_state, locate,
-)
-from regime.policy.stopcheck import (
-    STOPCHECK_VERSION, check_stop_vs_iv, find_structural_stop,
-)
+from regime.policy import assemble as policy_assemble
+from regime.policy.levels import extract_levels
+from regime.policy.location import APPROACH_BARS, locate
+from regime.policy.stopcheck import check_stop_vs_iv, find_structural_stop
 from regime.policy.volnote import (
-    EARNINGS_NEAR_DAYS, TARGET_TENOR_DAYS, VOLNOTE_VERSION,
-    interpolate_iv_to_tenor, vol_notes,
+    EARNINGS_NEAR_DAYS, TARGET_TENOR_DAYS, interpolate_iv_to_tenor, vol_notes,
 )
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
 CANDLES = 240
 TIMEFRAMES = ("1d", "4h", "1h")
-TF_SEC = {"1h": 3600, "4h": 14_400, "1d": 86_400}
+TF_SEC = policy_assemble.TF_SEC
 # WARMUP_BARS 移入 regime/classify.py——a8 起逐行审计与面板角标共用同一定义
 
 OVERVIEW_TTL_SEC = 60               # 起步值，待校准；与主页 60 秒刷新周期对齐
@@ -359,22 +355,15 @@ def _usvol_metrics(payload: dict) -> list:
         span_desc=payload.get("window_span_desc"),
     ))
     return rows
-POLICY_SIGNAL_TF = "4h"
-POLICY_RESONANCE_TFS = ("4h", "1d", "1h")
-POLICY_SIGNAL_OHLCV_LIMIT = 400     # 起步值，待校准；覆盖 cRSI 自适应带观察窗
-POLICY_1D_MIN_BARS = 90             # 起步值，待校准；与详情页既有 1d 可用性门槛一致
-RESONANCE_STRONG_MIN = 1            # 起步值，待校准；用户裁决：辅助净分至少 +1 为强
-RESONANCE_WEAK_MAX = -1             # 起步值，待校准；用户裁决：辅助净分至多 -1 为弱
+POLICY_SIGNAL_TF = policy_assemble.POLICY_SIGNAL_TF
+POLICY_RESONANCE_TFS = policy_assemble.POLICY_RESONANCE_TFS
+POLICY_SIGNAL_OHLCV_LIMIT = policy_assemble.POLICY_SIGNAL_OHLCV_LIMIT
+POLICY_1D_MIN_BARS = policy_assemble.POLICY_1D_MIN_BARS
 STALE_TF_MULTIPLIER = 1.5           # 起步值，待校准；超过 1.5 个周期视为陈旧
 EARNINGS_BEFORE_CUTOFF_MIN_ET = 570  # 起步值，待校准；BEFORE 财报在 ET 09:30 后视为已发生
 EARNINGS_AFTER_CUTOFF_MIN_ET = 960   # 起步值，待校准；AFTER 财报在 ET 16:00 后视为已发生
 
-POLICY_VERSIONS = {
-    "levels": LEVELS_VERSION,
-    "location": LOCATION_VERSION,
-    "stopcheck": STOPCHECK_VERSION,
-    "volnote": VOLNOTE_VERSION,
-}
+POLICY_VERSIONS = policy_assemble.POLICY_VERSIONS
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1447,373 +1436,89 @@ def _latest_state_snapshot(conn, symbol: str, tf: str) -> dict:
     return {"ts": row[0], "state": row[1], "warmup": warmup}
 
 
-def _signal_ok(at, crsi_zone):
-    """兼容入口：主导 cRSI 极值区是否与关键位方向一致。"""
-    if crsi_zone is None:
-        return None
-    if at == "at_support":
-        return crsi_zone == "超卖区"
-    if at == "at_resistance":
-        return crsi_zone == "超买区"
-    return None
+_signal_ok = policy_assemble.signal_ok
+_resonance = policy_assemble.resonance
 
 
-def _resonance(at: str, z4: str | None, z1d: str | None,
-               z1h: str | None) -> dict:
-    """4h 主导 + 1d/1h 分级辅助；辅助冲突只降级，不否决主票。
-
-    实证依据（监工实测）：4h cRSI 超卖→超买循环中位 6.0 天、1h 1.4 天，
-    用户持仓 1-3 天；4h 极值仅 15/71 品种，若硬要求辅助同向只剩 2 个，
-    因此 armed 只看 4h 主票，辅助只形成强/中/弱分级。
-    """
-    main_ok = _signal_ok(at, z4)
-    expected = {
-        "at_support": "超卖区",
-        "at_resistance": "超买区",
-    }.get(at)
-    opposite = {"超卖区": "超买区", "超买区": "超卖区"}.get(expected)
-
-    aux = {}
-    conflicts = []
-    for tf, zone in (("1d", z1d), ("1h", z1h)):
-        if zone is None or expected is None:
-            vote = None
-        elif zone == expected:
-            vote = 1
-        elif zone == opposite:
-            vote = -1
-            if main_ok is True:
-                conflicts.append(f"{tf} {zone}与 4h {z4}反向")
-        else:
-            vote = 0
-        aux[tf] = vote
-
-    score = sum(vote for vote in aux.values() if vote is not None)
-    grade = None
-    if main_ok is True:
-        if score >= RESONANCE_STRONG_MIN:
-            grade = "强"
-        elif score <= RESONANCE_WEAK_MAX:
-            grade = "弱"
-        else:
-            grade = "中"
-    return {
-        "main_tf": "4h",
-        "main_zone": z4,
-        "main_ok": main_ok,
-        "aux": aux,
-        "score": score,
-        "grade": grade,
-        "conflicts": conflicts,
-    }
-
-
-def _regime_conflict(regime_4h: str | None,
-                     regime_1d: str | None) -> dict | None:
-    """不同周期且至少一方为趋势态时只输出警示，不修改 4h play。"""
-    if regime_4h is None or regime_1d is None or regime_4h == regime_1d:
-        return None
-    trends = {"trend_up", "trend_down"}
-    if regime_4h not in trends and regime_1d not in trends:
-        return None
-    labels = {
-        "trend_up": "趋势上行", "trend_down": "趋势下行", "range": "震荡",
-        "squeeze": "低波动挤压", "high_vol_chop": "高波动非趋势",
-    }
-    pair = f"4h {labels.get(regime_4h, regime_4h)} vs 1d {labels.get(regime_1d, regime_1d)}"
-    if regime_4h == "trend_up" and regime_1d == "trend_down":
-        note = f"{pair}：这是逆大势的反弹单"
-    elif regime_4h == "trend_down" and regime_1d == "trend_up":
-        note = f"{pair}：这是逆大势的回落单"
-    else:
-        note = f"{pair}：周期状态冲突，仅作背景警示"
-    return {"note": note, "severity": "warn"}
+_regime_conflict = policy_assemble.regime_conflict
 
 
 def _crsi_snapshot(conn, symbol: str, tf: str, asof_ms) -> dict:
-    """取指定周期截至 4h 决策时点的最后已收线 cRSI；缺失保持 None。"""
-    empty = {"crsi": None, "pos": None, "zone": None}
-    if asof_ms is None:
-        return {"crsi": empty, "degraded": ["signal_asof_unavailable"]}
+    """薄取数壳：纯计算与降级语义由 policy assemble 单源提供。"""
     frame = storage.get_ohlcv(
         conn, symbol, tf, limit=POLICY_SIGNAL_OHLCV_LIMIT,
     )
-    if not len(frame):
-        return {"crsi": empty, "degraded": [f"crsi_{tf}_missing"]}
-    if tf == "1d" and len(frame) < POLICY_1D_MIN_BARS:
-        return {
-            "crsi": empty,
-            "degraded": ["crsi_1d_history_insufficient"],
-        }
-    try:
-        ts_ms = storage.ts_to_ms(frame["ts"])
-        # ohlcv.ts 是开盘时刻；各周期都只消费收线时间不晚于 4h asof 的 bar。
-        closed = np.asarray(ts_ms, dtype="int64") + TF_SEC[tf] * 1000 <= int(asof_ms)
-        frame = frame.loc[closed].reset_index(drop=True)
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return {"crsi": empty, "degraded": [f"crsi_{tf}_unavailable"]}
-    if not len(frame):
-        return {"crsi": empty, "degraded": [f"crsi_{tf}_missing_at_asof"]}
-    try:
-        crsi_last = crsi_features(frame).get("last") or {}
-    except Exception as exc:  # noqa: BLE001  单周期缺失只降级，不拖垮位置测量
-        return {
-            "crsi": empty,
-            "degraded": [f"crsi_{tf}_unavailable:{type(exc).__name__}"],
-        }
-    value = {key: crsi_last.get(key) for key in ("crsi", "pos", "zone")}
-    if any(value[key] is None for key in ("crsi", "pos", "zone")):
-        return {"crsi": empty, "degraded": [f"crsi_{tf}_unavailable"]}
-    return {"crsi": value, "degraded": []}
+    return policy_assemble.crsi_snapshot(
+        frame, tf, asof_ms, feature_fn=crsi_features,
+    )
 
 
 def _policy_signal_snapshot(conn, symbol: str, at, asof_ms) -> dict:
-    """装配 4h 主票和 1d/1h 辅助票，全部对齐同一 4h 收线时点。"""
-    snapshots = {
-        tf: _crsi_snapshot(conn, symbol, tf, asof_ms)
+    """薄取数壳：三个周期只读取一次，再交给纯函数按统一 asof 装配。"""
+    frames = {
+        tf: storage.get_ohlcv(
+            conn, symbol, tf, limit=POLICY_SIGNAL_OHLCV_LIMIT,
+        )
         for tf in POLICY_RESONANCE_TFS
     }
-    by_tf = {tf: snapshots[tf]["crsi"] for tf in POLICY_RESONANCE_TFS}
-    resonance = _resonance(
-        at,
-        by_tf["4h"].get("zone"),
-        by_tf["1d"].get("zone"),
-        by_tf["1h"].get("zone"),
+    return policy_assemble.signal_snapshot(
+        frames, at, asof_ms, feature_fn=crsi_features,
     )
-    degraded = []
-    for tf in POLICY_RESONANCE_TFS:
-        degraded.extend(snapshots[tf]["degraded"])
-    return {
-        "signal_tf": POLICY_SIGNAL_TF,
-        "crsi": by_tf["4h"],
-        "crsi_by_tf": by_tf,
-        "signal_ok": resonance["main_ok"],
-        "resonance": resonance,
-        "degraded": list(dict.fromkeys(degraded)),
-    }
 
 
-def _policy_play(regime: str, at, signal_ok, role_flipped=False, zone=None,
-                 tradeable=None, reason=None):
-    """把本批明确列出的 regime × location 单元格映射成剧本展示名。"""
-    kinds = set()
-    if isinstance(zone, dict):
-        raw_kinds = zone.get("kinds") or []
-        kinds = {raw_kinds} if isinstance(raw_kinds, str) else set(raw_kinds)
-
-    play = None
-    if regime == "trend_up" and at == "at_support":
-        play = "S5 突破回踩加仓" if role_flipped else "S4 趋势回踩做多"
-    elif regime == "trend_down" and at == "at_resistance":
-        play = "S1 反弹至压力做空"
-    elif (regime == "trend_down" and at == "at_support"
-          and kinds & {"ema100", "ema200"}):
-        play = "S13 深跌逆势做多（需二次确认·仓位为顺势单的 1/3-1/2）"
-    elif regime == "range" and at == "at_support":
-        play = "S3 区间下沿做多"
-    elif regime == "range" and at == "at_resistance":
-        play = "S3 区间上沿做空"
-
-    if play is not None and tradeable is not True:
-        # 当前测量层最常见的未成立门槛是 wrong_approach；其他原因也如实随行。
-        reason_note = "" if reason in {None, "wrong_approach"} else f"；{reason}"
-        return f"WAIT · 路径未确认（P09{reason_note}） · 参考剧本：{play}"
-    if play is not None and signal_ok is False:
-        return f"{play}（位置到了信号没到）"
-    return play if signal_ok is not None else None
-
-
-def _policy_zone_payload(zone: dict, price: float, atr_value: float,
-                         regime: str) -> dict:
-    """给完整 zone 列表补当前角色、距离与 regime 资格，不改变 levels 原结果。"""
-    raw_kinds = zone.get("kinds") or []
-    if isinstance(raw_kinds, str):
-        raw_kinds = [raw_kinds]
-    state = _zone_state(price, atr_value, zone)
-    eligible = False
-    if state is not None and zone.get("chain_overflow") is not True:
-        eligible = _eligible(
-            regime, state["role"], {str(kind) for kind in raw_kinds},
-            state["role_flipped"],
-        )
-    return {
-        "lo": zone.get("lo"),
-        "hi": zone.get("hi"),
-        "mid": zone.get("mid"),
-        "kinds": list(raw_kinds),
-        "touches": zone.get("touches"),
-        "established_ts": zone.get("established_ts"),
-        "last_touch_bars": zone.get("last_touch_bars"),
-        "overlap_count": zone.get("overlap_count"),
-        "last_overlap_bars": zone.get("last_overlap_bars"),
-        "origin_role": zone.get("origin_role"),
-        "width_atr": zone.get("width_atr"),
-        "chain_overflow": zone.get("chain_overflow") is True,
-        "dist_atr": state.get("dist_atr") if state else None,
-        "role_now": state.get("role") if state else None,
-        "role_flipped": state.get("role_flipped") if state else None,
-        "eligible": bool(eligible),
-    }
-
-
-def _policy_side(regime: str, location: dict) -> str | None:
-    """只为已有矩阵单元格标方向；未知单元格不猜。"""
-    at = location.get("at")
-    zone = location.get("zone") or {}
-    raw_kinds = zone.get("kinds") or []
-    kinds = {raw_kinds} if isinstance(raw_kinds, str) else set(raw_kinds)
-    if at == "at_support":
-        if regime in {"trend_up", "range"}:
-            return "long"
-        if regime == "trend_down" and kinds & {"ema100", "ema200"}:
-            return "long"
-    if at == "at_resistance" and regime in {"trend_down", "range"}:
-        return "short"
-    return None
+_policy_play = policy_assemble.policy_play
+_policy_zone_payload = policy_assemble.policy_zone_payload
+_policy_side = policy_assemble.policy_side
 
 
 def _build_policy_payload(conn, symbol: str, tfs_payload: dict) -> dict:
-    """装配详情页 policy 测量块；任何缺口显式进入 ``degraded``。"""
-    regime_4h = (tfs_payload.get("4h") or {}).get("state")
-    regime_1d = (tfs_payload.get("1d") or {}).get("state")
-    degraded: list[str] = []
-    base = {
-        "versions": dict(POLICY_VERSIONS),
-        "tf": "4h",
-        "regime_4h": regime_4h,
-        "regime_1d": regime_1d,
-        "price": None,
-        "atr": None,
-        "location": None,
-        "crsi": {"crsi": None, "pos": None, "zone": None},
-        "crsi_by_tf": {
-            tf: {"crsi": None, "pos": None, "zone": None}
-            for tf in POLICY_RESONANCE_TFS
-        },
-        "signal_ok": None,
-        "signal_tf": POLICY_SIGNAL_TF,
-        "resonance": _resonance(None, None, None, None),
-        "regime_conflict": _regime_conflict(regime_4h, regime_1d),
-        "play": None,
-        "zones": [],
-        "vol_notes": [],
-        "vol_meta": None,
-        "stop_check": None,
-        "degraded": degraded,
+    """薄取数壳：SQLite 只在这里读取，policy 判定全部交给纯装配层。"""
+    ohlcv_by_tf = {
+        tf: storage.get_ohlcv(
+            conn, symbol, tf,
+            limit=(OVERVIEW_OHLCV_LIMIT if tf == "4h" else POLICY_SIGNAL_OHLCV_LIMIT),
+        )
+        for tf in POLICY_RESONANCE_TFS
     }
-    if regime_4h is None:
-        degraded.append("regime_4h_missing")
-    if regime_1d is None:
-        degraded.append("regime_1d_missing")
-
-    df = storage.get_ohlcv(conn, symbol, "4h", limit=OVERVIEW_OHLCV_LIMIT)
-    if not len(df):
-        degraded.append("4h_ohlcv_missing")
-        return base
-    try:
-        price = float(df["close"].iloc[-1])
-    except (KeyError, TypeError, ValueError, IndexError):
-        degraded.append("price_unavailable")
-        return base
-    if not math.isfinite(price) or price <= 0:
-        degraded.append("price_unavailable")
-        return base
-    base["price"] = price
+    df_4h = ohlcv_by_tf["4h"]
 
     vol1h = None
-    last_close_ms = None
-    try:
-        last_ts = int(storage.ts_to_ms(df["ts"].tail(1))[0])
-        since_ms = last_ts - OVERVIEW_VOL1H_HOURS * 3_600_000
-        vol1h = storage.get_vol1h(conn, symbol, since_ms=since_ms)
-        last_close_ms = last_ts + TF_SEC["4h"] * 1000
-        if len(vol1h):
-            vol1h = vol1h[vol1h["ts"] < last_close_ms].reset_index(drop=True)
-    except (KeyError, TypeError, ValueError, IndexError):
-        degraded.append("vol1h_unavailable")
-
-    levels = extract_levels(
-        df, vol1h=vol1h, expected_end_ts=last_close_ms,
-    )
-    degraded.extend(levels.get("degraded") or [])
-    atr_value = levels.get("atr")
-    zones = levels.get("zones")
-    base["atr"] = atr_value
-    if atr_value is None or not zones:
-        if not zones:
-            degraded.append("zones_unavailable")
-        base["degraded"] = list(dict.fromkeys(degraded))
-        return base
-
-    location = locate(
-        price, atr_value, zones, regime_4h,
-        prices=df["close"].tail(APPROACH_BARS).to_numpy(),
-    )
-    base["location"] = location
-    degraded.extend(location.get("degraded") or [])
-
-    enriched = [
-        _policy_zone_payload(zone, price, atr_value, regime_4h)
-        for zone in zones if isinstance(zone, dict)
-    ]
-    enriched.sort(key=lambda zone: (
-        float("inf") if zone.get("dist_atr") is None else zone["dist_atr"],
-        float("inf") if zone.get("mid") is None else zone["mid"],
-    ))
-    base["zones"] = enriched
-
-    signal = _policy_signal_snapshot(
-        conn, symbol, location.get("at"), last_close_ms,
-    )
-    base["crsi"] = signal["crsi"]
-    base["crsi_by_tf"] = signal["crsi_by_tf"]
-    base["signal_ok"] = signal["signal_ok"]
-    base["signal_tf"] = signal["signal_tf"]
-    base["resonance"] = signal["resonance"]
-    degraded.extend(signal["degraded"])
-    base["play"] = _policy_play(
-        regime_4h, location.get("at"), signal["signal_ok"],
-        role_flipped=location.get("role_flipped"), zone=location.get("zone"),
-        tradeable=location.get("tradeable"), reason=location.get("reason"),
-    )
+    asof_ms = None
+    vol1h_error = None
+    if len(df_4h):
+        try:
+            last_ts = int(storage.ts_to_ms(df_4h["ts"].tail(1))[0])
+            since_ms = last_ts - OVERVIEW_VOL1H_HOURS * 3_600_000
+            vol1h = storage.get_vol1h(conn, symbol, since_ms=since_ms)
+            asof_ms = last_ts + TF_SEC["4h"] * 1000
+        except (KeyError, TypeError, ValueError, IndexError):
+            vol1h_error = "vol1h_unavailable"
 
     vol_input = None
+    vol_input_error = None
     try:
         vol_input = _overview_vol_inputs(conn, symbol)
-        base["vol_notes"] = vol_notes(symbol, price, **vol_input)
-        if vol_input.get("iv3") is not None:
-            base["vol_meta"] = {
-                "iv": vol_input.get("iv3"),
-                "tenor_days": vol_input.get("tenor_days"),
-                "method": vol_input.get("method"),
-                "n_expiries": vol_input.get("n_expiries"),
-            }
     except Exception as exc:  # noqa: BLE001  风险补充失败不拖垮结构测量
-        degraded.append(f"vol_inputs_unavailable:{type(exc).__name__}")
+        vol_input_error = f"vol_inputs_unavailable:{type(exc).__name__}"
 
-    side = _policy_side(regime_4h, location)
-    if side is not None:
-        structural = find_structural_stop(location, enriched, price, atr_value, side)
-        if structural is None:
-            degraded.append("structural_stop_unavailable")
-        else:
-            iv3 = vol_input.get("iv3") if vol_input else None
-            tenor_days = vol_input.get("tenor_days") if vol_input else None
-            width = (
-                check_stop_vs_iv(
-                    structural["stop_dist_pct"], iv3,
-                    holding_days=tenor_days,
-                )
-                if tenor_days is not None
-                else check_stop_vs_iv(structural["stop_dist_pct"], iv3)
-            )
-            if width is None:
-                degraded.append("iv3_missing_for_stop_check")
-            else:
-                base["stop_check"] = {**structural, **width}
-
-    base["degraded"] = list(dict.fromkeys(degraded))
-    return base
+    return policy_assemble.build(
+        symbol,
+        ohlcv_by_tf=ohlcv_by_tf,
+        regime_by_tf={
+            tf: (tfs_payload.get(tf) or {}).get("state")
+            for tf in POLICY_RESONANCE_TFS
+        },
+        instrument=instruments.get(symbol),
+        asof_ms=asof_ms,
+        vol1h=vol1h,
+        vol_input=vol_input,
+        vol1h_error=vol1h_error,
+        vol_input_error=vol_input_error,
+        # 现有测试会替换 dashboard 的纯依赖；显式传入维持该内部兼容入口。
+        _levels_fn=extract_levels,
+        _crsi_fn=crsi_features,
+        _vol_notes_fn=vol_notes,
+    )
 
 
 def _policy_earnings_proximity(conn, symbol: str, now_ms: int,
