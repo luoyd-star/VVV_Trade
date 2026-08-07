@@ -84,7 +84,30 @@ def atm_pair(chain_rows, spot: float):
     return call, put, k
 
 
-def build_codes(ctx, symbols, existing=None) -> tuple:
+BUILD_GROUPS = 10        # 起步值，待校准；建链的固定分组数（见 build_group 的取舍）
+MAX_DAY_FAILS = 2        # 起步值，待校准；同一 ET 日内失败几次后当天不再重试
+
+
+def build_group(symbols, round_idx: int, n_groups: int = BUILD_GROUPS) -> list:
+    """按**固定分组**取本轮该建链的品种（2026-08-07 用户裁决）。
+
+    与旧的"轮换起点 + 取前 BUILD_BATCH 个缺失"相比，固定分组换来**确定性**：
+    品种 X 永远落在第 (index % n_groups) 组，什么时候建可预期、出问题可排查。
+    另一个好处是每轮请求量更小更均匀——71 品种分 10 组每组约 7 个、
+    每品种 ~4 次请求 ≈28 次/轮，比一轮 16 个（≈64 次）更不容易撞账号级限频。
+
+    **只对建链分组，快照绝不分组**：快照是 2 次请求覆盖全部品种（批量的意义所在），
+    拆开会让成本涨 10 倍，还会毁掉横截面可比性——不同品种采样于不同时刻就没法
+    横向比"今天谁的 3d IV 最贵"，而横截面正是总览页的立身之本。
+    """
+    if not symbols:
+        return []
+    n = max(int(n_groups), 1)
+    idx = int(round_idx) % n
+    return [s for i, s in enumerate(symbols) if i % n == idx]
+
+
+def build_codes(ctx, symbols, existing=None, skip=None) -> tuple:
     """按 ET 日构建 {symbol: {target: {codes, tenor, expiry}}}（链静态，日缓存）。
 
     每品种：1 次到期日 + ≤3 次链 + 现价共享批量快照。
@@ -100,9 +123,12 @@ def build_codes(ctx, symbols, existing=None) -> tuple:
 
     out = dict(existing or {})
     fails: list = []
-    # 只补缺失品种；期限不全（<len(TARGETS)）的也算缺失，下一轮继续补
+    # 只补缺失品种；期限不全（<len(TARGETS)）的也算缺失，下一轮继续补。
+    # skip 是当日已达失败上限的品种：它们**不该继续占名额**——实测每轮 16 个槽位里
+    # 有 4~6 个在重试注定失败的品种（PANW/EWY/EWJ/APP），成功率因此只有 58%。
+    blocked = set(skip or ())
     todo = [s for s in symbols
-            if len(out.get(s) or {}) < len(TARGETS)][:BUILD_BATCH]
+            if len(out.get(s) or {}) < len(TARGETS) and s not in blocked][:BUILD_BATCH]
     if not todo:
         return out, fails
 
@@ -231,3 +257,55 @@ def save_codes_cache(conn, codes: dict) -> None:
 
     storage.set_meta(conn, "iv_term_codes",
                      json.dumps({"date": et_date_key(), "codes": codes}))
+
+
+def load_build_fails(conn) -> dict:
+    """当日建链失败计数（跨 ET 日清零，与代码表缓存同一失效口径）。"""
+    from . import storage
+
+    raw = storage.get_meta(conn, "iv_term_build_fails")
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return d.get("fails") or {} if d.get("date") == et_date_key() else {}
+
+
+def save_build_fails(conn, fails: dict) -> None:
+    from . import storage
+
+    storage.set_meta(conn, "iv_term_build_fails",
+                     json.dumps({"date": et_date_key(), "fails": fails}))
+
+
+def count_fails(prev: dict, fail_lines, attempted, built_now: int) -> dict:
+    """把本轮失败明细并入当日计数——**但只在能区分"品种问题"与"限频"时才计**。
+
+    这是本函数存在的唯一理由：撞账号级限频时**整批一起失败**，若无脑计数，
+    一次限频就会把当轮全部品种拉黑一天，比不做退避更糟。
+    判据：本轮**至少建成一个**品种，才说明链路是通的、失败是品种自身的问题。
+    整批全灭一律视为系统性故障，不计任何品种的账。
+
+    fail_lines 形如 ``"PANW-USDT/3d:链(-1)"`` 或 ``"EWJ-USDT:无现价"``——
+    同一品种的多个期限只算一次失败，否则三个 target 会让计数三倍速膨胀。
+    """
+    out = dict(prev or {})
+    if built_now <= 0:
+        return out
+    attempted = list(attempted or ())
+    failed_syms = set()
+    for line in fail_lines or ():
+        sym = str(line).split(":", 1)[0].split("/", 1)[0]
+        if sym in attempted:
+            failed_syms.add(sym)
+    for sym in failed_syms:
+        out[sym] = int(out.get(sym, 0)) + 1
+    # 本轮建成的品种把账清掉：偶发失败后成功了就不该继续记恨
+    return out
+
+
+def blocked_symbols(fails: dict, limit: int = MAX_DAY_FAILS) -> set:
+    """当日已达失败上限、不该再占建链名额的品种。"""
+    return {s for s, n in (fails or {}).items() if int(n) >= limit}

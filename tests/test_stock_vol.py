@@ -683,8 +683,13 @@ def test_collector_warns_when_iv_term_uses_one_leg(monkeypatch, caplog):
     assert "ATM 单腿退化" in caplog.text and "NVDA-USDT 3d" in caplog.text
 
 
-def test_collector_rotates_iv_term_build_start_across_failed_rounds(monkeypatch):
-    """R2-9：即使每轮建链都失败，下一轮也不能继续从同一批列表头开始。"""
+def test_collector_advances_iv_term_build_group_across_failed_rounds(monkeypatch):
+    """R2-9 的新形态：轮换起点已换成固定分组，但**意图不变**——
+    即使每轮建链都失败，轮次计数也必须前进，否则某一组会永久饿死。
+
+    另一半同样重要：整轮失败（built_now=0）视为限频而非品种问题，
+    **不得给任何品种记失败账**，否则一次限频就把当轮品种拉黑一整天。
+    """
     import collector
     from regime import calendar_nyse, stock_iv_term
 
@@ -693,7 +698,7 @@ def test_collector_rotates_iv_term_build_start_across_failed_rounds(monkeypatch)
             pass
 
     conn = _mem_conn()
-    syms = [f"S{i}-USDT" for i in range(5)]
+    syms = [f"S{i}-USDT" for i in range(20)]
     seen = []
     monkeypatch.setattr(calendar_nyse, "is_rth", lambda now: True)
     monkeypatch.setattr(moomoo_iv, "opend_alive", lambda: True)
@@ -702,17 +707,22 @@ def test_collector_rotates_iv_term_build_start_across_failed_rounds(monkeypatch)
     monkeypatch.setattr(collector.instruments, "get", lambda symbol: {"class": "us_stock_perp"})
     monkeypatch.setattr(stock_iv_term, "load_codes_cache", lambda conn: {})
 
-    def build(ctx, symbols, existing=None):
+    def build(ctx, symbols, existing=None, skip=None):
         seen.append(list(symbols))
-        return {}, ["RATE_LIMIT"]
+        return {}, [f"{s}:RATE_LIMIT" for s in symbols]
 
     monkeypatch.setattr(stock_iv_term, "build_codes", build)
-    collector.sync_stock_iv_term(conn, syms)
-    collector.sync_stock_iv_term(conn, syms)
+    for _ in range(3):
+        collector.sync_stock_iv_term(conn, syms)
 
-    shift = stock_iv_term.BUILD_BATCH % len(syms)
-    assert seen[0] == syms
-    assert seen[1] == syms[shift:] + syms[:shift]
+    # 每轮取到的是不同的组——计数器在失败轮也前进了
+    assert seen[0] == stock_iv_term.build_group(syms, 0)
+    assert seen[1] == stock_iv_term.build_group(syms, 1)
+    assert seen[2] == stock_iv_term.build_group(syms, 2)
+    assert seen[0] != seen[1], "失败轮没有推进分组，该组会永久饿死"
+    # 三轮全灭，但一个品种都不许被拉黑
+    assert stock_iv_term.blocked_symbols(
+        stock_iv_term.load_build_fails(conn)) == set()
 
 
 def test_iv_term_storage_roundtrip():

@@ -232,25 +232,47 @@ def sync_stock_iv_term(conn, symbols) -> tuple:
         # 单轮上限 BUILD_BATCH。RTH 每小时一轮，几轮内补满 61 品种。
         cached = stock_iv_term.load_codes_cache(conn) or {}
         want_full = len(stock_iv_term.TARGETS)
-        missing = [s for s in us if len(cached.get(s) or {}) < want_full]
+        day_fails = stock_iv_term.load_build_fails(conn)
+        blocked = stock_iv_term.blocked_symbols(day_fails)
+        missing = [s for s in us
+                   if len(cached.get(s) or {}) < want_full and s not in blocked]
         if missing:
-            # R2-9：跨轮轮换建链起点。即使某轮末尾撞账号级限频，下一轮也从
-            # 另一个位置开始，列表尾部品种不会永久饿死；先写 next，整轮异常也会前进。
-            offset_key = "stock_iv_term_build_offset"
+            # 固定分组取代旧的"轮换起点"（2026-08-07 用户裁决）：品种 X 永远落在
+            # 第 (index % BUILD_GROUPS) 组，何时建可预期、出问题可排查，且每轮
+            # 请求量更小更均匀（约 7 品种 ≈28 次请求，旧写法 16 品种 ≈64 次）。
+            # 轮次计数器先写 next：整轮异常也会前进，某一组不会永久饿死。
+            round_key = "stock_iv_term_build_round"
             try:
-                start = int(storage.get_meta(conn, offset_key, 0) or 0) % len(us)
+                round_idx = int(storage.get_meta(conn, round_key, 0) or 0)
             except (TypeError, ValueError):
-                start = 0
-            rotated = us[start:] + us[:start]
-            next_start = (start + stock_iv_term.BUILD_BATCH) % len(us)
-            storage.set_meta(conn, offset_key, str(next_start))
-            codes, fails = stock_iv_term.build_codes(ctx, rotated, existing=cached)
+                round_idx = 0
+            storage.set_meta(conn, round_key, str(round_idx + 1))
+            group = [s for s in stock_iv_term.build_group(us, round_idx) if s in missing]
+            # 本组已建完就不空转：把本轮让给任何仍缺失的品种（确定性分组 + 机会补位）
+            todo = group or missing
+            codes, fails = stock_iv_term.build_codes(
+                ctx, todo, existing=cached, skip=blocked,
+            )
             if codes:
                 stock_iv_term.save_codes_cache(conn, codes)
+            built_now = len(codes) - len(cached)
+            # 失败记账**只在本轮有成功时**进行——整批全灭是限频而非品种问题，
+            # 无脑记账会让一次限频把当轮品种全部拉黑一天，比不做退避更糟
+            day_fails = stock_iv_term.count_fails(day_fails, fails, todo, built_now)
+            for s in todo:
+                if len(codes.get(s) or {}) >= want_full:
+                    day_fails.pop(s, None)   # 建成即销账，不记恨偶发失败
+            stock_iv_term.save_build_fails(conn, day_fails)
             done = sum(1 for s in us if len(codes.get(s) or {}) >= want_full)
-            log.info("IV期限链构建 %d/%d 品种完整（本轮补 %d，待补 %d）%s",
-                     done, len(us), len(codes) - len(cached), len(us) - done,
-                     f"；失败 {len(fails)} 例: " + "; ".join(fails[:6]) if fails else "")
+            now_blocked = stock_iv_term.blocked_symbols(day_fails)
+            log.info(
+                "IV期限链构建 %d/%d 品种完整（第%d组 %d 个，本轮补 %d，待补 %d）%s%s",
+                done, len(us), round_idx % stock_iv_term.BUILD_GROUPS, len(todo),
+                built_now, len(us) - done - len(now_blocked),
+                f"；当日跳过 {len(now_blocked)} 个（连续失败）: "
+                + ", ".join(sorted(now_blocked)[:6]) if now_blocked else "",
+                f"；失败 {len(fails)} 例: " + "; ".join(fails[:4]) if fails else "",
+            )
         else:
             codes = cached
         if not codes:
