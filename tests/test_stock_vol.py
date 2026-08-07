@@ -715,11 +715,13 @@ def test_collector_advances_iv_term_build_group_across_failed_rounds(monkeypatch
     for _ in range(3):
         collector.sync_stock_iv_term(conn, syms)
 
-    # 每轮取到的是不同的组——计数器在失败轮也前进了
-    assert seen[0] == stock_iv_term.build_group(syms, 0)
-    assert seen[1] == stock_iv_term.build_group(syms, 1)
-    assert seen[2] == stock_iv_term.build_group(syms, 2)
-    assert seen[0] != seen[1], "失败轮没有推进分组，该组会永久饿死"
+    # 每轮**以不同的组打头**——计数器在失败轮也前进了。
+    # 用前缀而不是相等：本组不足一批时会用其余缺失品种补满（见补位逻辑），
+    # 所以 todo 会比本组长；分组仍必须是主序。
+    for r in range(3):
+        grp = stock_iv_term.build_group(syms, r)
+        assert seen[r][:len(grp)] == grp, f"第{r}轮的主序不是第{r}组"
+    assert seen[0][:1] != seen[1][:1], "失败轮没有推进分组，该组会永久饿死"
     # 三轮全灭，但一个品种都不许被拉黑
     assert stock_iv_term.blocked_symbols(
         stock_iv_term.load_build_fails(conn)) == set()
