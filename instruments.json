@@ -178,7 +178,7 @@
       "memory"
     ],
     "valid_from": "2026-08-04",
-    "display": "SK海力士(KRX)"
+    "display": "SK海力士(美股定价)"
   },
   "GOOGL-USDT": {
     "class": "us_stock_perp",
@@ -1006,6 +1006,157 @@
     ],
     "valid_from": "2026-08-05",
     "display": "IBM",
+    "vol_index": "VXN"
+  },
+  "SKHYNIX-USDT": {
+    "class": "intl_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "core",
+    "theme": [
+      "ai_infra",
+      "memory",
+      "korea"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "SK海力士(KRX·000660)"
+  },
+  "KORU-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "intl_index",
+      "korea"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "韩国3倍ETF",
+    "vol_index": "VIX"
+  },
+  "EWT-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "intl_index",
+      "taiwan"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "台湾ETF",
+    "vol_index": "VIX"
+  },
+  "QCOM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "semi",
+      "edge_device"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "高通",
+    "vol_index": "VXN"
+  },
+  "KLAC-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_infra",
+      "semi_equipment"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "科磊",
+    "vol_index": "VXN"
+  },
+  "LRCX-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_infra",
+      "semi_equipment"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "泛林",
+    "vol_index": "VXN"
+  },
+  "TER-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "semi_equipment"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "泰瑞达",
+    "vol_index": "VXN"
+  },
+  "COHR-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_infra",
+      "networking"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "相干(光器件)",
+    "vol_index": "VXN"
+  },
+  "CRDO-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "ai_infra",
+      "networking"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "Credo",
+    "vol_index": "VXN"
+  },
+  "WDC-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "memory"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "西部数据",
+    "vol_index": "VXN"
+  },
+  "DRAM-USDT": {
+    "class": "us_stock_perp",
+    "sources": [
+      "binance_futures"
+    ],
+    "pool": "observation",
+    "theme": [
+      "memory"
+    ],
+    "valid_from": "2026-08-07",
+    "display": "DRAM(存储)",
     "vol_index": "VXN"
   }
 }
