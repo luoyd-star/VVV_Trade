@@ -126,3 +126,49 @@ def test_capacity_covers_current_universe_with_margin():
 def test_capacity_reports_shortfall_when_universe_grows():
     cap = t.build_capacity(10_000)
     assert not cap["ok"] and cap["margin_pct"] < 0
+
+
+def test_round_tops_up_to_batch_when_group_is_short(monkeypatch):
+    """本组不足一批时必须用其余缺失品种补满——否则容量白白浪费。
+
+    实测触发：第0组只剩 4 个待建就只做了 4 个，而同时还有 41 个在等、
+    BUILD_BATCH 是 16。分组换来的是确定性，不该同时换来吞吐损失。
+    """
+    import collector
+    from regime import calendar_nyse, moomoo_iv, stock_iv_term
+
+    class Ctx:
+        def close(self):
+            pass
+
+    import sqlite3
+    from regime import storage
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(storage._SCHEMA)
+
+    syms = [f"S{i}-USDT" for i in range(60)]
+    seen = []
+    # 只有第 0 组的头两个还缺；其余组大量缺失
+    group0 = stock_iv_term.build_group(syms, 0)
+    done = {s: {t: {} for t in stock_iv_term.TARGETS} for s in group0[2:]}
+
+    monkeypatch.setattr(calendar_nyse, "is_rth", lambda now: True)
+    monkeypatch.setattr(moomoo_iv, "opend_alive", lambda: True)
+    monkeypatch.setattr(moomoo_iv, "open_ctx", lambda: Ctx())
+    monkeypatch.setattr(collector, "_should", lambda *a: True)
+    monkeypatch.setattr(collector.instruments, "get",
+                        lambda symbol: {"class": "us_stock_perp"})
+    monkeypatch.setattr(stock_iv_term, "load_codes_cache", lambda conn: done)
+
+    def build(ctx, symbols, existing=None, skip=None):
+        seen.append(list(symbols))
+        return dict(existing or {}), []
+
+    monkeypatch.setattr(stock_iv_term, "build_codes", build)
+    collector.sync_stock_iv_term(conn, syms)
+
+    todo = seen[0]
+    assert len(todo) == stock_iv_term.BUILD_BATCH, (
+        f"本组只剩 2 个就该补满到 {stock_iv_term.BUILD_BATCH}，实得 {len(todo)}")
+    # 本组的缺失品种必须排在最前（分组仍是主序）
+    assert todo[:2] == group0[:2], "补位不得打乱分组的主序"

@@ -248,8 +248,13 @@ def sync_stock_iv_term(conn, symbols) -> tuple:
                 round_idx = 0
             storage.set_meta(conn, round_key, str(round_idx + 1))
             group = [s for s in stock_iv_term.build_group(us, round_idx) if s in missing]
-            # 本组已建完就不空转：把本轮让给任何仍缺失的品种（确定性分组 + 机会补位）
-            todo = group or missing
+            # 确定性分组 + 机会补位：本组保证每个品种有可预期的槽位，但本组不足
+            # 一批时必须用其余缺失品种补满，否则容量白白浪费——实测第0组只剩 4 个
+            # 待建就只做 4 个，而同时还有 41 个在等、BUILD_BATCH 明明是 16。
+            todo = list(group)
+            if len(todo) < stock_iv_term.BUILD_BATCH:
+                todo += [s for s in missing if s not in set(todo)][
+                    : stock_iv_term.BUILD_BATCH - len(todo)]
             codes, fails = stock_iv_term.build_codes(
                 ctx, todo, existing=cached, skip=blocked,
             )
