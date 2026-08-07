@@ -341,10 +341,16 @@ def test_window_span_description_is_visible_on_3d_card_and_is_literal_text():
     assert _elements(result["metrics"], "script") == []
 
 
-def test_30d_card_is_full_width_and_3d_stays_beside_leverage_card():
+def test_3d_and_30d_volatility_cards_share_the_same_half_width_row():
     index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
-    assert '<div class="card span12">\n      <div class="card-h"><h3>IV vs RV30' in index
-    evidence = index.split('<!-- ② 证据层', 1)[1].split('<!-- 30d 制度层', 1)[0]
-    assert 'IV vs RV3' in evidence and '持仓与杠杆' in evidence
-    assert 'class="col span4"' in evidence
+    risk = index.split('<!-- 第 2 屏', 1)[1].split('<!-- 第 3 屏', 1)[0]
+    vol_start = risk.index('<div class="row volatility-row">')
+    next_row = risk.index('<div class="row">', vol_start)
+    volatility_row = risk[vol_start:next_row]
+
+    assert 'class="card volatility-card span6"' in volatility_row
+    assert volatility_row.count('class="card volatility-card span6"') == 2
+    assert 'IV vs RV3' in volatility_row and 'IV vs RV30' in volatility_row
+    assert '持仓与杠杆' in risk[next_row:]
+    assert 'span8' not in index and 'span9' not in index

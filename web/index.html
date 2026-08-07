@@ -6,38 +6,6 @@
 <title>VVV 市场状态面板</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
-<style>
-  .policy-section { margin-top: 14px; }
-  .policy-top { display: flex; align-items: center; flex-wrap: wrap; gap: 9px;
-                padding: 5px 0 12px; border-bottom: 1px solid var(--grid); }
-  .policy-conclusion { font-size: var(--fs-title); font-weight: 650; color: var(--ink); }
-  .policy-table tr.matched td { background: rgba(56,97,251,.08); }
-  .policy-table tr.ineligible { opacity: .5; }
-  .policy-table .yes { color: var(--accent); font-weight: 650; }
-  .policy-table .no { color: var(--muted); }
-  .policy-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-                        gap: 14px; padding-top: 13px; }
-  .policy-detail { min-width: 0; padding: 10px 12px; background: var(--card2);
-                   border: 1px solid var(--grid); }
-  .policy-detail b { display: block; margin-bottom: 6px; font-size: var(--fs-lbl);
-                     letter-spacing: .5px; }
-  .policy-detail div { color: var(--sub); font-size: 12px; line-height: 1.55; }
-  .policy-notes { margin: 0; padding-left: 17px; }
-  .policy-degraded { padding-top: 8px; color: var(--muted); font-size: var(--fs-lbl); }
-  .vol-metrics { margin: 0 0 8px; border-top: 1px solid var(--grid); }
-  .vol-metrics summary { cursor: pointer; color: var(--sub); font-size: var(--fs-lbl);
-                         padding: 6px 0; user-select: none; }
-  .vol-metrics[open] summary { border-bottom: 1px solid var(--grid); }
-  .vol-metrics .tablewrap { max-height: 210px; overflow-y: auto; }
-  .vol-metrics table { white-space: normal; }
-  .vol-metrics th, .vol-metrics td { padding: 4px 6px; }
-  .vol-metrics th:nth-child(2), .vol-metrics td:nth-child(2),
-  .vol-metrics th:nth-child(3), .vol-metrics td:nth-child(3) { white-space: nowrap; }
-  .vol-metrics th:last-child, .vol-metrics td:last-child { text-align: left; }
-  .vol-metrics .rank-high { color: var(--accent); font-weight: 600; }
-  .vol-metrics .rank-low { color: var(--chop); font-weight: 600; }
-  @media (max-width: 800px) { .policy-detail-grid { grid-template-columns: 1fr; } }
-</style>
 </head>
 <body>
 <header>
@@ -72,146 +40,166 @@
 <main>
   <div class="banner" id="banner" hidden></div>
 
-  <!-- ① 结论板：三周期状态 / 波动率是否极值 / 有没有在酝酿切换 -->
-  <section class="board">
-    <div class="board-states" id="stateCards"></div>
-    <div class="board-lower">
-      <div>
-        <div class="board-lbl">波动率分位 · ATR &lt;0.30 与 BBW &lt;0.15 共判挤压 · 高波仅 ATR &gt;0.85</div>
-        <div class="ranks" id="volRanks"></div>
-      </div>
-      <div>
-        <div class="board-lbl">待确认切换与原始树边界</div>
-        <div class="alerts" id="alerts"></div>
+  <!-- 第 0 屏：先给结论和门槛，不滚动即可读完。 -->
+  <section class="screen decision-screen">
+    <div class="screen-head">
+      <span class="screen-index">CONCLUSION</span>
+      <h2>结论</h2>
+      <p>现在该做什么，卡在位置、共振还是风险门。</p>
+    </div>
+    <div class="row">
+      <section class="board span12">
+        <div class="board-states" id="stateCards"></div>
+        <div class="board-lower">
+          <div>
+            <div class="board-lbl">① 定状态 · ATR &lt;0.30 与 BBW &lt;0.15 共判挤压 · 高波仅 ATR &gt;0.85（历史见第 2 屏）</div>
+            <div class="ranks" id="volRanks"></div>
+          </div>
+          <div>
+            <div class="board-lbl">门槛 · 待确认切换与原始树边界</div>
+            <div class="alerts" id="alerts"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="row">
+      <div class="card policy-card span12">
+        <div class="card-h">
+          <h3>政策判断 <span class="sub">① 4h 状态 → ② 4h 位置 → ③ 4h 主票 + 1d/1h 辅助</span></h3>
+          <span class="sub" id="policyMeta">测量中…</span>
+        </div>
+        <div class="policy-top">
+          <span class="policy-conclusion" id="policyConclusion">建议关注 · 测量中…</span>
+          <span class="badge" id="policySignal">共振不可判定</span>
+        </div>
+        <div class="tablewrap policy-table-scroll">
+          <table class="policy-table" id="policyZoneTable">
+            <thead><tr>
+              <th>距最近已收线 4h 收盘价 ATR</th><th>区间 [lo, hi]</th><th>来源</th><th>枢轴反转次数</th>
+              <th>当前角色</th><th>eligible</th>
+            </tr></thead>
+            <tbody id="policyZoneRows"><tr><td colspan="6">测量中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="policy-detail-grid">
+          <div class="policy-detail"><b>② APPROACH 路径</b><div id="policyApproach">—</div></div>
+          <div class="policy-detail"><b>④ 波动率 / 事件</b><div id="policyVolNotes">—</div></div>
+          <div class="policy-detail"><b>④ 止损宽度</b><div id="policyStop">—</div></div>
+        </div>
+        <div class="policy-degraded" id="policyDegraded"></div>
       </div>
     </div>
   </section>
 
-  <!-- ①b 政策判断：把总览结论拆回可审计的位置、信号、路径与风险依据 -->
-  <section class="row policy-section">
-    <div class="card span12">
-      <div class="card-h">
-        <h3>政策判断 <span class="sub">4h 决策 · 1d 底座 · 位置 + 信号共振</span></h3>
-        <span class="sub" id="policyMeta">测量中…</span>
+  <!-- 第 1 屏：①②③ 共享一张大图，再用确认态时间线校验。 -->
+  <section class="screen evidence-screen">
+    <div class="screen-head">
+      <span class="screen-index">EVIDENCE</span>
+      <h2>① 定状态 · ② 定位置 · ③ 找共振</h2>
+      <p>4h 关键位区间与 cRSI / VWAP 共图，1d / 4h / 1h 时间线作辅助证据。</p>
+    </div>
+    <div class="row">
+      <div class="card price-card span12">
+        <div class="card-h">
+          <h3>价格结构 + cRSI + VWAP <span class="sub" id="priceMeta"></span></h3>
+          <div class="tfpick" id="tfPicker"></div>
+        </div>
+        <div class="legend" id="priceLegend"></div>
+        <div id="priceChart" class="chart tall"></div>
       </div>
-      <div class="policy-top">
-        <span class="policy-conclusion" id="policyConclusion">建议关注 · 测量中…</span>
-        <span class="badge" id="policySignal">共振不可判定</span>
+    </div>
+    <div class="row">
+      <div class="card timeline-card span12">
+        <div class="card-h">
+          <h3>状态时间线 <span class="sub">walk-forward 确认态</span></h3>
+          <div class="legend" id="stripLegend"></div>
+        </div>
+        <div id="strips"></div>
       </div>
-      <div class="tablewrap">
-        <table class="policy-table" id="policyZoneTable">
-          <thead><tr>
-            <th>距最近已收线 4h 收盘价 ATR</th><th>区间 [lo, hi]</th><th>来源</th><th>枢轴反转次数</th>
-            <th>当前角色</th><th>eligible</th>
-          </tr></thead>
-          <tbody id="policyZoneRows"><tr><td colspan="6">测量中…</td></tr></tbody>
-        </table>
-      </div>
-      <div class="policy-detail-grid">
-        <div class="policy-detail"><b>APPROACH 路径</b><div id="policyApproach">—</div></div>
-        <div class="policy-detail"><b>波动率提示</b><div id="policyVolNotes">—</div></div>
-        <div class="policy-detail"><b>止损宽度校验</b><div id="policyStop">—</div></div>
-      </div>
-      <div class="policy-degraded" id="policyDegraded"></div>
     </div>
   </section>
 
-  <!-- ② 证据层：主图 + 波动率 / 持仓 -->
-  <section class="row">
-    <div class="card span8">
-      <div class="card-h">
-        <h3>价格结构 + cRSI + VWAP <span class="sub" id="priceMeta"></span></h3>
-        <div class="tfpick" id="tfPicker"></div>
-      </div>
-      <div class="legend" id="priceLegend"></div>
-      <div id="priceChart" class="chart tall"></div>
+  <!-- 第 2 屏：④ 环境与风控。3d/30d 波动率必须相邻，不再被持仓卡打断。 -->
+  <section class="screen risk-screen">
+    <div class="screen-head">
+      <span class="screen-index">RISK</span>
+      <h2>④ 风控与警告</h2>
+      <p>短期持仓保险、30d 波动制度、杠杆环境与 ATR/BBW 分位对照。</p>
     </div>
-    <div class="col span4">
-      <!-- 3d 持仓前端独立成卡：RV3 尖峰（崩盘日可到 90%+）与 30d 序列同轴会把后者压平 -->
-      <div class="card">
+    <div class="row volatility-row">
+      <div class="card volatility-card span6">
         <div class="card-h"><h3>IV vs RV3 <span class="sub">3d 持仓前端</span></h3><span class="sub" id="iv3Meta"></span></div>
         <div id="iv3Metrics"></div>
         <div id="iv3Chart" class="chart iv"></div>
       </div>
-      <div class="card">
+      <div class="card volatility-card span6">
+        <div class="card-h"><h3>IV vs RV30 <span class="sub">30d 制度层</span></h3><span class="sub" id="dvolMeta"></span></div>
+        <div id="dvolMetrics"></div>
+        <div id="dvolChart" class="chart iv"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="card span6">
         <div class="card-h"><h3>持仓与杠杆（Binance 永续）</h3><span class="sub" id="derivMeta"></span></div>
         <div class="kv2" id="derivInfo"></div>
         <div id="derivChart" class="chart short"></div>
       </div>
-    </div>
-  </section>
-
-  <!-- 30d 制度层同时承载主 IV、RV、指数锚、EMA 与动态带；整行宽度避免标签/曲线争抢窄画布。 -->
-  <section class="row">
-    <div class="card span12">
-      <div class="card-h"><h3>IV vs RV30 <span class="sub">制度层</span></h3><span class="sub" id="dvolMeta"></span></div>
-      <div id="dvolMetrics"></div>
-      <div id="dvolChart" class="chart iv"></div>
-    </div>
-  </section>
-
-  <!-- ③ 历史：时间线与翻转合成一张卡 -->
-  <section class="row">
-    <div class="card span12">
-      <div class="card-h">
-        <h3>状态时间线与翻转 <span class="sub">walk-forward 确认态</span></h3>
-        <div class="legend" id="stripLegend"></div>
-      </div>
-      <div class="hist">
-        <div id="strips"></div>
-        <!-- 翻转明细默认折叠：横向时间线本身已可见状态变化，逐条表只在追查时才需要；
-             后端先排除 1h 噪音，再返回最近 40 条 4h/1d 翻转 -->
-        <details class="flips-box">
-          <summary id="flipsSummary">翻转明细</summary>
-          <div class="tablewrap"><table id="flipTable"></table></div>
-        </details>
+      <div class="card span6">
+        <div class="card-h"><h3>ATR / BBW 分位历史 <span class="sub">当前周期</span></h3><span class="sub">挤压 ATR 0.30 + BBW 0.15 · 高波仅 ATR 0.85</span></div>
+        <div id="volRankChart" class="chart half"></div>
       </div>
     </div>
   </section>
 
-  <!-- ③b 跨资产耦合雷达（M3 诊断层，非交易信号）：默认折叠——耦合课题暂停投入中，
-       大矩阵占页高；展开状态记 localStorage，用户开过就保持开 -->
-  <section class="row">
-    <div class="card span12">
-      <details class="coup-box" id="coupBox">
-        <summary>
-          <span class="coup-t">跨资产耦合雷达</span>
-          <span class="sub" id="coupMeta"></span>
-          <span class="sub">诊断输出 · 阈值为先验（校准中）· 不构成方向信号 · 点击展开</span>
-        </summary>
-        <div id="coupBody" class="coup"></div>
-        <div id="coupMatrix" class="chart matrix"></div>
-      </details>
+  <!-- 第 3 屏：审计项默认全折叠；大表和大矩阵只在卡内滚动。 -->
+  <section class="screen audit-screen">
+    <div class="screen-head">
+      <span class="screen-index">AUDIT</span>
+      <h2>审计与运维</h2>
+      <p>特征原值、状态翻转、跨资产耦合与采集器仅在追查时展开。</p>
     </div>
-  </section>
-
-  <!-- ④ 明细与运维：默认折叠 -->
-  <details class="fold" id="detail">
-    <summary><b>特征明细与运维</b><span class="sub">26 项特征 · ATR/BBW 分位历史 · 采集器</span><span class="foldhint"></span></summary>
-    <div class="fold-body">
-      <div class="row">
-        <div class="card span9">
-          <div class="card-h"><h3>特征明细</h3><span class="sub">按支柱分组 · 完整原始值在 regime_history 审计快照</span></div>
-          <div class="tablewrap"><table id="featTable"></table></div>
+    <div class="row audit-grid">
+      <details class="card audit-card fold span12" id="detail">
+        <summary><b>特征明细</b><span class="sub">26 项特征 · 按周期与支柱分组</span></summary>
+        <div class="audit-body">
+          <div class="card-h"><h3>特征明细</h3><span class="sub">完整原始值在 regime_history 审计快照</span></div>
+          <div class="tablewrap audit-scroll feat-scroll"><table id="featTable"></table></div>
         </div>
-        <div class="card span3">
-          <div class="card-h"><h3>采集器</h3><span id="colStat" class="badge">--</span></div>
-          <div id="colInfo" class="kv"></div>
+      </details>
+
+      <details class="card audit-card flips-box span6">
+        <summary id="flipsSummary">翻转明细</summary>
+        <div class="audit-body">
+          <div class="tablewrap audit-scroll"><table id="flipTable"></table></div>
+        </div>
+      </details>
+
+      <details class="card audit-card coup-box span6" id="coupBox">
+        <summary>
+          <span class="coup-t">跨资产耦合</span>
+          <span class="sub" id="coupMeta"></span>
+          <span class="summary-hint">诊断输出 · 非方向信号</span>
+        </summary>
+        <div class="audit-body">
+          <div id="coupBody" class="coup"></div>
+          <div class="audit-scroll matrix-scroll"><div id="coupMatrix" class="chart matrix"></div></div>
+        </div>
+      </details>
+
+      <details class="card audit-card collector-box span12">
+        <summary><b>采集器</b><span id="colStat" class="badge">--</span><span class="sub">健康、表计数与日志</span></summary>
+        <div class="audit-body collector-grid">
+          <div id="colInfo" class="kv collector-info"></div>
           <details class="count-box">
             <summary id="colCountsSummary">全部业务表</summary>
             <div id="colCountsAll" class="kv count-kv"></div>
           </details>
           <pre id="colLog" class="log"></pre>
         </div>
-      </div>
-      <div class="row">
-        <div class="card span12">
-          <div class="card-h"><h3>ATR / BBW 分位历史（当前周期）</h3><span class="sub">挤压：ATR 0.30 + BBW 0.15 · 高波：仅 ATR 0.85</span></div>
-          <div id="volRankChart" class="chart half"></div>
-        </div>
-      </div>
+      </details>
     </div>
-  </details>
+  </section>
 
   <footer>数据源 Deribit / OKX / Binance（含期权）/ moomoo OpenAPI（个股IV）/ CBOE（VIX族）· 时间均为 UTC · 研究工具，不构成投资建议</footer>
 </main>
