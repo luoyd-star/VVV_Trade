@@ -27,17 +27,28 @@ const S = {
   hermes: { busy: false, lastId: 0, syncSeq: 0 },
 };
 const $ = (id) => document.getElementById(id);
-// 服务端字符串进 innerHTML 前必须过这里：正常后端只产枚举值，但库被污染或
-// payload 异常时，未知 state 原样回退进 HTML 就是存储型 XSS 的入口
+// ECharts tooltip 的 formatter 仍返回 HTML 字符串，因此只在这个边界转义。
+// 页面 DOM 不消费 HTML 字符串；payload 文本统一用 createElement + textContent。
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
   (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const hasEcharts = typeof echarts !== 'undefined';
+
+function makeEl(tag, className = '', text = null) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text != null) el.textContent = String(text);
+  return el;
+}
+
+function clearEl(el) {
+  if (el) el.replaceChildren();
+}
 
 // 中文标签只消费 dashboard.states_map；前端仅保留经过可视化校验的状态颜色。
 function stateMeta(state) {
   const local = SM[state] || {};
   const labels = (S.data && S.data.states_map) || {};
-  return { label: esc(labels[state] || state), color: local.color || COL.muted };
+  return { label: String(labels[state] || state || '—'), color: local.color || COL.muted };
 }
 
 /* ---------- 格式化 ---------- */
@@ -106,12 +117,12 @@ async function loadSymbols() {
 function renderSymList() {
   const q = ($('symSearch').value || '').trim().toUpperCase();
   const host = $('symList');
-  host.innerHTML = '';
+  clearEl(host);
   (S.symbols || []).filter((s) => !q || s.toUpperCase().includes(q)).forEach((sym) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = sym === S.symbol ? 'active' : '';
-    b.innerHTML = `<span class="sym">${esc(sym)}</span>`;
+    b.appendChild(makeEl('span', 'sym', sym));
     b.onclick = () => {
       S.symbol = sym;
       syncSymbolUrl(sym);
@@ -121,7 +132,11 @@ function renderSymList() {
     };
     host.appendChild(b);
   });
-  if (!host.children.length) host.innerHTML = '<div class="sub" style="padding:6px">无匹配品种</div>';
+  if (!host.children.length) {
+    const empty = makeEl('div', 'sub', '无匹配品种');
+    empty.style.padding = '6px';
+    host.appendChild(empty);
+  }
 }
 
 // 顶栏按钮：名称 + 1d 状态色圆点（数据到了才有颜色）
@@ -174,32 +189,49 @@ async function loadCoupling() {
   const host = $('coupBody');
   if (!host || !j) return;
   COUP_LAST = j;
-  const parts = [];
+  clearEl(host);
   const pn = { all247: '24/7（加密+商品）', usrth: '美股RTH', cross: '跨类共同RTH' };
-  const pl = Object.entries(j.panels || {}).map(([k, p]) => {
+  const panels = makeEl('div', 'coup-panels');
+  Object.entries(j.panels || {}).forEach(([k, p]) => {
     const g = p.global;
     const ins = (p.status_counts || {}).INSUFFICIENT || 0;
-    return `<span class="li"><b>${pn[k] || k}</b> ${g
+    const item = makeEl('span', 'li');
+    item.appendChild(makeEl('b', '', pn[k] || k));
+    item.appendChild(document.createTextNode(` ${g
       ? `λ1/N ${fmtN(g.market_mode, 2)} · 均值ρ ${fmtN(g.mean_corr, 2)}`
-      : '—'}${ins ? ` · 样本不足对 ${ins}` : ''}</span>`;
-  }).join('');
-  parts.push(`<div class="coup-panels">${pl}</div>`);
+      : '—'}${ins ? ` · 样本不足对 ${ins}` : ''}`));
+    panels.appendChild(item);
+  });
+  host.appendChild(panels);
   if ((j.pairs || []).length) {
-    parts.push('<div class="coup-pairs">' + j.pairs.map((p) => {
-      const m = CSTATE[p.state] || { label: esc(p.state), color: COL.muted };
-      return `<span class="cchip" style="border-color:${m.color}">
-        <i style="background:${m.color}"></i>${esc(p.a.split('-')[0])}×${esc(p.b.split('-')[0])}
-        <b>${fmtN(p.rho_fast, 2, true)}</b> ${m.label}</span>`;
-    }).join('') + '</div>');
+    const pairs = makeEl('div', 'coup-pairs');
+    j.pairs.forEach((p) => {
+      const m = CSTATE[p.state] || { label: String(p.state), color: COL.muted };
+      const chip = makeEl('span', 'cchip');
+      chip.style.borderColor = m.color;
+      const dot = makeEl('i');
+      dot.style.background = m.color;
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(`${String(p.a).split('-')[0]}×${String(p.b).split('-')[0]} `));
+      chip.appendChild(makeEl('b', '', fmtN(p.rho_fast, 2, true)));
+      chip.appendChild(document.createTextNode(` ${m.label}`));
+      pairs.appendChild(chip);
+    });
+    host.appendChild(pairs);
   }
   if ((j.blocks || []).length) {
-    parts.push('<div class="coup-blocks">' + j.blocks.map((b) =>
-      `<span class="li">${esc(b.block_a)}×${esc(b.block_b)}：${b.votes}/3票 `
-      + `<b>${b.state === 'coupled' ? '耦合' : '未耦合'}</b>`
-      + `（中位ρ ${fmtN(b.median_rho_slow, 2, true)} · coupled占比 ${fmtN(b.coupled_share, 2)}）</span>`
-    ).join('') + '</div>');
+    const blocks = makeEl('div', 'coup-blocks');
+    j.blocks.forEach((b) => {
+      const item = makeEl('span', 'li');
+      item.appendChild(document.createTextNode(`${b.block_a}×${b.block_b}：${b.votes}/3票 `));
+      item.appendChild(makeEl('b', '', b.state === 'coupled' ? '耦合' : '未耦合'));
+      item.appendChild(document.createTextNode(
+        `（中位ρ ${fmtN(b.median_rho_slow, 2, true)} · coupled占比 ${fmtN(b.coupled_share, 2)}）`,
+      ));
+      blocks.appendChild(item);
+    });
+    host.appendChild(blocks);
   }
-  host.innerHTML = parts.join('');
   $('coupMeta').textContent =
     `阈值代 ${j.threshold_version} · 更新 ${ago(j.updated_at)}`;
   // 折叠时跳过矩阵：display:none 容器里 ECharts 初始化是 0×0，展开时 toggle 补画
@@ -335,19 +367,19 @@ function renderMktBadge() {
 function renderStateCards() {
   const d = S.data;
   const host = $('stateCards');
-  host.innerHTML = '';
+  clearEl(host);
   TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
     const t = d.tfs[tf];
     const meta = stateMeta(t.state);
     const f = t.features;
     const cl = (t.crsi || {}).last || {};
 
-    let warn = '';
+    let warnTitle = '';
     if (t.health && (t.health.stale || t.health.warmup)) {
       const tips = [];
       if (t.health.stale) tips.push(`数据陈旧：最后收线 ${t.health.last_close_age_min} 分钟前`);
       if (t.health.warmup) tips.push(`预热中：仅 ${t.health.bars} 根，分位参照期不足`);
-      warn = `<span class="warn-ico" title="${tips.join('；')}">⚠️</span>`;
+      warnTitle = tips.join('；');
     }
 
     const diverged = t.raw_state && t.raw_state !== t.state;
@@ -356,30 +388,32 @@ function renderStateCards() {
     const dyn = [];
     if (t.preview) {
       const pm = stateMeta(t.preview.state);
-      dyn.push(`预览(未收线) <b>${pm.label}</b> ${fmtN(t.preview.confidence, 2)}`);
+      dyn.push({ prefix: '预览(未收线) ', strong: pm.label,
+        suffix: ` ${fmtN(t.preview.confidence, 2)}` });
     }
     if (t.candidate) {
       const cm = stateMeta(t.candidate.state);
-      dyn.push(`酝酿 <b>${cm.label}</b> ${t.candidate.count}/${t.candidate.need}`
-        + (t.candidate.gated ? '（事件窗·门槛+1）' : (t.candidate.event_win ? '（事件窗）' : ''))
-        + (diverged && t.candidate.state === t.raw_state ? ` · ${confTxt}` : ''));
+      dyn.push({ prefix: '酝酿 ', strong: cm.label,
+        suffix: ` ${t.candidate.count}/${t.candidate.need}`
+          + (t.candidate.gated ? '（事件窗·门槛+1）' : (t.candidate.event_win ? '（事件窗）' : ''))
+          + (diverged && t.candidate.state === t.raw_state ? ` · ${confTxt}` : '') });
     }
     if (diverged && !(t.candidate && t.candidate.state === t.raw_state)) {
       const rm = stateMeta(t.raw_state);
-      dyn.push(`原始判定 <b>${rm.label}</b> ${confTxt}`);
+      dyn.push({ prefix: '原始判定 ', strong: rm.label, suffix: ` ${confTxt}` });
     }
     const mg = (f.margin || {});
     if (mg.margin != null && mg.margin < 0.15) {
-      dyn.push(`⚡原始树边界 m=${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
+      dyn.push({ text: `⚡原始树边界 m=${fmtN(mg.margin, 2)}（${mg.nearest}）` });
     }
-    if (!dyn.length) dyn.push('稳定 · 无待确认切换'
-      + (mg.margin != null ? ` · 原始树 margin ${fmtN(mg.margin, 2)}` : ''));
+    if (!dyn.length) dyn.push({ text: '稳定 · 无待确认切换'
+      + (mg.margin != null ? ` · 原始树 margin ${fmtN(mg.margin, 2)}` : '') });
 
     // 标记（原 chips）压成一行灰字，优先级前 4 个
     const flags = [];
     if (f.volatility.squeeze) flags.push('SQZ 挤压');
     if (f.volatility.high_vol) flags.push('HV 高波');
-    if (cl.zone && cl.zone !== '带内') flags.push(`cRSI ${esc(cl.zone)}（${fmtN(cl.pos, 0)}%）`);
+    if (cl.zone && cl.zone !== '带内') flags.push(`cRSI ${cl.zone}（${fmtN(cl.pos, 0)}%）`);
     const dvg = (t.crsi || {}).last_divergence;
     if (dvg && dvg.bars_ago <= 10) flags.push(`${dvg.kind === 'bull' ? '看涨' : '看跌'}背离 ${dvg.bars_ago}根前`);
     if (f.volume.breakout) {
@@ -392,27 +426,57 @@ function renderStateCards() {
     const dev = vw && vw.dev != null ? vw.dev : null;
     const w = dev == null ? 0 : Math.min(Math.abs(dev) / 3, 1) * 50;
     const left = dev == null ? 50 : (dev >= 0 ? 50 : 50 - w);
-    const vwapHtml = dev == null
-      ? '<span class="muted">VWAP 偏离 —（量流未就绪）</span>'
-      : `<span class="bipolar"><u class="zero"></u><u class="n2"></u><u class="p2"></u>
-           <i style="left:${left}%;width:${w}%"></i></span>
-         <span>VWAP 偏离 ${fmtN(dev, 2, true)} ATR`
-        + `${vw.dev_rank != null ? ` · 分位 ${fmtN(vw.dev_rank, 2)}` : ''}`
-        + ` · 币安量 ${vw.win_hours}h 窗</span>`;
-
     const el = document.createElement('div');
     el.className = 'sblock';
-    el.innerHTML = `
-      <div class="sb-top">
-        <span class="tf">${tf}</span>${warn}
-        <span class="sb-conf">${confTxt}</span>
-      </div>
-      <div class="sb-name"><i style="background:${meta.color}"></i><b>${meta.label}</b></div>
-      <div class="sb-dyn">
-        ${dyn.map((x) => `<span>${x}</span>`).join('')}
-        ${flags.length ? `<span class="muted">${flags.slice(0, 4).join(' · ')}</span>` : ''}
-      </div>
-      <div class="sb-vwap">${vwapHtml}</div>`;
+
+    const top = makeEl('div', 'sb-top');
+    top.appendChild(makeEl('span', 'tf', tf));
+    if (warnTitle) {
+      const warn = makeEl('span', 'warn-ico', '⚠️');
+      warn.title = warnTitle;
+      top.appendChild(warn);
+    }
+    top.appendChild(makeEl('span', 'sb-conf', confTxt));
+
+    const name = makeEl('div', 'sb-name');
+    const stateBar = makeEl('i');
+    stateBar.style.background = meta.color;
+    name.appendChild(stateBar);
+    name.appendChild(makeEl('b', '', meta.label));
+
+    const dynamics = makeEl('div', 'sb-dyn');
+    dyn.forEach((line) => {
+      const span = makeEl('span');
+      if (line.text != null) {
+        span.textContent = line.text;
+      } else {
+        span.appendChild(document.createTextNode(line.prefix));
+        span.appendChild(makeEl('b', '', line.strong));
+        span.appendChild(document.createTextNode(line.suffix));
+      }
+      dynamics.appendChild(span);
+    });
+    if (flags.length) dynamics.appendChild(makeEl('span', 'muted', flags.slice(0, 4).join(' · ')));
+
+    const vwapBox = makeEl('div', 'sb-vwap');
+    if (dev == null) {
+      vwapBox.appendChild(makeEl('span', 'muted', 'VWAP 偏离 —（量流未就绪）'));
+    } else {
+      const bipolar = makeEl('span', 'bipolar');
+      bipolar.appendChild(makeEl('u', 'zero'));
+      bipolar.appendChild(makeEl('u', 'n2'));
+      bipolar.appendChild(makeEl('u', 'p2'));
+      const fill = makeEl('i');
+      fill.style.left = `${left}%`;
+      fill.style.width = `${w}%`;
+      bipolar.appendChild(fill);
+      vwapBox.appendChild(bipolar);
+      vwapBox.appendChild(makeEl('span', '', `VWAP 偏离 ${fmtN(dev, 2, true)} ATR`
+        + `${vw.dev_rank != null ? ` · 分位 ${fmtN(vw.dev_rank, 2)}` : ''}`
+        + ` · 币安量 ${vw.win_hours}h 窗`));
+    }
+
+    el.append(top, name, dynamics, vwapBox);
     host.appendChild(el);
   });
   setActiveTab(); // 顶栏圆点跟随 1d 状态色
@@ -474,7 +538,12 @@ function renderPolicy() {
     $('policyConclusion').style.color = '';
     $('policySignal').textContent = '共振不可判定';
     $('policySignal').className = 'badge';
-    rowsHost.innerHTML = '<tr><td colspan="6">关键位不可用</td></tr>';
+    clearEl(rowsHost);
+    const tr = makeEl('tr');
+    const td = makeEl('td', '', '关键位不可用');
+    td.colSpan = 6;
+    tr.appendChild(td);
+    rowsHost.appendChild(tr);
     $('policyApproach').textContent = '路径不可计算';
     $('policyVolNotes').textContent = '暂无可计算提示';
     $('policyStop').textContent = '止损宽度不可计算';
@@ -515,23 +584,39 @@ function renderPolicy() {
 
   const hit = location.zone;
   const zones = p.zones || [];
-  rowsHost.innerHTML = zones.map((zone) => {
+  clearEl(rowsHost);
+  zones.forEach((zone) => {
     const matched = policyZoneMatches(zone, hit);
     const cls = `${matched ? 'matched ' : ''}${zone.eligible ? '' : 'ineligible'}`.trim();
     const role = zone.role_now === 'support' ? '支撑'
       : zone.role_now === 'resistance' ? '压力' : '不可判定';
     const flipped = zone.role_flipped ? ' · 已翻转' : '';
-    const eligible = zone.eligible
-      ? '<span class="yes">是</span>'
-      : '<span class="no" title="当前 regime 未采纳该来源与当前角色的组合">否 · regime/来源不匹配</span>';
-    return `<tr class="${cls}">
-      <td>${fmtN(zone.dist_atr, 2)}</td>
-      <td class="mono">[${fmtPrice(zone.lo)}, ${fmtPrice(zone.hi)}]</td>
-      <td style="text-align:left">${(zone.kinds || []).map(esc).join(' · ') || '—'}</td>
-      <td title="枢轴价位簇成员数；不是静态价格带回扫次数">${zone.touches == null ? '—' : esc(zone.touches)}</td>
-      <td>${role}${flipped}</td><td>${eligible}${matched ? ' · 命中' : ''}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="6">没有可用关键位区间</td></tr>';
+    const tr = makeEl('tr', cls);
+    tr.appendChild(makeEl('td', '', fmtN(zone.dist_atr, 2)));
+    tr.appendChild(makeEl('td', 'mono', `[${fmtPrice(zone.lo)}, ${fmtPrice(zone.hi)}]`));
+    const source = makeEl('td', '', (zone.kinds || []).map(String).join(' · ') || '—');
+    source.style.textAlign = 'left';
+    tr.appendChild(source);
+    const touches = makeEl('td', '', zone.touches == null ? '—' : zone.touches);
+    touches.title = '枢轴价位簇成员数；不是静态价格带回扫次数';
+    tr.appendChild(touches);
+    tr.appendChild(makeEl('td', '', `${role}${flipped}`));
+    const eligibleCell = makeEl('td');
+    const eligible = makeEl('span', zone.eligible ? 'yes' : 'no',
+      zone.eligible ? '是' : '否 · regime/来源不匹配');
+    if (!zone.eligible) eligible.title = '当前 regime 未采纳该来源与当前角色的组合';
+    eligibleCell.appendChild(eligible);
+    if (matched) eligibleCell.appendChild(document.createTextNode(' · 命中'));
+    tr.appendChild(eligibleCell);
+    rowsHost.appendChild(tr);
+  });
+  if (!zones.length) {
+    const tr = makeEl('tr');
+    const td = makeEl('td', '', '没有可用关键位区间');
+    td.colSpan = 6;
+    tr.appendChild(td);
+    rowsHost.appendChild(tr);
+  }
 
   const approachName = {
     from_above: '从区间上方回踩而来',
@@ -545,9 +630,15 @@ function renderPolicy() {
   $('policyApproach').textContent = `${approachName}；${pathCheck}`;
 
   const notes = p.vol_notes || [];
-  $('policyVolNotes').innerHTML = notes.length
-    ? `<ul class="policy-notes">${notes.map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
-    : '暂无可计算的波动率或事件提示';
+  const notesHost = $('policyVolNotes');
+  clearEl(notesHost);
+  if (notes.length) {
+    const list = makeEl('ul', 'policy-notes');
+    notes.forEach((note) => list.appendChild(makeEl('li', '', note)));
+    notesHost.appendChild(list);
+  } else {
+    notesHost.textContent = '暂无可计算的波动率或事件提示';
+  }
 
   const stop = p.stop_check;
   if (stop) {
@@ -579,28 +670,45 @@ function renderVolRanks() {
     items.push({ label: `${tf} BBW`, val: v.bbw_rank, squeezeAt: 0.15, highVolAt: null,
       rule: 'BBW<0.15 为挤压侧条件；高波不看 BBW' });
   });
-  $('volRanks').innerHTML = items.map(({ label, val, squeezeAt, highVolAt, rule }) => {
-    const squeezeMark = squeezeAt === 0.30
-      ? '<u class="t30" title="挤压ATR 0.30"></u>'
-      : '<u class="t15" title="挤压BBW 0.15"></u>';
-    const highVolMark = highVolAt == null ? '' : '<u class="t85" title="高波ATR 0.85"></u>';
-    if (val == null) {
-      return `<div class="rank" title="${rule}"><div class="rank-h"><span>${label}</span><b class="muted">—</b></div>
-              <div class="bar">${squeezeMark}${highVolMark}</div></div>`;
+  const host = $('volRanks');
+  clearEl(host);
+  items.forEach(({ label, val, squeezeAt, highVolAt, rule }) => {
+    const rank = makeEl('div', 'rank');
+    rank.title = rule;
+    const head = makeEl('div', 'rank-h');
+    head.appendChild(makeEl('span', '', label));
+    const value = makeEl('b', val == null ? 'muted' : '', val == null ? '—' : fmtN(val, 2));
+    const color = val == null ? '' : (val < squeezeAt ? 'var(--squeeze)'
+      : (highVolAt != null && val > highVolAt ? 'var(--chop)' : 'var(--accent)'));
+    if (color) value.style.color = color;
+    head.appendChild(value);
+    rank.appendChild(head);
+    const bar = makeEl('div', 'bar');
+    if (val != null) {
+      const fill = makeEl('i');
+      fill.style.width = `${Math.round(val * 100)}%`;
+      fill.style.background = color;
+      bar.appendChild(fill);
     }
-    const c = val < squeezeAt ? 'var(--squeeze)'
-      : (highVolAt != null && val > highVolAt ? 'var(--chop)' : 'var(--accent)');
-    return `<div class="rank" title="${rule}">
-      <div class="rank-h"><span>${label}</span><b style="color:${c}">${fmtN(val, 2)}</b></div>
-      <div class="bar"><i style="width:${Math.round(val * 100)}%;background:${c}"></i>
-        ${squeezeMark}${highVolMark}</div></div>`;
-  }).join('');
+    const squeezeMark = makeEl('u', squeezeAt === 0.30 ? 't30' : 't15');
+    squeezeMark.title = squeezeAt === 0.30 ? '挤压ATR 0.30' : '挤压BBW 0.15';
+    bar.appendChild(squeezeMark);
+    if (highVolAt != null) {
+      const highVolMark = makeEl('u', 't85');
+      highVolMark.title = '高波ATR 0.85';
+      bar.appendChild(highVolMark);
+    }
+    rank.appendChild(bar);
+    host.appendChild(rank);
+  });
 }
 
 // 每个周期一行：酝酿中的候选 > 未收线预览 > 原始树边界 > 数据健康 > 稳定
 function renderAlerts() {
   const d = S.data;
-  const rows = TF_ORDER.filter((tf) => d.tfs[tf]).map((tf) => {
+  const host = $('alerts');
+  clearEl(host);
+  TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
     const t = d.tfs[tf];
     const mg = (t.features.margin || {});
     const bits = [];
@@ -617,7 +725,7 @@ function renderAlerts() {
       cls = cls || 'warn';
     }
     if (mg.margin != null && mg.margin < 0.15) {
-      bits.push(`原始树 margin ${fmtN(mg.margin, 2)}（${esc(mg.nearest)}）`);
+      bits.push(`原始树 margin ${fmtN(mg.margin, 2)}（${mg.nearest}）`);
       cls = cls || 'warn';
     }
     if (t.health && t.health.stale) {
@@ -631,14 +739,16 @@ function renderAlerts() {
       bits.push('稳定 · 无待确认切换'
         + (mg.margin != null ? ` · 原始树 margin ${fmtN(mg.margin, 2)}` : ''));
     }
-    return `<div class="alert ${cls}"><span class="tf">${tf}</span><span>${bits.join(' · ')}</span></div>`;
+    const row = makeEl('div', `alert ${cls}`.trim());
+    row.appendChild(makeEl('span', 'tf', tf));
+    row.appendChild(makeEl('span', '', bits.join(' · ')));
+    host.appendChild(row);
   });
-  $('alerts').innerHTML = rows.join('');
 }
 
 function renderTfPicker() {
   const host = $('tfPicker');
-  host.innerHTML = '';
+  clearEl(host);
   TF_ORDER.filter((tf) => S.data.tfs[tf]).forEach((tf) => {
     const b = document.createElement('button');
     b.textContent = tf;
@@ -664,18 +774,27 @@ function renderPriceChart() {
     `${S.symbol}${disp ? `（${disp}）` : ''} · ${S.tf} · ${t.candles.length} 根 · 源 ${t.source || '—'} · UTC`
     + (S.tf === '4h' ? '' : ' · 关键位按 4h 计算，本周期不显示');
   const legend = $('priceLegend');
-  legend.innerHTML = Object.keys(SM).map((k) => {
+  clearEl(legend);
+  const addLegend = (label, style = {}) => {
+    const item = makeEl('span', 'li');
+    const swatch = makeEl('span', 'sw');
+    Object.assign(swatch.style, style);
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(label));
+    legend.appendChild(item);
+  };
+  Object.keys(SM).forEach((k) => {
     const m = stateMeta(k);
-    return (
-    `<span class="li"><span class="sw" style="background:${m.color};opacity:.5"></span>${m.label}</span>`
-    );
-  }).join('') + `<span class="li"><span class="sw" style="background:${COL.blue}"></span>EMA50 / cRSI</span>
-    <span class="li"><span class="sw" style="background:${COL.azure}"></span>cRSI 自适应带</span>
-    <span class="li"><span class="sw" style="background:${COL.muted}"></span>H/L 摆动点 · ●背离</span>
-    <span class="li"><span class="sw" style="background:${COL.ink}"></span>VWAP（币安量）/ 偏离</span>`
-    + (S.tf === '4h' ? `
-    <span class="li"><span class="sw" style="height:0;background:transparent;border-top:2px dashed ${COL.up}"></span>绿虚线=支撑区</span>
-    <span class="li"><span class="sw" style="height:0;background:transparent;border-top:2px dashed ${COL.down}"></span>红虚线=压力区</span>` : '');
+    addLegend(m.label, { background: m.color, opacity: '.5' });
+  });
+  addLegend('EMA50 / cRSI', { background: COL.blue });
+  addLegend('cRSI 自适应带', { background: COL.azure });
+  addLegend('H/L 摆动点 · ●背离', { background: COL.muted });
+  addLegend('VWAP（币安量）/ 偏离', { background: COL.ink });
+  if (S.tf === '4h') {
+    addLegend('绿虚线=支撑区', { height: '0', background: 'transparent', borderTop: `2px dashed ${COL.up}` });
+    addLegend('红虚线=压力区', { height: '0', background: 'transparent', borderTop: `2px dashed ${COL.down}` });
+  }
   const c = chart('priceChart');
   if (!c) return;
 
@@ -735,7 +854,7 @@ function renderPriceChart() {
             ? `VWAP ${fmtPrice(vwSeries[i])}（偏离 ${fmtN(vwDev[i], 2, true)} ATR，币安量 ${vw.win_hours}h窗）`
             : 'VWAP —（量流未就绪）',
           `cRSI ${fmtN(cv, 1)}（带 ${fmtN(cr.db[i], 1)}~${fmtN(cr.ub[i], 1)}${zone}）`,
-          m ? `状态 <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${m.color}"></span> ${m.label}` : '状态 —',
+          m ? `状态 <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${m.color}"></span> ${esc(m.label)}` : '状态 —',
         ].join('<br>');
       },
     },
@@ -1360,7 +1479,7 @@ function renderDeriv() {
   const c = chart('derivChart');
   if (!dr) {
     meta.textContent = '暂无数据（等采集器下一轮）';
-    info.innerHTML = '';
+    clearEl(info);
     if (c) c.clear();
     return;
   }
@@ -1372,7 +1491,7 @@ function renderDeriv() {
   const chg = (v) => (v == null ? '—' : fmtN((Math.exp(v) - 1) * 100, 2, true) + '%');
   const rk = (v) => (v == null ? '' : `（分位 ${fmtN(v, 2)}）`);
   const fundingPeriod = dr.funding_interval_h == null ? '未知周期' : `${dr.funding_interval_h}h`;
-  info.innerHTML = [
+  const metrics = [
     [dr.oi == null ? '—' : Math.round(dr.oi).toLocaleString('en-US'), `OI 张数${rk(dr.oi_rank)}`],
     [chg(dr.oi_change_4h), 'OI Δ4h'],
     [chg(dr.oi_change_24h), 'OI Δ24h'],
@@ -1385,7 +1504,14 @@ function renderDeriv() {
       ? [fmtN(dr.iv30, 1), `个股 iv30${dr.iv30_src === 'cboe' ? '(CBOE影子·短史)'
         : dr.iv30_rank_kind === 'cond' ? '(moomoo·条件分位)' : '(moomoo·原始分位)'}${rk(dr.iv30_rank)}`]
       : [`${dr.span_days}d`, '样本跨度'],
-  ].map(([v, k]) => `<div class="m"><span>${k}</span><b>${v}</b></div>`).join('');
+  ];
+  clearEl(info);
+  metrics.forEach(([v, k]) => {
+    const metric = makeEl('div', 'm');
+    metric.appendChild(makeEl('span', '', k));
+    metric.appendChild(makeEl('b', '', v));
+    info.appendChild(metric);
+  });
   if (!c) return;
   c.setOption({
     animation: false,
@@ -1422,54 +1548,68 @@ function renderDeriv() {
 
 function renderStrips() {
   const host = $('strips');
-  host.innerHTML = '';
-  $('stripLegend').innerHTML = Object.keys(SM).map((k) => {
+  clearEl(host);
+  const legend = $('stripLegend');
+  clearEl(legend);
+  Object.keys(SM).forEach((k) => {
     const m = stateMeta(k);
-    return `<span class="li"><span class="sw" style="background:${m.color}"></span>${m.label}</span>`;
-  }).join('');
+    const item = makeEl('span', 'li');
+    const swatch = makeEl('span', 'sw');
+    swatch.style.background = m.color;
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(m.label));
+    legend.appendChild(item);
+  });
   TF_ORDER.filter((tf) => S.data.tfs[tf]).forEach((tf) => {
     const t = S.data.tfs[tf];
     const N = t.candles.length;
     const row = document.createElement('div');
     row.className = 'strip-row';
-    const segs = t.segments.map((sg) => {
+    row.appendChild(makeEl('span', 'lbl', tf));
+    const track = makeEl('span', 'track');
+    t.segments.forEach((sg) => {
       const m = stateMeta(sg.state);
       const w = ((sg.e - sg.s + 1) / N * 100).toFixed(3);
       const tip = `${tf} · ${m.label} · ${fmtTs(t.candles[sg.s][0], tf)} → ${fmtTs(t.candles[sg.e][0], tf)} UTC`;
-      return `<span class="seg" style="width:${w}%;background:${m.color};opacity:.85" title="${tip}"></span>`;
-    }).join('');
-    row.innerHTML = `<span class="lbl">${tf}</span><span class="track">${segs}</span>`;
+      const seg = makeEl('span', 'seg');
+      seg.style.width = `${w}%`;
+      seg.style.background = m.color;
+      seg.style.opacity = '.85';
+      seg.title = tip;
+      track.appendChild(seg);
+    });
+    row.appendChild(track);
     host.appendChild(row);
     const time = document.createElement('div');
     time.className = 'strip-time';
-    time.innerHTML = `<span>${fmtTs(t.candles[0][0], tf)}</span><span>${fmtTs(t.candles[N - 1][0], tf)} UTC</span>`;
+    time.appendChild(makeEl('span', '', fmtTs(t.candles[0][0], tf)));
+    time.appendChild(makeEl('span', '', `${fmtTs(t.candles[N - 1][0], tf)} UTC`));
     host.appendChild(time);
   });
 }
 
-function stchip(state) {
+function stchipNode(state) {
   const m = stateMeta(state);
-  return `<span class="stchip"><span class="dot" style="background:${m.color}"></span>${m.label}</span>`;
+  const chip = makeEl('span', 'stchip');
+  const dot = makeEl('span', 'dot');
+  dot.style.background = m.color;
+  chip.appendChild(dot);
+  chip.appendChild(document.createTextNode(m.label));
+  return chip;
 }
 
 function renderFeatTable() {
   const d = S.data;
-  // 按支柱分组的两行表头；组首列画左分隔线（gs）
-  const groups = [
-    // conf 属于"原始"列的判定（分歧时"状态"列是迟滞确认态，没有自己的置信度）
-    ['标识', ['TF', '状态', '原始', 'conf(原始)']],
-    ['结构', ['dir', 'ER%', '摆动高', '摆动低']],
-    ['波动率', ['ATR%', 'ATR%ds', 'BBW%', 'RV年化%', '加速度', '下行方差']],
-    ['量能', ['tilt', 'volZ', '突破']],
-    ['cRSI', ['值', '带位%', '区域', '背离']],
-    ['路径几何·影子', ['频率', '主周期', 'τ', 'margin(原始树)', '滞后']],
-  ];
-  const grpRow = groups.map(([g, cols], i) =>
-    `<th class="grp${i ? ' gs' : ''}" colspan="${cols.length}">${g}</th>`).join('');
-  const colRow = groups.map(([, cols], i) =>
-    cols.map((c, j) => `<th class="${i && j === 0 ? 'gs' : ''}">${c}</th>`).join('')).join('');
+  const table = $('featTable');
+  clearEl(table);
+  const thead = makeEl('thead');
+  const head = makeEl('tr');
+  ['周期', '支柱', '特征', '值'].forEach((label) => head.appendChild(makeEl('th', '', label)));
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const tbody = makeEl('tbody');
 
-  const rows = TF_ORDER.filter((tf) => d.tfs[tf]).map((tf) => {
+  TF_ORDER.filter((tf) => d.tfs[tf]).forEach((tf) => {
     const t = d.tfs[tf];
     const f = t.features;
     const b = f.volume.breakout;
@@ -1477,54 +1617,100 @@ function renderFeatTable() {
     const dv = (t.crsi || {}).last_divergence;
     const rawTxt = t.raw_state && t.raw_state !== t.state
       ? stateMeta(t.raw_state).label : '—';
-    // [值, 模式('s'=正负着色/'l'=左对齐), 组首列?]
-    const cells = [
-      [tf], [stchip(t.state), 'l'], [rawTxt], [fmtN(t.confidence, 2)],
-      [fmtN(f.structure.direction, 2, true), 's', 1], [fmtN(f.er_rank, 2)],
-      [fmtPrice(f.structure.swing_high)], [fmtPrice(f.structure.swing_low)],
-      [fmtN(f.volatility.atr_rank, 2), '', 1],
-      [fmtN(f.volatility.atr_rank_ds, 2)], [fmtN(f.volatility.bbw_rank, 2)],
-      [fmtN(f.volatility.rv30_annual_pct, 1)], [fmtN(f.volatility.vol_accel, 2)],
-      [fmtN(f.volatility.downside_share, 2)],
-      [fmtN(f.volume.updown_tilt_20, 2, true), 's', 1], [fmtN(f.volume.vol_z20, 1, true), 's'],
-      [b ? `${b.dir === 'up' ? '↑' : '↓'} v${fmtN(b.vol_rank, 2)}` : '—'],
-      [fmtN(cl.crsi, 1), '', 1], [fmtN(cl.pos, 0)], [cl.zone || '—'],
-      [dv ? `${dv.kind === 'bull' ? '看涨' : '看跌'} ${dv.bars_ago}根前` : '—'],
-      [fmtN((f.pathgeom || {}).chop_freq, 1), '', 1],
-      [(f.pathgeom || {}).dom_period != null ? `${fmtN(f.pathgeom.dom_period, 0)}根` : '—'],
-      [fmtN((f.pathgeom || {}).kendall_tau, 2, true), 's'],
-      [(f.margin || {}).margin != null ? `${fmtN(f.margin.margin, 2)}(${f.margin.nearest})` : '—'],
-      [(f.lag_bars || {}).pathgeom != null ? `~${f.lag_bars.pathgeom}根` : '—'],
+    const signed = (value) => ({ text: value, cls: value.startsWith('+') ? 'pos' : value.startsWith('-') ? 'neg' : '' });
+    const groups = [
+      ['标识', [
+        ['状态', null, stchipNode(t.state)],
+        ['原始态', rawTxt],
+        ['conf(原始)', fmtN(t.confidence, 2)],
+      ]],
+      ['结构', [
+        ['dir', signed(fmtN(f.structure.direction, 2, true))],
+        ['ER%', fmtN(f.er_rank, 2)],
+        ['摆动高', fmtPrice(f.structure.swing_high)],
+        ['摆动低', fmtPrice(f.structure.swing_low)],
+      ]],
+      ['波动率', [
+        ['ATR%', fmtN(f.volatility.atr_rank, 2)],
+        ['ATR%ds', fmtN(f.volatility.atr_rank_ds, 2)],
+        ['BBW%', fmtN(f.volatility.bbw_rank, 2)],
+        ['RV年化%', fmtN(f.volatility.rv30_annual_pct, 1)],
+        ['加速度', fmtN(f.volatility.vol_accel, 2)],
+        ['下行方差', fmtN(f.volatility.downside_share, 2)],
+      ]],
+      ['量能', [
+        ['tilt', signed(fmtN(f.volume.updown_tilt_20, 2, true))],
+        ['volZ', signed(fmtN(f.volume.vol_z20, 1, true))],
+        ['突破', b ? `${b.dir === 'up' ? '↑' : '↓'} v${fmtN(b.vol_rank, 2)}` : '—'],
+      ]],
+      ['cRSI', [
+        ['值', fmtN(cl.crsi, 1)],
+        ['带位%', fmtN(cl.pos, 0)],
+        ['区域', cl.zone || '—'],
+        ['背离', dv ? `${dv.kind === 'bull' ? '看涨' : '看跌'} ${dv.bars_ago}根前` : '—'],
+      ]],
+      ['路径几何·影子', [
+        ['频率', fmtN((f.pathgeom || {}).chop_freq, 1)],
+        ['主周期', (f.pathgeom || {}).dom_period != null ? `${fmtN(f.pathgeom.dom_period, 0)}根` : '—'],
+        ['τ', signed(fmtN((f.pathgeom || {}).kendall_tau, 2, true))],
+        ['margin(原始树)', (f.margin || {}).margin != null
+          ? `${fmtN(f.margin.margin, 2)}(${f.margin.nearest})` : '—'],
+        ['滞后', (f.lag_bars || {}).pathgeom != null ? `~${f.lag_bars.pathgeom}根` : '—'],
+      ]],
     ];
-    return `<tr>${cells.map(([v, mode, gs]) => {
-      let cls = gs ? 'gs' : '';
-      if (mode === 's' && typeof v === 'string') {
-        if (v.startsWith('+')) cls += ' pos';
-        if (v.startsWith('-')) cls += ' neg';
-      }
-      const align = mode === 'l' ? ' style="text-align:left"' : '';
-      return `<td class="${cls}"${align}>${v}</td>`;
-    }).join('')}</tr>`;
+    groups.forEach(([group, entries]) => entries.forEach(([label, value, node]) => {
+      const tr = makeEl('tr');
+      tr.appendChild(makeEl('td', '', tf));
+      tr.appendChild(makeEl('td', '', group));
+      tr.appendChild(makeEl('td', '', label));
+      const descriptor = value && typeof value === 'object' ? value : { text: value, cls: '' };
+      const td = makeEl('td', descriptor.cls || '');
+      if (node) td.appendChild(node);
+      else td.textContent = descriptor.text == null ? '—' : descriptor.text;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }));
   });
-  $('featTable').innerHTML =
-    `<thead><tr>${grpRow}</tr><tr>${colRow}</tr></thead><tbody>${rows.join('')}</tbody>`;
+  table.appendChild(tbody);
 }
 
 function renderFlips() {
   const flips = S.data.flips || [];
   // 后端已先排除 1h 再给 4h/1d 40 条预算；横向时间线仍画 1h 状态。
   const shown = flips;
-  const rows = shown.map((f) =>
-    `<tr><td>${fmtTs(f.ts, '4h')}</td><td>${esc(f.tf)}</td>` +
-    `<td style="text-align:left">${stchip(f.from)} → ${stchip(f.to)}</td>` +
-    `<td>${fmtN(f.confidence, 2)}</td></tr>`);
   // summary 只更新文字，不重建 <details>——保持用户手动展开/收起状态
   const sum = $('flipsSummary');
   if (sum) sum.textContent =
     `翻转明细 ${shown.length} 条（4h/1d · 1h 不列 · 点击展开）`;
-  $('flipTable').innerHTML =
-    '<thead><tr><th>时间 UTC</th><th>TF</th><th>变化</th><th>conf</th></tr></thead>' +
-    `<tbody>${rows.join('') || '<tr><td colspan="4">暂无翻转记录</td></tr>'}</tbody>`;
+  const table = $('flipTable');
+  clearEl(table);
+  const thead = makeEl('thead');
+  const head = makeEl('tr');
+  ['时间 UTC', 'TF', '变化', 'conf'].forEach((label) => head.appendChild(makeEl('th', '', label)));
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const tbody = makeEl('tbody');
+  shown.forEach((f) => {
+    const tr = makeEl('tr');
+    tr.appendChild(makeEl('td', '', fmtTs(f.ts, '4h')));
+    tr.appendChild(makeEl('td', '', f.tf));
+    const transition = makeEl('td');
+    transition.style.textAlign = 'left';
+    transition.appendChild(stchipNode(f.from));
+    transition.appendChild(document.createTextNode(' → '));
+    transition.appendChild(stchipNode(f.to));
+    tr.appendChild(transition);
+    tr.appendChild(makeEl('td', '', fmtN(f.confidence, 2)));
+    tbody.appendChild(tr);
+  });
+  if (!shown.length) {
+    const tr = makeEl('tr');
+    const td = makeEl('td', '', '暂无翻转记录');
+    td.colSpan = 4;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
 }
 
 function renderCollector() {
@@ -1537,7 +1723,7 @@ function renderCollector() {
   else { stat.textContent = `已停止? · ${ago(c.last_run)}`; stat.className = 'badge bad'; }
   const n = c.counts || {};
   const countText = (key) => n[key] != null ? n[key].toLocaleString('en-US') : '—';
-  $('colInfo').innerHTML = [
+  const collectorMetrics = [
     ['采集间隔', c.interval ? `${c.interval}s` : '—'],
     ['单轮耗时', c.cycle_sec != null ? `${c.cycle_sec}s` : '—'],
     ['K线', countText('ohlcv')],
@@ -1551,12 +1737,21 @@ function renderCollector() {
     ['近端IV', countText('opt_iv_near')],
     ['IV期限曲线', countText('stock_iv_term')],
     ['本轮错误', (c.errors || []).length],
-  ].map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join('');
+  ];
+  const info = $('colInfo');
+  clearEl(info);
+  collectorMetrics.forEach(([k, v]) => {
+    info.appendChild(makeEl('span', '', k));
+    info.appendChild(makeEl('b', '', v));
+  });
   const allCounts = Object.entries(n).sort(([a], [b]) => a.localeCompare(b));
   $('colCountsSummary').textContent = `全部业务表（${allCounts.length}）`;
-  $('colCountsAll').innerHTML = allCounts.map(([table, count]) =>
-    `<span>${esc(table)}</span><b>${Number(count).toLocaleString('en-US')}</b>`
-  ).join('');
+  const counts = $('colCountsAll');
+  clearEl(counts);
+  allCounts.forEach(([table, count]) => {
+    counts.appendChild(makeEl('span', '', table));
+    counts.appendChild(makeEl('b', '', Number(count).toLocaleString('en-US')));
+  });
   $('colLog').textContent = (c.log_tail || []).join('\n') || '（暂无日志）';
   const lg = $('colLog');
   lg.scrollTop = lg.scrollHeight;
@@ -1579,15 +1774,20 @@ function renderHeartbeat() {
   const el = $('hbStrip');
   if (!el) return;
   const lanes = (S.data && S.data.heartbeat) || [];
-  if (!lanes.length) { el.innerHTML = ''; return; }
-  el.innerHTML = lanes.map((l) => {
+  clearEl(el);
+  if (!lanes.length) return;
+  lanes.forEach((l) => {
     const ageTxt = l.age_min == null ? '' :
       l.age_min < 90 ? `${Math.round(l.age_min)}分前` : `${(l.age_min / 60).toFixed(1)}小时前`;
     const stateTxt = { ok: '正常', warn: '迟滞', bad: '断流', idle: '盘外' }[l.state] || l.state;
     const tip = `${l.key}：${stateTxt}${ageTxt ? '·最后落库 ' + ageTxt : ''}（${l.note}）`;
-    return `<span class="lane ${esc(l.state)}" title="${esc(tip)}">` +
-           `<span class="dot"></span>${esc(l.key)}${l.state === 'bad' ? '⚠' : ''}</span>`;
-  }).join('');
+    const safeState = ['ok', 'warn', 'bad', 'idle'].includes(l.state) ? l.state : 'idle';
+    const lane = makeEl('span', `lane ${safeState}`);
+    lane.title = tip;
+    lane.appendChild(makeEl('span', 'dot'));
+    lane.appendChild(document.createTextNode(`${l.key}${l.state === 'bad' ? '⚠' : ''}`));
+    el.appendChild(lane);
+  });
 }
 
 /* ---------- Hermes（历史在服务端 SQLite，面板与终端共享同一份对话） ---------- */
@@ -1656,7 +1856,7 @@ function hermesRenderDraft(draft, assistantEl) {
 
 function hermesRenderAll(messages) {
   const box = $('hermesMsgs');
-  box.innerHTML = '';
+  clearEl(box);
   hermesAdd('bot', HERMES_INTRO);
   messages.forEach((m) => hermesAdd(m.role === 'user' ? 'user' : 'bot', m.content));
 }
