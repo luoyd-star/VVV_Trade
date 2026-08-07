@@ -28,7 +28,34 @@ PACE = 0.7
 # **限频额度是 moomoo 账号级共享的**（2026-08-05 23:31 实测：本轮建链 24 品种
 # ≈97 次请求，与同轮的"实时IV 63 品种批量"挤在一起 → 33 例链请求 ret=-1）。
 # 三条 moomoo 管线各自独立计速，加总才是真实速率——故单轮建链量必须给其他管线留额度。
-BUILD_BATCH = 12
+BUILD_BATCH = 16
+# 为什么是 16，以及**加品种时必须重算这个数**（2026-08-07 实测教训）：
+# 期权链按 ET 日缓存，每个交易日要为全部美股品种重建一次。单日建链容量 =
+#     (RTH 秒数 / BUILD_INTERVAL_S) × BUILD_BATCH × 实测成功率
+# 旧值 BUILD_BATCH=12 配 3600 秒节流，理论容量 6×12=72，是按当时 61 个美股品种
+# 定的（余量 11）。X3 扩容到 71 个后余量只剩 1，而实测每轮只成功约 7 个
+# （批次里的失败照样占名额），真实容量约 6×7=42 —— 每天有近 30 个品种拿不到
+# 期限曲线。实测覆盖：8/05 56 个 → 8/06 45 个 → 8/07 只剩 13 个。
+# 现值配 1800 秒节流：13 轮 × 16 × 0.58 ≈ 121，对 71 个品种留 70% 余量。
+# 单轮请求量 16×3=48 次 × PACE 0.7s ≈ 34 秒，仍在 300 秒采集周期内，
+# 且比"一轮塞更多"更不容易撞账号级限频——**宁可多轮小批，不要单轮大批**。
+BUILD_INTERVAL_S = 1800   # 起步值，待校准；与 collector.sync_stock_iv_term 的节流同源
+
+
+def build_capacity(n_symbols: int, rth_hours: float = 6.5,
+                   success_rate: float = 0.58) -> dict:
+    """单日建链容量测算——供 collector 自检，别再让扩容悄悄压垮这条管线。
+
+    success_rate 起步值 0.58 来自 2026-08-07 实测（BUILD_BATCH=12 时"本轮补 7"）：
+    批次里的失败品种不会退出 missing 集合，下一轮继续占名额，所以有效吞吐低于批量。
+    """
+    rounds = max(int(rth_hours * 3600 // BUILD_INTERVAL_S), 1)
+    capacity = rounds * BUILD_BATCH * success_rate
+    return {
+        "rounds": rounds, "batch": BUILD_BATCH, "capacity": capacity,
+        "need": n_symbols, "ok": capacity >= n_symbols,
+        "margin_pct": (capacity / n_symbols - 1) * 100 if n_symbols else 0.0,
+    }
 
 
 def pick_expiries(exp_rows, targets=TARGETS) -> dict:

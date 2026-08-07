@@ -205,11 +205,24 @@ def sync_stock_iv_term(conn, symbols) -> tuple:
         return None, []
     if not moomoo_iv.opend_alive():
         return None, []
-    if not _should(conn, "stock_iv_term_last", 3600):
+    # 节流由 stock_iv_term 单源提供：它与 BUILD_BATCH 共同决定单日建链容量，
+    # 分开写必然漂移（旧值 3600 与 BUILD_BATCH=12 是按 61 个品种配的，
+    # 扩容到 71 后容量不够、每天近 30 个品种拿不到曲线，无人察觉）。
+    if not _should(conn, "stock_iv_term_last", stock_iv_term.BUILD_INTERVAL_S):
         return None, []
     us = [s for s in symbols if instruments.get(s)["class"] == "us_stock_perp"]
     if not us:
         return None, []
+    # 容量自检：品种数增长会静默压垮这条管线（链按 ET 日失效，当天补不满就是当天缺）。
+    # 心跳只看"最后落库年龄"，13/71 也是绿的——所以这里必须自己喊。
+    cap = stock_iv_term.build_capacity(len(us))
+    if not cap["ok"]:
+        log.warning(
+            "IV期限链容量不足：%d 品种需建链，单日容量约 %.0f（%d 轮 × 批 %d）"
+            "——今日预计有约 %d 个品种拿不到期限曲线。请调大 BUILD_BATCH 或缩短 BUILD_INTERVAL_S",
+            cap["need"], cap["capacity"], cap["rounds"], cap["batch"],
+            max(int(cap["need"] - cap["capacity"]), 0),
+        )
     try:
         ctx = moomoo_iv.open_ctx()
     except Exception as e:  # noqa: BLE001
