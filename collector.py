@@ -30,7 +30,7 @@ from regime.classify import (
     rolling_states_missing,
 )
 from regime.data import (
-    HEALTHY_BARS, closed_ohlcv, fetch_binance_spot_daily, fetch_binance_vol1h,
+    HEALTHY_BARS, closed_ohlcv, find_scale_breaks, fetch_binance_spot_daily, fetch_binance_vol1h,
     fetch_dvol, fetch_ohlcv, fetch_yahoo_daily,
 )
 from regime.policy import assemble as policy_assemble
@@ -655,6 +655,18 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
                     keep = [t >= int(floor) for t in _t2m(df["ts"])]
                     if not all(keep):
                         df = df[keep].reset_index(drop=True)
+                # 尺度断裂自检（拆股/合约重定标）：既有健康门查不出来——KORU 1:20 拆股
+                # 那次「有数、时间齐、K线合法」三项全过，系统却把它当 −95% 暴跌，
+                # 且 regime/关键位/cRSI 消费同一条坏序列、给出一致但全错的解读。
+                # 只告警不自动清修：清修要删历史行，必须人确认后写 series_floor。
+                for _, bts, bpc, bopen, brr in find_scale_breaks(df):
+                    log.warning(
+                        "%s %s 价格尺度断裂：%s 前收 %.4f → 开 %.4f（比例 %.4f，≈1:%.0f）"
+                        "——疑似拆股/合约重定标。regime/关键位/cRSI 会一起算错，"
+                        "请核对后写 meta series_floor_%s 并清掉断裂前的行",
+                        sym, tf, str(bts)[:19], bpc, bopen, brr,
+                        (1 / brr) if brr < 1 else brr, sym,
+                    )
                 storage.upsert_ohlcv(conn, sym, tf, df, src)
                 # 只有理论收线时刻尚未来到时，末根才是 live bar。若源在休市期间
                 # 只返回已收线历史，末根进入幂等 OHLCV upsert，不再被按位置误删。

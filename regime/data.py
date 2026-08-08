@@ -68,6 +68,39 @@ def _deribit_instrument(symbol: str) -> str:
     return f"{base}_USDC-PERPETUAL"  # Deribit 线性永续命名，如 SOL_USDC-PERPETUAL
 
 
+SCALE_BREAK_RATIO = 3.0   # 起步值，待校准；相邻两根价格比超过此倍数即判尺度断裂
+
+
+def find_scale_breaks(df: pd.DataFrame, ratio: float = SCALE_BREAK_RATIO) -> list:
+    """找出价格尺度断裂点（拆股 / 合约重定标），返回 [(位置, ts, 前收, 后开, 比例)]。
+
+    **为什么必须有这道门**（2026-08-08 实测事故）：KORU 在 2026-07-15 做了 1:20 拆股，
+    前一根收 481.11、下一根开 22.68。既有健康门只查"有没有数、时间齐不齐、
+    K 线是否合法"——**三项全部通过**，于是系统把它当成 −95% 的真实暴跌：
+    连续判 trend_down、ATR/BBW 分位冲到 0.992、方向分 −0.998。
+
+    最难发现的一点是 regime、关键位、cRSI **消费的是同一条坏序列**，
+    所以三层给出的是**一致但全错**的解读——没有任何一层会报警，因为它们互相印证。
+    这次是靠人肉发现的，污染已持续三周。
+
+    判据用"相邻两根之比"而不是收益率阈值：真实行情单根 3 倍以上的变动极为罕见，
+    而拆股/重定标必然跨过这个量级。宁可偶尔误报（人看一眼即可排除），
+    也不能漏报——漏报的代价是三层一起说谎。
+    """
+    if len(df) < 2:
+        return []
+    prev_close = df["close"].shift(1)
+    r = df["open"] / prev_close
+    hits = []
+    for i, (rr, pc) in enumerate(zip(r, prev_close)):
+        if not np.isfinite(rr) or not np.isfinite(pc) or pc <= 0:
+            continue
+        if rr > ratio or rr < 1.0 / ratio:
+            ts = df["ts"].iloc[i]
+            hits.append((i, ts, float(pc), float(df["open"].iloc[i]), float(rr)))
+    return hits
+
+
 def assert_no_gaps(df: pd.DataFrame, timeframe: str, source: str) -> None:
     """已收盘序列中间不得有缺口。
 
