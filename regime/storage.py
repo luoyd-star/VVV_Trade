@@ -30,6 +30,19 @@ CREATE TABLE IF NOT EXISTS regime_history(
   state TEXT, confidence REAL,
   PRIMARY KEY(symbol, tf, ts)
 );
+CREATE TABLE IF NOT EXISTS setup_history(
+  symbol TEXT NOT NULL, ts INTEGER NOT NULL,
+  regime_4h TEXT, regime_1d TEXT,
+  at TEXT, zone_lo REAL, zone_hi REAL, zone_kinds TEXT,
+  dist_atr REAL, approach TEXT, tradeable INTEGER, meaning TEXT,
+  role_flipped INTEGER,
+  crsi_4h REAL, crsi_1d REAL, crsi_1h REAL,
+  crsi_pos_4h REAL, crsi_pos_1d REAL, crsi_pos_1h REAL,
+  main_ok INTEGER, score INTEGER, grade TEXT, play TEXT,
+  price REAL, atr REAL,
+  rules_version TEXT NOT NULL, assemble_version TEXT NOT NULL,
+  PRIMARY KEY(symbol, ts)
+);
 CREATE TABLE IF NOT EXISTS deriv(
   symbol TEXT NOT NULL, ts INTEGER NOT NULL,
   oi REAL, oi_notional REAL, funding REAL, premium REAL, taker_ratio REAL, iv30 REAL, kind TEXT,
@@ -279,11 +292,24 @@ def _invalidate_if_revised(conn, symbol: str, tf: str, rows) -> None:
             "DELETE FROM regime_history WHERE symbol=? AND tf=? AND ts>=?",
             (symbol, tf, first_changed),
         ).rowcount
+        # setup 同时消费 4h/1d/1h。任一输入序列的历史被修订，都必须让受影响
+        # 的机会快照失效；否则扫描水位会把旧装配结果永久当成已完成。setup.ts
+        # 是 4h 开盘时刻，所以把输入 bar 的收线时刻换算回最早可能受影响的
+        # 4h 开盘时刻。删除后不伪造 middle 行，下一轮由扫描水位自然重建。
+        setup_cutoff = first_changed + _TF_MS[tf] - _TF_MS["4h"]
+        n_setup = conn.execute(
+            "DELETE FROM setup_history WHERE symbol=? AND ts>=?",
+            (symbol, setup_cutoff),
+        ).rowcount
+        # setup_history 是稀疏表（middle 不落库），不能只靠已有 ts 判断哪些
+        # middle 已经扫过；版本化水位负责这件事。历史修订后清掉该品种所有
+        # setup 扫描水位，宁可保守重扫，也不能跨过修订点。
+        conn.execute("DELETE FROM meta WHERE key LIKE ?", (f"setup_scan:{symbol}:%",))
         conn.commit()
-        if n:
+        if n or n_setup:
             __import__("logging").getLogger("storage").warning(
-                "%s %s 检测到 K 线修订（首个变更 ts=%d）→ 已失效 %d 行状态，本轮将重算",
-                symbol, tf, first_changed, n,
+                "%s %s 检测到 K 线修订（首个变更 ts=%d）→ 已失效 %d 行状态、%d 行机会，本轮将重算",
+                symbol, tf, first_changed, n, n_setup,
             )
 
 
@@ -390,6 +416,165 @@ def state_ts_set(conn, symbol: str, tf: str, version: str = None,
             (symbol, tf, version, audit_version),
         ).fetchall()
     return {r[0] for r in rows}
+
+
+_SETUP_COLUMNS = (
+    "symbol", "ts", "regime_4h", "regime_1d", "at", "zone_lo", "zone_hi",
+    "zone_kinds", "dist_atr", "approach", "tradeable", "meaning",
+    "role_flipped", "crsi_4h", "crsi_1d", "crsi_1h", "crsi_pos_4h",
+    "crsi_pos_1d", "crsi_pos_1h", "main_ok", "score", "grade", "play",
+    "price", "atr", "rules_version", "assemble_version",
+)
+
+
+def setup_ts_set(conn, symbol: str, rules_version: str = None,
+                 assemble_version: str = None) -> set:
+    """当前代际已经落库的 setup ts；任一版本不匹配都视为缺失。
+
+    与 :func:`state_ts_set` 相同，版本谓词让“升版即重算”不依赖清空表。
+    setup_history 是稀疏表，本函数只回答真正落库的机会行；已扫描但因
+    middle 未落库的 bar 由 ``setup_scan_watermark`` 单独记账。
+    """
+    try:
+        if rules_version is None or assemble_version is None:
+            rows = conn.execute(
+                "SELECT ts FROM setup_history WHERE symbol=?", (symbol,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT ts FROM setup_history WHERE symbol=?"
+                " AND rules_version=? AND assemble_version=?",
+                (symbol, rules_version, assemble_version),
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        # 默认 dry-run 必须能读取尚未执行迁移的生产库，且绝不能为此建表。
+        if "no such table" not in str(exc).lower():
+            raise
+        return set()
+    return {int(row[0]) for row in rows}
+
+
+def _setup_scan_key(symbol: str, rules_version: str,
+                    assemble_version: str) -> str:
+    return f"setup_scan:{symbol}:{rules_version}:{assemble_version}"
+
+
+def setup_scan_watermark(conn, symbol: str, rules_version: str,
+                         assemble_version: str):
+    """返回该品种/代际已完整扫描到的 4h 开盘 ts；未扫描为 ``None``。"""
+    value = get_meta(
+        conn, _setup_scan_key(symbol, rules_version, assemble_version), None,
+    )
+    return int(value) if value is not None else None
+
+
+def replace_setup_scan(
+    conn,
+    symbol: str,
+    processed_ts,
+    rows,
+    *,
+    rules_version: str,
+    assemble_version: str,
+    scanned_through: int = None,
+) -> int:
+    """原子提交一次稀疏 setup 扫描，并推进版本化水位。
+
+    ``processed_ts`` 包含本次真正重算的 middle；先逐 ts 删除旧代际结果，再
+    只插入当前仍在关键区间的行。``scanned_through`` 还可越过版本谓词已经确认
+    为当前代际的 setup 行。这样 policy 升版后“旧 setup 变 middle”不会残留，
+    水位与行同事务提交，崩溃时也不会出现“水位已前进、行没写完”的永久缺口。
+    """
+    processed = sorted({int(ts) for ts in processed_ts})
+    watermark = (
+        int(scanned_through)
+        if scanned_through is not None
+        else (processed[-1] if processed else None)
+    )
+    if watermark is None:
+        return 0
+    if processed and watermark < processed[-1]:
+        raise ValueError("scanned_through 不能早于已处理的 setup ts")
+    clean_rows = [dict(row) for row in rows]
+    if any(row.get("symbol") != symbol for row in clean_rows):
+        raise ValueError("replace_setup_scan 只接受单一 symbol")
+    if any(int(row.get("ts")) not in set(processed) for row in clean_rows):
+        raise ValueError("setup 行 ts 不在本次 processed_ts 中")
+    if any(row.get("rules_version") != rules_version
+           or row.get("assemble_version") != assemble_version
+           for row in clean_rows):
+        raise ValueError("setup 行版本与扫描代际不一致")
+
+    placeholders = ",".join("?" for _ in _SETUP_COLUMNS)
+    updates = ",".join(
+        f"{column}=excluded.{column}"
+        for column in _SETUP_COLUMNS if column not in {"symbol", "ts"}
+    )
+    processed_set = set(processed)
+    params = []
+    for row in clean_rows:
+        raw = dict(row)
+        raw["zone_kinds"] = json.dumps(
+            raw.get("zone_kinds") or [], ensure_ascii=False, separators=(",", ":"),
+        )
+        for key in ("tradeable", "role_flipped", "main_ok"):
+            value = raw.get(key)
+            raw[key] = None if value is None else int(bool(value))
+        params.append(tuple(raw.get(column) for column in _SETUP_COLUMNS))
+
+    with conn:
+        conn.executemany(
+            "DELETE FROM setup_history WHERE symbol=? AND ts=?",
+            [(symbol, ts) for ts in processed_set],
+        )
+        if params:
+            conn.executemany(
+                f"INSERT INTO setup_history({','.join(_SETUP_COLUMNS)})"
+                f" VALUES({placeholders}) ON CONFLICT(symbol,ts) DO UPDATE SET {updates}",
+                params,
+            )
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (
+                _setup_scan_key(symbol, rules_version, assemble_version),
+                str(watermark),
+            ),
+        )
+    return len(params)
+
+
+def get_setup_history(conn, symbol: str = None, since_ts: int = 0) -> list[dict]:
+    """读取 setup 稀疏历史，并附上各品种最新 4h 观察水位供生命周期判定。"""
+    where = "WHERE sh.ts>=?"
+    params: list = [int(since_ts)]
+    if symbol is not None:
+        where += " AND sh.symbol=?"
+        params.append(symbol)
+    try:
+        rows = conn.execute(
+            "SELECT " + ",".join(f"sh.{column}" for column in _SETUP_COLUMNS)
+            + ", (SELECT MAX(o.ts) FROM ohlcv o"
+              " WHERE o.symbol=sh.symbol AND o.tf='4h') AS observed_through_ts"
+            + f" FROM setup_history sh {where} ORDER BY sh.symbol,sh.ts",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        return []
+    out = []
+    for raw in rows:
+        item = dict(zip((*_SETUP_COLUMNS, "observed_through_ts"), raw))
+        try:
+            item["zone_kinds"] = json.loads(item.get("zone_kinds") or "[]")
+        except (TypeError, ValueError):
+            item["zone_kinds"] = []
+        for key in ("tradeable", "role_flipped", "main_ok"):
+            if item.get(key) is not None:
+                item[key] = bool(item[key])
+        out.append(item)
+    return out
 
 
 def upsert_states(conn, symbol: str, tf: str, rows, commit: bool = True) -> None:

@@ -20,10 +20,16 @@ const MEANING = {
   high_vol_reduce_frequency: '高波环境，policy 建议降频降仓',
   middle_zone_veto: '中间区域，默认观望',
 };
+const BREWING_TREND = {
+  '收敛中': { label: '收敛↓', className: 'trend-converging' },
+  '发散中': { label: '发散↑', className: 'trend-diverging' },
+  '横盘': { label: '横盘→', className: 'trend-flat' },
+};
 
 const $ = (id) => document.getElementById(id);
 const view = {
   data: null, nextRefresh: Date.now() + REFRESH_MS, loadSeq: 0,
+  brewingShowExpired: false,
   hermes: { busy: false, lastId: 0, syncSeq: 0 },
 };
 const pad = (n) => String(n).padStart(2, '0');
@@ -176,6 +182,76 @@ function renderCompact(id, items, emptyText) {
   items.forEach((item) => host.appendChild(compactLink(item)));
 }
 
+function brewingTrendMeta(value) {
+  return BREWING_TREND[value] || { label: `${value || '趋势未知'}→`, className: 'trend-flat' };
+}
+
+function brewingSortKey(item) {
+  // 收敛方向比绝对距离更重要：先让用户看见正在靠近门槛的过程，再比较还差多少点。
+  const trendRank = item.gap_trend === '收敛中' ? 0 : 1;
+  const gap = Number(item.gap_now);
+  return [trendRank, Number.isFinite(gap) ? gap : Number.POSITIVE_INFINITY, String(item.symbol || '')];
+}
+
+function compareBrewing(left, right) {
+  const a = brewingSortKey(left);
+  const b = brewingSortKey(right);
+  return a[0] - b[0] || a[1] - b[1] || a[2].localeCompare(b[2]);
+}
+
+function brewingLocationText(item) {
+  const labels = { at_support: '支撑区', at_resistance: '压力区' };
+  const raw = item.at || '位置不可用';
+  return `${labels[raw] || raw}（${raw}） · ${stateMeta(item.regime_4h).label}`;
+}
+
+function renderBrewing(items) {
+  const section = $('brewingSection');
+  const host = $('brewing');
+  const toggle = $('brewingExpiredToggle');
+  const all = Array.isArray(items) ? items : [];
+  host.replaceChildren();
+  if (!all.length) {
+    section.hidden = true;
+    $('brewingCount').textContent = '0';
+    toggle.hidden = true;
+    return;
+  }
+
+  const hasExpired = all.some((item) => item.status === 'expired');
+  const visible = all
+    .filter((item) => view.brewingShowExpired || item.status !== 'expired')
+    .slice()
+    .sort(compareBrewing);
+  section.hidden = false;
+  $('brewingCount').textContent = String(visible.length);
+  toggle.hidden = !hasExpired;
+  toggle.textContent = view.brewingShowExpired ? '隐藏已失效' : '查看已失效';
+  toggle.setAttribute('aria-pressed', view.brewingShowExpired ? 'true' : 'false');
+
+  visible.forEach((item) => {
+    const trend = brewingTrendMeta(item.gap_trend);
+    const row = makeLink(item.symbol, `brewing-row ${trend.className}`
+      + (item.status === 'expired' ? ' is-expired' : ''));
+    appendText(row, 'brewing-symbol', item.symbol || '未知品种');
+    appendText(row, 'brewing-location', brewingLocationText(item));
+    appendText(row, 'brewing-play', item.play || '暂无匹配剧本');
+
+    const bars = Number(item.bars);
+    const barsText = Number.isFinite(bars) && bars >= 0 ? String(Math.trunc(bars)) : '—';
+    const daysText = Number.isFinite(bars) && bars >= 0 ? (bars / 6).toFixed(1) : '—';
+    appendText(row, 'brewing-age', `已持续 ${barsText} 根 4h（约 ${daysText} 天）`);
+
+    const signal = document.createElement('span');
+    signal.className = 'brewing-signal';
+    appendText(signal, '', `4h cRSI ${fmtNumber(item.crsi_last, 1)}`);
+    appendText(signal, '', `距门槛 ${fmtNumber(item.gap_now, 1)} 点`);
+    appendText(signal, `brewing-trend ${trend.className}`, trend.label);
+    row.appendChild(signal);
+    host.appendChild(row);
+  });
+}
+
 function renderRisk(items) {
   const host = $('risk');
   host.replaceChildren();
@@ -247,6 +323,7 @@ function render(data) {
     'waitSignal', data.wait_signal || [],
     '当前没有等待信号的位置候选',
   );
+  renderBrewing(data.brewing || []);
   renderCompact('near', data.near || [], '当前无接近但尚未满足门槛的关键位');
   renderRisk(data.risk || []);
   renderCompact('middle', data.middle || [], '当前无中间区域品种');
@@ -454,6 +531,10 @@ function hermesToggle(show) {
 }
 
 $('hermesSend').onclick = hermesSend;
+$('brewingExpiredToggle').onclick = () => {
+  view.brewingShowExpired = !view.brewingShowExpired;
+  renderBrewing((view.data || {}).brewing || []);
+};
 $('hermesClear').onclick = hermesClear;
 $('hermesClose').onclick = () => hermesToggle(false);
 $('hermesToggle').onclick = () => hermesToggle();

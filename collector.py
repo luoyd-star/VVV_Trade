@@ -33,6 +33,8 @@ from regime.data import (
     HEALTHY_BARS, closed_ohlcv, fetch_binance_spot_daily, fetch_binance_vol1h,
     fetch_dvol, fetch_ohlcv, fetch_yahoo_daily,
 )
+from regime.policy import assemble as policy_assemble
+from regime.policy import tracking as setup_tracking
 from regime.deriv import backfill as deriv_backfill
 from regime.deriv import fetch_snapshot as deriv_snapshot
 from regime.deriv import fetch_funding_history as deriv_funding_history
@@ -69,8 +71,11 @@ DEFAULT_SYMBOLS = (
     "SKHYNIX-USDT,KORU-USDT,EWT-USDT,QCOM-USDT,KLAC-USDT,LRCX-USDT,TER-USDT,"
     "COHR-USDT,CRDO-USDT,WDC-USDT,DRAM-USDT"
 )
+SETUP_BARS_PER_CYCLE = 2000
 DEFAULT_TFS = "1d,4h,1h"
 DVOL_CURRENCIES = ("BTC", "ETH")
+# 起步值，待校准；单轮 setup 装配的全局根数预算。实测约 30 根/秒，
+# 2000 根 ≈ 65 秒，留在 300 秒采集周期内且不挤压 IV 建链。
 
 
 def setup_logging() -> None:
@@ -726,6 +731,18 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
     # 币安 1h 量流（VWAP 专用量源，全品种统一取币安——量最大；与 OHLCV 主源解耦）。
     # 冷启动回填 VOL1H_TARGET 根（覆盖 1d 的 480h 窗 + 250 根分位参照期），
     # 之后按水位增量。失败不拖累其他采集。
+    # setup 装配的**全局预算**：首轮水位为空时目标是全部历史，实测约 30 根/秒、
+    # 85 品种 6.8 万根 ≈ 38 分钟，会把整个采集轮堵死（2026-08-07 实测把 RTH 的
+    # IV 建链饿死过）。用全局根数预算把单轮耗时钉住，跨轮收敛；轮换起点保证
+    # 预算用尽时靠后的品种下一轮优先，不会永久排不上。
+    budget = {"bars": SETUP_BARS_PER_CYCLE}
+    try:
+        setup_start = int(storage.get_meta(conn, "setup_scan_offset", 0) or 0)
+    except (TypeError, ValueError):
+        setup_start = 0
+    setup_order = symbols[setup_start % len(symbols):] + symbols[:setup_start % len(symbols)] \
+        if symbols else []
+    setup_done = 0
     for sym in symbols:
         try:
             added = sync_vol1h(conn, sym)
@@ -838,6 +855,23 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
         log.info("%s", msg)
     errors.extend(errs)
 
+    # setup 装配单独成段：它依赖本轮 1d/4h/1h OHLCV 与 vol1h 都已同步。
+    for sym in setup_order:
+        if budget["bars"] <= 0:
+            break
+        try:
+            scanned, written = sync_setup_history(conn, sym, budget=budget)
+            if scanned:
+                setup_done += 1
+                log.info("setup %s: 扫描+%d 根，关键区间+%d 行（本轮余额 %d）",
+                         sym, scanned, written, budget["bars"])
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"setup {sym}: {e}")
+            log.warning("setup %s 失败: %s", sym, e)
+    if setup_order:
+        storage.set_meta(conn, "setup_scan_offset",
+                         str((setup_start + max(setup_done, 1)) % len(setup_order)))
+
     bases = {s.upper().replace("/", "-").split("-")[0] for s in symbols}
     for currency in sorted(bases & set(DVOL_CURRENCIES)):
         try:
@@ -848,6 +882,90 @@ def cycle(conn, symbols, timeframes, source_order) -> list:
             errors.append(f"DVOL {currency}: {e}")
             log.warning("DVOL %s 失败: %s", currency, e)
     return errors
+
+
+def sync_setup_history(conn, symbol: str, budget: dict | None = None) -> tuple[int, int]:
+    """增量装配一个品种的 4h setup；返回（扫描 bar 数，落库 setup 数）。
+
+    setup_history 故意不写 middle，因此不能把“表里没有该 ts”直接解释成未算。
+    版本化扫描水位记录稀疏表之外的完成度；历史修订会在 storage 入口清掉水位，
+    RULES/ASSEMBLE 任一升版则自然换一条新水位，从而重建而非混版。
+    """
+    rules_version = setup_tracking.RULES_GENERATION
+    assemble_version = policy_assemble.ASSEMBLE_VERSION
+    frame_4h = storage.get_ohlcv(
+        conn, symbol, "4h", limit=10_000 + FEATURE_WINDOW - 1,
+    )
+    if not len(frame_4h):
+        return 0, 0
+    all_ts = storage.ts_to_ms(frame_4h["ts"])
+    watermark = storage.setup_scan_watermark(
+        conn, symbol, rules_version, assemble_version,
+    )
+    targets = [int(ts) for ts in all_ts if watermark is None or int(ts) > watermark]
+    if not targets:
+        return 0, 0
+    # 全局预算裁剪：只取本轮还付得起的前 N 根。**必须按时间升序取前缀**——
+    # walk-forward 的水位语义是"扫到这里为止"，取中间一段会让水位跳过未算的根。
+    if budget is not None:
+        room = max(int(budget.get("bars", 0)), 0)
+        if room <= 0:
+            return 0, 0
+        targets = targets[:room]
+        budget["bars"] = room - len(targets)
+    # setup_history 里的已有行只有两个版本都匹配才可跳过。middle 没有行，仍会
+    # 进入 missing_targets；扫描完成后由水位记住，下一轮不再重复计算。
+    existing = storage.setup_ts_set(
+        conn, symbol, rules_version, assemble_version,
+    )
+    missing_targets = [ts for ts in targets if ts not in existing]
+
+    frames = {
+        "4h": frame_4h,
+        # 1h/1d 只供 cRSI 辅助票；400 根是 assemble 自己公开的统一上下文。
+        "1h": storage.get_ohlcv(
+            conn, symbol, "1h", limit=10_000 + FEATURE_WINDOW - 1,
+        ),
+        "1d": storage.get_ohlcv(
+            conn, symbol, "1d", limit=10_000 + FEATURE_WINDOW - 1,
+        ),
+    }
+    timelines = {
+        tf: storage.get_states(conn, symbol, tf, limit=100_000)
+        for tf in policy_assemble.POLICY_RESONANCE_TFS
+    }
+    vol1h = storage.get_vol1h(
+        conn,
+        symbol,
+        since_ms=(
+            min(targets) - setup_tracking.VOL1H_LOOKBACK_HOURS * 3_600_000
+        ),
+    )
+    if missing_targets:
+        processed, rows = setup_tracking.walk_forward(
+            symbol,
+            ohlcv_by_tf=frames,
+            regime_by_tf=timelines,
+            instrument=instruments.get(symbol),
+            target_ts=missing_targets,
+            vol1h=vol1h,
+            rules_version=rules_version,
+            assemble_version=assemble_version,
+        )
+    else:
+        processed, rows = [], []
+    written = storage.replace_setup_scan(
+        conn,
+        symbol,
+        processed,
+        rows,
+        rules_version=rules_version,
+        assemble_version=assemble_version,
+        # targets 已按预算裁剪过，max 就是本轮真正扫到的位置——不能用全量的 max，
+        # 否则被预算切掉的那些根会被水位永久跳过、再也不会补算。
+        scanned_through=max(targets),
+    )
+    return len(targets), written
 
 
 def _status_payload(interval: int, elapsed: float, errors: list) -> dict:

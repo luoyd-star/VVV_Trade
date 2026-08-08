@@ -48,6 +48,30 @@
   .compact-display { color: var(--muted); margin-left: 6px; font-family: inherit; font-weight: 400; }
   .compact-meaning { color: var(--sub); }
   .compact-tail { color: var(--muted); text-align: right; }
+  .brewing-section { color: var(--sub); }
+  .brewing-title { color: var(--sub); }
+  .brewing-toggle { margin-left: auto; font-size: var(--fs-lbl); }
+  .brewing-list { border: 1px solid var(--grid); background: rgba(124,133,149,.035); }
+  .brewing-row { display: grid; grid-template-columns: minmax(120px, .75fr) minmax(190px, 1.25fr)
+                 minmax(200px, 1.6fr) minmax(170px, 1.15fr) minmax(230px, 1.45fr);
+                 align-items: center; gap: 12px; padding: 8px 11px; color: inherit;
+                 text-decoration: none; border-left: 3px solid var(--muted);
+                 border-bottom: 1px solid var(--grid); font-size: 11.5px; }
+  .brewing-row:last-child { border-bottom: none; }
+  .brewing-row:hover { background: var(--card2); }
+  .brewing-row.trend-converging { border-left-color: #5f35c9; }
+  .brewing-row.trend-diverging { border-left-color: #a87c05; }
+  .brewing-row.trend-flat { border-left-color: #7c8595; }
+  .brewing-row.is-expired { opacity: .62; }
+  .brewing-symbol { font-family: var(--mono); font-weight: 700; color: var(--ink); }
+  .brewing-play { color: var(--sub); }
+  .brewing-age { color: var(--muted); }
+  .brewing-signal { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 9px; }
+  .brewing-trend { padding: 2px 6px; border: 1px solid currentColor; border-radius: 10px;
+                   font-weight: 700; white-space: nowrap; }
+  .brewing-trend.trend-converging { color: #5f35c9; background: rgba(95,53,201,.07); }
+  .brewing-trend.trend-diverging { color: #8a6604; background: rgba(168,124,5,.08); }
+  .brewing-trend.trend-flat { color: #687180; background: rgba(124,133,149,.08); }
   .risk-list .compact-row { grid-template-columns: minmax(150px, 1fr) 3fr; }
   .risk-text { color: var(--bad-fg); line-height: 1.5; }
   .overview-fold { background: var(--card); border: 1px solid var(--border); margin-bottom: 12px; }
@@ -64,6 +88,7 @@
     .overview-main { padding: 14px 12px 28px; }
     .opp-grid { grid-template-columns: 1fr; }
     .compact-row { grid-template-columns: 1fr; gap: 3px; }
+    .brewing-row { grid-template-columns: 1fr; gap: 3px; }
     .compact-tail { text-align: left; }
     .risk-list .compact-row, .unavailable-row { grid-template-columns: 1fr; }
   }
@@ -99,6 +124,17 @@
     <div class="overview-title" id="waitSignalTitle"><b>▸ 位置候选</b><span class="count" id="waitSignalCount">0</span>
       <span class="sub">位置已成立，等待 4h 主票；按距关键位 ATR 升序</span></div>
     <div class="opp-grid" id="waitSignal"></div>
+  </section>
+
+  <section class="overview-section brewing-section" id="brewingSection"
+           aria-labelledby="brewingTitle" hidden>
+    <div class="overview-title brewing-title" id="brewingTitle"><b>▸ 酝酿中</b>
+      <span class="count" id="brewingCount">0</span>
+      <span class="sub">跨 4h 跟踪形成过程 · 不是交易信号</span>
+      <button class="hbtn brewing-toggle" id="brewingExpiredToggle" type="button"
+              aria-pressed="false" hidden>查看已失效</button>
+    </div>
+    <div class="brewing-list" id="brewing"></div>
   </section>
 
   <section class="overview-section" aria-labelledby="nearTitle">
